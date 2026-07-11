@@ -159,7 +159,18 @@ def _curses_main(stdscr):
 
 
 def main():
-    curses.wrapper(_curses_main)
+    # librtlsdr prints "Exact sample rate is: X Hz" to C-level stderr on every
+    # sample-rate change. Redirect fd 2 to /dev/null for the curses session so
+    # those writes don't corrupt the terminal, then restore on exit.
+    devnull  = os.open(os.devnull, os.O_WRONLY)
+    saved_fd = os.dup(2)
+    os.dup2(devnull, 2)
+    os.close(devnull)
+    try:
+        curses.wrapper(_curses_main)
+    finally:
+        os.dup2(saved_fd, 2)
+        os.close(saved_fd)
 
 
 if __name__ == '__main__':
