@@ -8,7 +8,6 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 from rtlsdr import RtlSdr
 
 CENTER_HZ = 105.8e6   # 105.8 MHz (FM band)
-BW_HZ     = 2.4e6     # 2.4 MHz sample rate / bandwidth
 FFT_BINS  = 512
 
 DB_MAX    = 0.0
@@ -17,14 +16,23 @@ DB_RANGE  = DB_MAX - DB_MIN
 
 LABEL_W   = 7          # left dB axis width: "-110 | "
 
-WINDOW    = np.hanning(FFT_BINS)   # Hann window to reduce spectral leakage
+REFRESH_S = 0.15       # seconds between frames (~7 fps) — reduces flicker
+
+# RTL-SDR stable sample rates in ascending order (Hz)
+BW_STEPS = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
+BW_IDX   = len(BW_STEPS) - 1   # start at maximum (2.4 MHz)
 
 
-def draw_fft_matrix(screen_obj, freqs, mags_db):
+def make_window(n):
+    return np.hanning(n)
+
+
+def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz):
     """
     screen_obj : curses window
     freqs      : 1-D array of frequencies (Hz)
     mags_db    : 1-D array of magnitudes in dBFS, same length as freqs
+    bw_hz      : current bandwidth in Hz (shown in header)
     """
     ROWS, COLS = screen_obj.getmaxyx()
     plot_w = COLS - LABEL_W
@@ -45,7 +53,7 @@ def draw_fft_matrix(screen_obj, freqs, mags_db):
         for r in range(height - bar_height, height):
             out[r][col] = '█'
 
-    screen_obj.clear()
+    screen_obj.erase()
 
     # ── header: lo left | center middle | hi right ───────────────
     f_lo  = "{:.3f} MHz".format(freqs[0] / 1e6)
@@ -78,10 +86,10 @@ def draw_fft_matrix(screen_obj, freqs, mags_db):
         except curses.error:
             pass
 
-    # ── bottom-right hint ─────────────────────────────────────────
-    hint = "ESC to quit"
+    # ── bottom-right: BW + hint ───────────────────────────────────
+    bw_label = "BW {:.3f} MHz  ESC to quit".format(bw_hz / 1e6)
     try:
-        screen_obj.addstr(ROWS - 1, COLS - len(hint) - 1, hint)
+        screen_obj.addstr(ROWS - 1, COLS - len(bw_label) - 1, bw_label)
     except curses.error:
         pass
 
@@ -94,34 +102,58 @@ def _curses_main(stdscr):
     stdscr.keypad(True)
 
     center_hz = CENTER_HZ
-    bucket_hz = BW_HZ / FFT_BINS
+    bw_idx    = BW_IDX
+    bw_hz     = BW_STEPS[bw_idx]
+    window    = make_window(FFT_BINS)
 
     sdr = RtlSdr()
-    sdr.sample_rate = BW_HZ
+    sdr.sample_rate = bw_hz
     sdr.center_freq = center_hz
     sdr.gain        = 'auto'
+
+    last_draw = 0.0
 
     try:
         while True:
             key = stdscr.getch()
-            if key == 27:                   # ESC
+
+            if key == 27:                       # ESC
                 break
+
             elif key == curses.KEY_LEFT:
+                bucket_hz = bw_hz / FFT_BINS
                 center_hz -= bucket_hz
                 sdr.center_freq = center_hz
+
             elif key == curses.KEY_RIGHT:
+                bucket_hz = bw_hz / FFT_BINS
                 center_hz += bucket_hz
                 sdr.center_freq = center_hz
 
-            freqs = np.linspace(center_hz - BW_HZ / 2,
-                                center_hz + BW_HZ / 2,
-                                FFT_BINS)
+            elif key == curses.KEY_UP:
+                if bw_idx < len(BW_STEPS) - 1:
+                    bw_idx += 1
+                    bw_hz = BW_STEPS[bw_idx]
+                    sdr.sample_rate = bw_hz
 
-            samples = sdr.read_samples(FFT_BINS)
-            fft_out = np.fft.fftshift(np.fft.fft(samples * WINDOW, FFT_BINS))
-            mags_db = 20 * np.log10(np.abs(fft_out) / FFT_BINS + 1e-12)
+            elif key == curses.KEY_DOWN:
+                if bw_idx > 0:
+                    bw_idx -= 1
+                    bw_hz = BW_STEPS[bw_idx]
+                    sdr.sample_rate = bw_hz
 
-            draw_fft_matrix(stdscr, freqs, mags_db)
+            # read samples and draw at the target frame rate
+            now = time.monotonic()
+            if now - last_draw >= REFRESH_S:
+                freqs = np.linspace(center_hz - bw_hz / 2,
+                                    center_hz + bw_hz / 2,
+                                    FFT_BINS)
+                samples = sdr.read_samples(FFT_BINS)
+                fft_out = np.fft.fftshift(np.fft.fft(samples * window, FFT_BINS))
+                mags_db = 20 * np.log10(np.abs(fft_out) / FFT_BINS + 1e-12)
+                draw_fft_matrix(stdscr, freqs, mags_db, bw_hz)
+                last_draw = time.monotonic()
+
     finally:
         sdr.close()
 
