@@ -8,7 +8,7 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 from rtlsdr import RtlSdr
 
 CENTER_HZ = 105.8e6   # 105.8 MHz (FM band)
-FFT_BINS  = 512
+FFT_BINS  = 4096      # larger FFT = narrower bins = lower mean noise floor
 
 DB_MAX    = 0.0
 DB_MIN    = -110.0
@@ -16,22 +16,20 @@ DB_RANGE  = DB_MAX - DB_MIN
 
 LABEL_W   = 7          # left dB axis width: "-110 | "
 
-REFRESH_S = 0.15       # seconds between frames (~7 fps) — reduces flicker
-N_AVG     = 32         # FFT frames averaged per display update (~15 dB noise floor gain)
+REFRESH_S = 0.15       # seconds between frames (~7 fps)
+N_AVG     = 8          # frames averaged per update (smooths variance)
 
 # RTL-SDR stable sample rates in ascending order (Hz)
 BW_STEPS = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
 BW_IDX   = len(BW_STEPS) - 1   # start at maximum (2.4 MHz)
 
-
-def make_window(n):
-    return np.hanning(n)
+WINDOW = np.hanning(FFT_BINS)
 
 
 def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz):
     """
     screen_obj : curses window
-    freqs      : 1-D array of frequencies (Hz)
+    freqs      : 1-D array of frequencies (Hz), length FFT_BINS
     mags_db    : 1-D array of magnitudes in dBFS, same length as freqs
     bw_hz      : current bandwidth in Hz (shown in header)
     """
@@ -39,17 +37,21 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz):
     plot_w = COLS - LABEL_W
     height = ROWS - 2           # row 0 = header, rows 1..ROWS-2 = spectrum
 
-    out = [['·'] * plot_w for _ in range(height)]
-
+    # Map FFT bins → display columns, keeping the peak when multiple bins
+    # fall on the same column (common when FFT_BINS >> plot_w)
     freq_min   = float(freqs[0])
     freq_range = float(freqs[-1] - freqs[0]) or 1.0
     col_idx    = np.round((freqs - freq_min) / freq_range * (plot_w - 1)).astype(int)
 
+    col_db = np.full(plot_w, DB_MIN)
     for i, db in enumerate(mags_db):
         col = int(col_idx[i])
-        if not (0 <= col < plot_w):
-            continue
-        db_clamped = max(DB_MIN, min(DB_MAX, float(db)))
+        if 0 <= col < plot_w:
+            col_db[col] = max(col_db[col], float(db))
+
+    out = [['·'] * plot_w for _ in range(height)]
+    for col, db in enumerate(col_db):
+        db_clamped = max(DB_MIN, min(DB_MAX, db))
         bar_height = int((db_clamped - DB_MIN) / DB_RANGE * height)
         for r in range(height - bar_height, height):
             out[r][col] = '█'
@@ -105,7 +107,6 @@ def _curses_main(stdscr):
     center_hz = CENTER_HZ
     bw_idx    = BW_IDX
     bw_hz     = BW_STEPS[bw_idx]
-    window    = make_window(FFT_BINS)
 
     sdr = RtlSdr()
     sdr.sample_rate = bw_hz
@@ -150,13 +151,12 @@ def _curses_main(stdscr):
                                     center_hz + bw_hz / 2,
                                     FFT_BINS)
 
-                # average N_AVG power spectra — noise averages down,
-                # signals stay put; use 10*log10 because we sum |FFT|^2
+                # accumulate power over N_AVG frames then convert to dB
                 samples = sdr.read_samples(FFT_BINS * N_AVG)
                 frames  = samples.reshape(N_AVG, FFT_BINS)
                 power   = np.zeros(FFT_BINS)
                 for frame in frames:
-                    fft_out = np.fft.fftshift(np.fft.fft(frame * window, FFT_BINS))
+                    fft_out = np.fft.fftshift(np.fft.fft(frame * WINDOW, FFT_BINS))
                     power  += np.abs(fft_out) ** 2
                 mags_db = 10 * np.log10(power / N_AVG / FFT_BINS ** 2 + 1e-20)
 
