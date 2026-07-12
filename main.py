@@ -74,14 +74,20 @@ def correct_iq(samples):
     return i + 1j * q
 
 
-def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, iq_corr=False, freq_input=None):
+def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz,
+                    iq_corr=False,
+                    gain_mode=False, gain_arrow_row=None, gain_label="auto",
+                    freq_input=None):
     """
-    screen_obj : curses window
-    freqs      : 1-D array of frequencies (Hz), length FFT_BINS
-    mags_db    : 1-D array of magnitudes in dBFS, same length as freqs
-    bw_hz      : current bandwidth in Hz (shown in footer)
-    iq_corr    : current IQ correction state (shown in footer toggle)
-    freq_input : if not None, show frequency edit prompt in the footer
+    screen_obj     : curses window
+    freqs          : 1-D array of frequencies (Hz), length FFT_BINS
+    mags_db        : 1-D array of magnitudes in dBFS, same length as freqs
+    bw_hz          : current bandwidth in Hz (shown in footer)
+    iq_corr        : current IQ correction state (shown in footer toggle)
+    gain_mode      : True while gain control is active (shows arrow + bold label)
+    gain_arrow_row : spectrum row (0 = top) where the gain arrow is drawn
+    gain_label     : gain string shown in footer, e.g. "30.0dB" or "auto"
+    freq_input     : if not None, show frequency edit prompt in the footer
     """
     ROWS, COLS = screen_obj.getmaxyx()
     plot_w = COLS - LABEL_W
@@ -133,7 +139,10 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, iq_corr=False, freq_input
 
     for r in range(height):
         db_at_row = DB_MAX - (r / height) * DB_RANGE
-        label = "{:4.0f} | ".format(db_at_row) if r in db_ticks else "     | "
+        label     = "{:4.0f} | ".format(db_at_row) if r in db_ticks else "     | "
+        # inject gain arrow: replace the space before '|' with '>'
+        if gain_mode and gain_arrow_row is not None and r == gain_arrow_row:
+            label = label[:4] + ">| "
         try:
             screen_obj.addstr(r + 1, 0, label + ''.join(out[r]))
         except curses.error:
@@ -150,8 +159,13 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, iq_corr=False, freq_input
             iq_tag  = "[IQ:ON] " if iq_corr else "[IQ:off]"
             iq_attr = curses.A_BOLD if iq_corr else curses.A_DIM
             screen_obj.addstr(ROWS - 1, 0, iq_tag, iq_attr)
+
+            g_tag  = " [G:{}]".format(gain_label)
+            g_attr = curses.A_BOLD if gain_mode else curses.A_NORMAL
+            screen_obj.addstr(ROWS - 1, len(iq_tag), g_tag, g_attr)
+
             # Right: BW + key hints
-            rhs = "BW {}  I=IQ  F=freq  ESC".format(fmt_freq(bw_hz))
+            rhs = "BW {}  G=gain  I=IQ  F=freq  ESC".format(fmt_freq(bw_hz))
             screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
     except curses.error:
         pass
@@ -168,6 +182,7 @@ def _curses_main(stdscr):
     bw_idx      = BW_IDX
     bw_hz       = BW_STEPS[bw_idx]
     iq_corr     = False
+    gain_mode   = False
     freq_input  = None          # None = normal mode, str = editing mode
     last_mags   = None          # last computed spectrum (reused during editing)
     last_freqs  = np.linspace(center_hz - bw_hz / 2,
@@ -178,6 +193,21 @@ def _curses_main(stdscr):
     sdr.sample_rate = bw_hz
     sdr.center_freq = center_hz
     sdr.gain        = 'auto'
+
+    valid_gains = sorted(sdr.valid_gains_db)   # e.g. [0.0, 0.9, 1.4, … 49.6]
+    gain_auto   = True
+    gain_idx    = len(valid_gains) // 2        # mid-range starting point
+
+
+    def gain_arrow_row(height):
+        """Map gain_idx → spectrum row (0 = top = max gain)."""
+        if gain_auto or not valid_gains:
+            return height // 2
+        max_idx = len(valid_gains) - 1
+        return height - 1 - round(gain_idx / max_idx * (height - 1))
+
+    def gain_label():
+        return "auto" if gain_auto else "{:.1f}dB".format(valid_gains[gain_idx])
 
     last_draw = 0.0
 
@@ -211,13 +241,38 @@ def _curses_main(stdscr):
                 # Redraw immediately to reflect the updated input string.
                 # Reuse the last spectrum so we don't stall waiting for SDR reads.
                 if last_mags is not None:
+                    _h = stdscr.getmaxyx()[0] - 2
                     draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
-                                    iq_corr, freq_input)
+                                    iq_corr, gain_mode,
+                                    gain_arrow_row(_h), gain_label(),
+                                    freq_input)
+
+            elif gain_mode:
+                # ── gain control mode — only G and arrows active ──
+                if key == ord('g') or key == ord('G'):
+                    gain_mode = False
+
+                elif key == curses.KEY_UP:
+                    if gain_auto:
+                        gain_auto = False      # switch to manual at mid-range
+                    elif gain_idx < len(valid_gains) - 1:
+                        gain_idx += 1
+                    sdr.gain = valid_gains[gain_idx]
+
+                elif key == curses.KEY_DOWN:
+                    if gain_auto:
+                        gain_auto = False
+                    elif gain_idx > 0:
+                        gain_idx -= 1
+                    sdr.gain = valid_gains[gain_idx]
 
             else:
                 # ── normal mode ───────────────────────────────────
                 if key == 27:                           # ESC — quit
                     break
+
+                elif key == ord('g') or key == ord('G'):
+                    gain_mode = True
 
                 elif key == ord('f') or key == ord('F'):
                     freq_input = ""
@@ -263,8 +318,10 @@ def _curses_main(stdscr):
                     last_mags = 10 * np.log10(
                         power / N_AVG / FFT_BINS ** 2 + 1e-20)
 
+                    _h = stdscr.getmaxyx()[0] - 2
                     draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
-                                    iq_corr)
+                                    iq_corr, gain_mode,
+                                    gain_arrow_row(_h), gain_label())
                     last_draw = time.monotonic()
 
             # Yield the CPU when idle rather than spinning
