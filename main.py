@@ -26,6 +26,16 @@ BW_IDX   = len(BW_STEPS) - 1   # start at maximum (2.4 MHz)
 WINDOW = np.hanning(FFT_BINS)
 
 
+def fmt_freq(hz):
+    """Format a frequency in the most readable unit without losing precision."""
+    if abs(hz) >= 1e6:
+        return "{:.3f} MHz".format(hz / 1e6)
+    elif abs(hz) >= 1e3:
+        return "{:.3f} kHz".format(hz / 1e3)
+    else:
+        return "{:.0f} Hz".format(hz)
+
+
 def parse_freq(s):
     """Parse a frequency string to Hz.
     Accepts: 105.8M / 105.8m  →  MHz
@@ -81,9 +91,9 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, freq_input=None):
     screen_obj.erase()
 
     # ── header: lo left | center middle | hi right ───────────────
-    f_lo  = "{:.3f} MHz".format(freqs[0] / 1e6)
-    f_ctr = "{:.3f} MHz".format((freqs[0] + freqs[-1]) / 2e6)
-    f_hi  = "{:.3f} MHz".format(freqs[-1] / 1e6)
+    f_lo  = fmt_freq(freqs[0])
+    f_ctr = fmt_freq((freqs[0] + freqs[-1]) / 2)
+    f_hi  = fmt_freq(freqs[-1])
 
     ctr_col   = LABEL_W + (plot_w - len(f_ctr)) // 2
     right_col = COLS - len(f_hi)
