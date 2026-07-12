@@ -17,6 +17,7 @@ DB_RANGE  = DB_MAX - DB_MIN
 LABEL_W   = 7          # left dB axis width: "-110 | "
 
 REFRESH_S = 0.15       # seconds between frames (~7 fps) — reduces flicker
+N_AVG     = 32         # FFT frames averaged per display update (~15 dB noise floor gain)
 
 # RTL-SDR stable sample rates in ascending order (Hz)
 BW_STEPS = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
@@ -148,9 +149,17 @@ def _curses_main(stdscr):
                 freqs = np.linspace(center_hz - bw_hz / 2,
                                     center_hz + bw_hz / 2,
                                     FFT_BINS)
-                samples = sdr.read_samples(FFT_BINS)
-                fft_out = np.fft.fftshift(np.fft.fft(samples * window, FFT_BINS))
-                mags_db = 20 * np.log10(np.abs(fft_out) / FFT_BINS + 1e-12)
+
+                # average N_AVG power spectra — noise averages down,
+                # signals stay put; use 10*log10 because we sum |FFT|^2
+                samples = sdr.read_samples(FFT_BINS * N_AVG)
+                frames  = samples.reshape(N_AVG, FFT_BINS)
+                power   = np.zeros(FFT_BINS)
+                for frame in frames:
+                    fft_out = np.fft.fftshift(np.fft.fft(frame * window, FFT_BINS))
+                    power  += np.abs(fft_out) ** 2
+                mags_db = 10 * np.log10(power / N_AVG / FFT_BINS ** 2 + 1e-20)
+
                 draw_fft_matrix(stdscr, freqs, mags_db, bw_hz)
                 last_draw = time.monotonic()
 
