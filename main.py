@@ -57,12 +57,30 @@ def parse_freq(s):
         return None
 
 
-def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, freq_input=None):
+def correct_iq(samples):
+    """Software IQ correction — three stages applied in order:
+    1. DC offset removal  (kills the center-frequency spike)
+    2. Amplitude balance  (equalises I and Q power → reduces mirror images)
+    3. Phase balance      (orthogonalises I/Q → further reduces mirror images)
+    """
+    samples = samples - np.mean(samples)
+    i, q    = samples.real.copy(), samples.imag.copy()
+    i_pwr   = np.mean(i ** 2)
+    q_pwr   = np.mean(q ** 2)
+    if q_pwr > 0:
+        q *= np.sqrt(i_pwr / q_pwr)
+    if i_pwr > 0:
+        q -= (np.mean(i * q) / i_pwr) * i
+    return i + 1j * q
+
+
+def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, iq_corr=False, freq_input=None):
     """
     screen_obj : curses window
     freqs      : 1-D array of frequencies (Hz), length FFT_BINS
     mags_db    : 1-D array of magnitudes in dBFS, same length as freqs
     bw_hz      : current bandwidth in Hz (shown in footer)
+    iq_corr    : current IQ correction state (shown in footer toggle)
     freq_input : if not None, show frequency edit prompt in the footer
     """
     ROWS, COLS = screen_obj.getmaxyx()
@@ -121,16 +139,20 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, freq_input=None):
         except curses.error:
             pass
 
-    # ── bottom row: freq input prompt OR bw/quit hint ─────────────
+    # ── bottom row ────────────────────────────────────────────────
     try:
         if freq_input is not None:
             prompt = "Freq: {}_".format(freq_input)
-            hint   = "  RET=ok  ESC=cancel"
             screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
-            screen_obj.addstr(ROWS - 1, len(prompt), hint)
+            screen_obj.addstr(ROWS - 1, len(prompt), "  RET=ok  ESC=cancel")
         else:
-            bw_label = "BW {:.3f} MHz  ESC to quit  F=set freq".format(bw_hz / 1e6)
-            screen_obj.addstr(ROWS - 1, COLS - len(bw_label) - 1, bw_label)
+            # Left: toggle indicators
+            iq_tag  = "[IQ:ON] " if iq_corr else "[IQ:off]"
+            iq_attr = curses.A_BOLD if iq_corr else curses.A_DIM
+            screen_obj.addstr(ROWS - 1, 0, iq_tag, iq_attr)
+            # Right: BW + key hints
+            rhs = "BW {}  I=IQ  F=freq  ESC".format(fmt_freq(bw_hz))
+            screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
     except curses.error:
         pass
 
@@ -145,6 +167,7 @@ def _curses_main(stdscr):
     center_hz   = CENTER_HZ
     bw_idx      = BW_IDX
     bw_hz       = BW_STEPS[bw_idx]
+    iq_corr     = False
     freq_input  = None          # None = normal mode, str = editing mode
     last_mags   = None          # last computed spectrum (reused during editing)
     last_freqs  = np.linspace(center_hz - bw_hz / 2,
@@ -189,7 +212,7 @@ def _curses_main(stdscr):
                 # Reuse the last spectrum so we don't stall waiting for SDR reads.
                 if last_mags is not None:
                     draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
-                                    freq_input)
+                                    iq_corr, freq_input)
 
             else:
                 # ── normal mode ───────────────────────────────────
@@ -198,6 +221,9 @@ def _curses_main(stdscr):
 
                 elif key == ord('f') or key == ord('F'):
                     freq_input = ""
+
+                elif key == ord('i') or key == ord('I'):
+                    iq_corr = not iq_corr
 
                 elif key == curses.KEY_LEFT:
                     center_hz -= bw_hz / FFT_BINS
@@ -229,13 +255,16 @@ def _curses_main(stdscr):
                     frames  = samples.reshape(N_AVG, FFT_BINS)
                     power   = np.zeros(FFT_BINS)
                     for frame in frames:
+                        if iq_corr:
+                            frame = correct_iq(frame)
                         fft_out = np.fft.fftshift(
                             np.fft.fft(frame * WINDOW, FFT_BINS))
                         power += np.abs(fft_out) ** 2
                     last_mags = 10 * np.log10(
                         power / N_AVG / FFT_BINS ** 2 + 1e-20)
 
-                    draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz)
+                    draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
+                                    iq_corr)
                     last_draw = time.monotonic()
 
             # Yield the CPU when idle rather than spinning
