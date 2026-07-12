@@ -26,12 +26,34 @@ BW_IDX   = len(BW_STEPS) - 1   # start at maximum (2.4 MHz)
 WINDOW = np.hanning(FFT_BINS)
 
 
-def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz):
+def parse_freq(s):
+    """Parse a frequency string to Hz.
+    Accepts: 105.8M / 105.8m  →  MHz
+             10k / 10.4K      →  kHz
+             1400000          →  Hz
+    Returns float Hz or None on error.
+    """
+    s = s.strip()
+    if not s:
+        return None
+    try:
+        if s[-1] in ('M', 'm'):
+            return float(s[:-1]) * 1e6
+        elif s[-1] in ('K', 'k'):
+            return float(s[:-1]) * 1e3
+        else:
+            return float(s)
+    except ValueError:
+        return None
+
+
+def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz, freq_input=None):
     """
     screen_obj : curses window
     freqs      : 1-D array of frequencies (Hz), length FFT_BINS
     mags_db    : 1-D array of magnitudes in dBFS, same length as freqs
-    bw_hz      : current bandwidth in Hz (shown in header)
+    bw_hz      : current bandwidth in Hz (shown in footer)
+    freq_input : if not None, show frequency edit prompt in the footer
     """
     ROWS, COLS = screen_obj.getmaxyx()
     plot_w = COLS - LABEL_W
@@ -89,10 +111,16 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz):
         except curses.error:
             pass
 
-    # ── bottom-right: BW + hint ───────────────────────────────────
-    bw_label = "BW {:.3f} MHz  ESC to quit".format(bw_hz / 1e6)
+    # ── bottom row: freq input prompt OR bw/quit hint ─────────────
     try:
-        screen_obj.addstr(ROWS - 1, COLS - len(bw_label) - 1, bw_label)
+        if freq_input is not None:
+            prompt = "Freq: {}_".format(freq_input)
+            hint   = "  RET=ok  ESC=cancel"
+            screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+            screen_obj.addstr(ROWS - 1, len(prompt), hint)
+        else:
+            bw_label = "BW {:.3f} MHz  ESC to quit  F=set freq".format(bw_hz / 1e6)
+            screen_obj.addstr(ROWS - 1, COLS - len(bw_label) - 1, bw_label)
     except curses.error:
         pass
 
@@ -104,9 +132,14 @@ def _curses_main(stdscr):
     stdscr.nodelay(True)
     stdscr.keypad(True)
 
-    center_hz = CENTER_HZ
-    bw_idx    = BW_IDX
-    bw_hz     = BW_STEPS[bw_idx]
+    center_hz   = CENTER_HZ
+    bw_idx      = BW_IDX
+    bw_hz       = BW_STEPS[bw_idx]
+    freq_input  = None          # None = normal mode, str = editing mode
+    last_mags   = None          # last computed spectrum (reused during editing)
+    last_freqs  = np.linspace(center_hz - bw_hz / 2,
+                              center_hz + bw_hz / 2,
+                              FFT_BINS)
 
     sdr = RtlSdr()
     sdr.sample_rate = bw_hz
@@ -119,49 +152,85 @@ def _curses_main(stdscr):
         while True:
             key = stdscr.getch()
 
-            if key == 27:                       # ESC
-                break
+            if freq_input is not None:
+                # ── frequency edit mode ───────────────────────────
+                if key == 27:                           # ESC — discard
+                    freq_input = None
 
-            elif key == curses.KEY_LEFT:
-                bucket_hz = bw_hz / FFT_BINS
-                center_hz -= bucket_hz
-                sdr.center_freq = center_hz
+                elif key in (10, 13, curses.KEY_ENTER): # RET — commit
+                    parsed = parse_freq(freq_input)
+                    if parsed is not None:
+                        center_hz = parsed
+                        sdr.center_freq = center_hz
+                        last_freqs = np.linspace(center_hz - bw_hz / 2,
+                                                 center_hz + bw_hz / 2,
+                                                 FFT_BINS)
+                    freq_input = None
 
-            elif key == curses.KEY_RIGHT:
-                bucket_hz = bw_hz / FFT_BINS
-                center_hz += bucket_hz
-                sdr.center_freq = center_hz
+                elif key in (curses.KEY_BACKSPACE, 127, 8):
+                    freq_input = freq_input[:-1]
 
-            elif key == curses.KEY_UP:
-                if bw_idx < len(BW_STEPS) - 1:
-                    bw_idx += 1
-                    bw_hz = BW_STEPS[bw_idx]
-                    sdr.sample_rate = bw_hz
+                elif 32 <= key <= 126:
+                    c = chr(key)
+                    if c in '0123456789.kKmM':
+                        freq_input += c
 
-            elif key == curses.KEY_DOWN:
-                if bw_idx > 0:
-                    bw_idx -= 1
-                    bw_hz = BW_STEPS[bw_idx]
-                    sdr.sample_rate = bw_hz
+                # Redraw immediately to reflect the updated input string.
+                # Reuse the last spectrum so we don't stall waiting for SDR reads.
+                if last_mags is not None:
+                    draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
+                                    freq_input)
 
-            # read samples and draw at the target frame rate
-            now = time.monotonic()
-            if now - last_draw >= REFRESH_S:
-                freqs = np.linspace(center_hz - bw_hz / 2,
-                                    center_hz + bw_hz / 2,
-                                    FFT_BINS)
+            else:
+                # ── normal mode ───────────────────────────────────
+                if key == 27:                           # ESC — quit
+                    break
 
-                # accumulate power over N_AVG frames then convert to dB
-                samples = sdr.read_samples(FFT_BINS * N_AVG)
-                frames  = samples.reshape(N_AVG, FFT_BINS)
-                power   = np.zeros(FFT_BINS)
-                for frame in frames:
-                    fft_out = np.fft.fftshift(np.fft.fft(frame * WINDOW, FFT_BINS))
-                    power  += np.abs(fft_out) ** 2
-                mags_db = 10 * np.log10(power / N_AVG / FFT_BINS ** 2 + 1e-20)
+                elif key == ord('f') or key == ord('F'):
+                    freq_input = ""
 
-                draw_fft_matrix(stdscr, freqs, mags_db, bw_hz)
-                last_draw = time.monotonic()
+                elif key == curses.KEY_LEFT:
+                    center_hz -= bw_hz / FFT_BINS
+                    sdr.center_freq = center_hz
+
+                elif key == curses.KEY_RIGHT:
+                    center_hz += bw_hz / FFT_BINS
+                    sdr.center_freq = center_hz
+
+                elif key == curses.KEY_UP:
+                    if bw_idx < len(BW_STEPS) - 1:
+                        bw_idx += 1
+                        bw_hz = BW_STEPS[bw_idx]
+                        sdr.sample_rate = bw_hz
+
+                elif key == curses.KEY_DOWN:
+                    if bw_idx > 0:
+                        bw_idx -= 1
+                        bw_hz = BW_STEPS[bw_idx]
+                        sdr.sample_rate = bw_hz
+
+                # Read and draw at the target frame rate
+                now = time.monotonic()
+                if now - last_draw >= REFRESH_S:
+                    last_freqs = np.linspace(center_hz - bw_hz / 2,
+                                             center_hz + bw_hz / 2,
+                                             FFT_BINS)
+                    samples = sdr.read_samples(FFT_BINS * N_AVG)
+                    frames  = samples.reshape(N_AVG, FFT_BINS)
+                    power   = np.zeros(FFT_BINS)
+                    for frame in frames:
+                        fft_out = np.fft.fftshift(
+                            np.fft.fft(frame * WINDOW, FFT_BINS))
+                        power += np.abs(fft_out) ** 2
+                    last_mags = 10 * np.log10(
+                        power / N_AVG / FFT_BINS ** 2 + 1e-20)
+
+                    draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz)
+                    last_draw = time.monotonic()
+
+            # Yield the CPU when idle rather than spinning
+            if key == -1:
+                time.sleep(0.005)
 
     finally:
         sdr.close()
