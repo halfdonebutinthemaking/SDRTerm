@@ -22,7 +22,7 @@ N_AVG      = 8          # FFT frames averaged per update
 GAIN_MIN   = 0.0
 GAIN_MAX   = 49.6
 GAIN_STEP  = 0.5
-GAIN_DEF   = 30.0       # starting manual gain (dB)
+GAIN_DEF   = 0.0        # starting manual gain (dB)
 
 # RTL-SDR stable sample rates in ascending order (Hz)
 BW_STEPS = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
@@ -185,7 +185,7 @@ def _curses_main(stdscr):
     iq_corr    = False
     gain_mode  = False
     gain_db    = GAIN_DEF   # manual gain value; applied when gain_mode entered
-    gain_auto  = True       # True until user first enters gain mode
+    gain_auto  = False      # start in manual gain mode
     freq_input = None
     last_mags  = None
     last_freqs = np.linspace(center_hz - bw_hz / 2,
@@ -194,7 +194,7 @@ def _curses_main(stdscr):
     sdr = RtlSdr()
     sdr.sample_rate = bw_hz
     sdr.center_freq = center_hz
-    sdr.gain        = 'auto'
+    sdr.gain        = gain_db
 
     last_draw = 0.0
 
