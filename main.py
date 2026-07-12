@@ -7,21 +7,26 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 
 from rtlsdr import RtlSdr
 
-CENTER_HZ = 105.8e6   # 105.8 MHz (FM band)
-FFT_BINS  = 4096      # larger FFT = narrower bins = lower mean noise floor
+CENTER_HZ  = 105.8e6   # 105.8 MHz (FM band)
+FFT_BINS   = 4096      # larger FFT = narrower bins = lower mean noise floor
 
-DB_MAX    = 0.0
-DB_MIN    = -110.0
-DB_RANGE  = DB_MAX - DB_MIN
+DB_MAX     = 0.0
+DB_MIN     = -110.0
+DB_RANGE   = DB_MAX - DB_MIN
 
-LABEL_W   = 7          # left dB axis width: "-110 | "
+LABEL_W    = 7          # dB axis width: "-110 | "
 
-REFRESH_S = 0.15       # seconds between frames (~7 fps)
-N_AVG     = 8          # frames averaged per update (smooths variance)
+REFRESH_S  = 0.15       # seconds between frames (~7 fps)
+N_AVG      = 8          # FFT frames averaged per update
+
+GAIN_MIN   = 0.0
+GAIN_MAX   = 49.6
+GAIN_STEP  = 0.5
+GAIN_DEF   = 30.0       # starting manual gain (dB)
 
 # RTL-SDR stable sample rates in ascending order (Hz)
 BW_STEPS = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
-BW_IDX   = len(BW_STEPS) - 1   # start at maximum (2.4 MHz)
+BW_IDX   = len(BW_STEPS) - 1
 
 WINDOW = np.hanning(FFT_BINS)
 
@@ -37,12 +42,7 @@ def fmt_freq(hz):
 
 
 def parse_freq(s):
-    """Parse a frequency string to Hz.
-    Accepts: 105.8M / 105.8m  →  MHz
-             10k / 10.4K      →  kHz
-             1400000          →  Hz
-    Returns float Hz or None on error.
-    """
+    """Parse Hz / kHz (k) / MHz (M) string → float Hz, or None on error."""
     s = s.strip()
     if not s:
         return None
@@ -58,15 +58,15 @@ def parse_freq(s):
 
 
 def correct_iq(samples):
-    """Software IQ correction — three stages applied in order:
-    1. DC offset removal  (kills the center-frequency spike)
-    2. Amplitude balance  (equalises I and Q power → reduces mirror images)
-    3. Phase balance      (orthogonalises I/Q → further reduces mirror images)
+    """Software IQ correction:
+    1. DC offset removal  (kills the centre-frequency spike)
+    2. Amplitude balance  (equalises I/Q power → reduces mirror images)
+    3. Phase balance      (orthogonalises I/Q → further reduces mirrors)
     """
     samples = samples - np.mean(samples)
-    i, q    = samples.real.copy(), samples.imag.copy()
-    i_pwr   = np.mean(i ** 2)
-    q_pwr   = np.mean(q ** 2)
+    i, q  = samples.real.copy(), samples.imag.copy()
+    i_pwr = np.mean(i ** 2)
+    q_pwr = np.mean(q ** 2)
     if q_pwr > 0:
         q *= np.sqrt(i_pwr / q_pwr)
     if i_pwr > 0:
@@ -76,25 +76,24 @@ def correct_iq(samples):
 
 def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz,
                     iq_corr=False,
-                    gain_mode=False, gain_arrow_row=None, gain_label="auto",
+                    gain_mode=False, gain_db=GAIN_DEF, gain_auto=True,
                     freq_input=None):
     """
-    screen_obj     : curses window
-    freqs          : 1-D array of frequencies (Hz), length FFT_BINS
-    mags_db        : 1-D array of magnitudes in dBFS, same length as freqs
-    bw_hz          : current bandwidth in Hz (shown in footer)
-    iq_corr        : current IQ correction state (shown in footer toggle)
-    gain_mode      : True while gain control is active (shows arrow + bold label)
-    gain_arrow_row : spectrum row (0 = top) where the gain arrow is drawn
-    gain_label     : gain string shown in footer, e.g. "30.0dB" or "auto"
-    freq_input     : if not None, show frequency edit prompt in the footer
+    screen_obj : curses window
+    freqs      : 1-D array of frequencies (Hz), length FFT_BINS
+    mags_db    : 1-D array of magnitudes in dBFS, same length as freqs
+    bw_hz      : current bandwidth in Hz
+    iq_corr    : IQ correction toggle state
+    gain_mode  : True while gain control is active (arrow on axis, bold header)
+    gain_db    : current manual gain value in dB
+    gain_auto  : True if SDR is in auto-gain mode
+    freq_input : if not None, show frequency edit prompt in the footer
     """
     ROWS, COLS = screen_obj.getmaxyx()
     plot_w = COLS - LABEL_W
-    height = ROWS - 2           # row 0 = header, rows 1..ROWS-2 = spectrum
+    height = ROWS - 2       # row 0 = header, rows 1..ROWS-2 = spectrum
 
-    # Map FFT bins → display columns, keeping the peak when multiple bins
-    # fall on the same column (common when FFT_BINS >> plot_w)
+    # ── build spectrum columns (peak per column) ──────────────────
     freq_min   = float(freqs[0])
     freq_range = float(freqs[-1] - freqs[0]) or 1.0
     col_idx    = np.round((freqs - freq_min) / freq_range * (plot_w - 1)).astype(int)
@@ -114,34 +113,42 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz,
 
     screen_obj.erase()
 
-    # ── header: lo left | center middle | hi right ───────────────
-    f_lo  = fmt_freq(freqs[0])
-    f_ctr = fmt_freq((freqs[0] + freqs[-1]) / 2)
-    f_hi  = fmt_freq(freqs[-1])
+    # ── header: [Gain: X] f_lo ·········· f_ctr ·········· f_hi ──
+    g_str    = "[Gain: auto] " if gain_auto else "[Gain: {:.1f} dB] ".format(gain_db)
+    f_lo     = fmt_freq(freqs[0])
+    f_ctr    = fmt_freq((freqs[0] + freqs[-1]) / 2)
+    f_hi     = fmt_freq(freqs[-1])
 
     ctr_col   = LABEL_W + (plot_w - len(f_ctr)) // 2
     right_col = COLS - len(f_hi)
 
-    header = (" " * LABEL_W + f_lo).ljust(ctr_col) + f_ctr
+    header = (g_str + f_lo).ljust(ctr_col) + f_ctr
     header = header.ljust(right_col) + f_hi
 
+    g_attr = curses.A_BOLD if gain_mode else curses.A_NORMAL
     try:
-        screen_obj.addstr(0, 0, header[:COLS], curses.A_BOLD)
+        screen_obj.addstr(0, 0, header[:COLS], g_attr)
     except curses.error:
         pass
 
-    # ── spectrum rows with dB tick marks every 10 dB ─────────────
+    # ── spectrum rows with dB ticks and optional gain arrow ───────
     db_ticks = set()
     for db_mark in range(int(DB_MAX), int(DB_MIN) - 1, -10):
         row = int((DB_MAX - db_mark) / DB_RANGE * height)
         if 0 <= row < height:
             db_ticks.add(row)
 
+    # Gain arrow: top row = GAIN_MAX, bottom row = GAIN_MIN
+    arrow_row = None
+    if gain_mode and not gain_auto:
+        arrow_row = height - 1 - round(
+            (gain_db - GAIN_MIN) / (GAIN_MAX - GAIN_MIN) * (height - 1))
+        arrow_row = max(0, min(height - 1, arrow_row))
+
     for r in range(height):
         db_at_row = DB_MAX - (r / height) * DB_RANGE
-        label     = "{:4.0f} | ".format(db_at_row) if r in db_ticks else "     | "
-        # inject gain arrow: replace the space before '|' with '>'
-        if gain_mode and gain_arrow_row is not None and r == gain_arrow_row:
+        label = "{:4.0f} | ".format(db_at_row) if r in db_ticks else "     | "
+        if r == arrow_row:
             label = label[:4] + ">| "
         try:
             screen_obj.addstr(r + 1, 0, label + ''.join(out[r]))
@@ -155,17 +162,11 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz,
             screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
             screen_obj.addstr(ROWS - 1, len(prompt), "  RET=ok  ESC=cancel")
         else:
-            # Left: toggle indicators
             iq_tag  = "[IQ:ON] " if iq_corr else "[IQ:off]"
             iq_attr = curses.A_BOLD if iq_corr else curses.A_DIM
             screen_obj.addstr(ROWS - 1, 0, iq_tag, iq_attr)
 
-            g_tag  = " [G:{}]".format(gain_label)
-            g_attr = curses.A_BOLD if gain_mode else curses.A_NORMAL
-            screen_obj.addstr(ROWS - 1, len(iq_tag), g_tag, g_attr)
-
-            # Right: BW + key hints
-            rhs = "BW {}  G=gain  I=IQ  F=freq  ESC".format(fmt_freq(bw_hz))
+            rhs = "BW {}  G=gain  I=IQ  F=freq  Q=quit".format(fmt_freq(bw_hz))
             screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
     except curses.error:
         pass
@@ -178,38 +179,30 @@ def _curses_main(stdscr):
     stdscr.nodelay(True)
     stdscr.keypad(True)
 
-    center_hz   = CENTER_HZ
-    bw_idx      = BW_IDX
-    bw_hz       = BW_STEPS[bw_idx]
-    iq_corr     = False
-    gain_mode   = False
-    freq_input  = None          # None = normal mode, str = editing mode
-    last_mags   = None          # last computed spectrum (reused during editing)
-    last_freqs  = np.linspace(center_hz - bw_hz / 2,
-                              center_hz + bw_hz / 2,
-                              FFT_BINS)
+    center_hz  = CENTER_HZ
+    bw_idx     = BW_IDX
+    bw_hz      = BW_STEPS[bw_idx]
+    iq_corr    = False
+    gain_mode  = False
+    gain_db    = GAIN_DEF   # manual gain value; applied when gain_mode entered
+    gain_auto  = True       # True until user first enters gain mode
+    freq_input = None
+    last_mags  = None
+    last_freqs = np.linspace(center_hz - bw_hz / 2,
+                             center_hz + bw_hz / 2, FFT_BINS)
 
     sdr = RtlSdr()
     sdr.sample_rate = bw_hz
     sdr.center_freq = center_hz
     sdr.gain        = 'auto'
 
-    valid_gains = sorted(sdr.valid_gains_db)   # e.g. [0.0, 0.9, 1.4, … 49.6]
-    gain_auto   = True
-    gain_idx    = len(valid_gains) // 2        # mid-range starting point
-
-
-    def gain_arrow_row(height):
-        """Map gain_idx → spectrum row (0 = top = max gain)."""
-        if gain_auto or not valid_gains:
-            return height // 2
-        max_idx = len(valid_gains) - 1
-        return height - 1 - round(gain_idx / max_idx * (height - 1))
-
-    def gain_label():
-        return "auto" if gain_auto else "{:.1f}dB".format(valid_gains[gain_idx])
-
     last_draw = 0.0
+
+    def redraw():
+        if last_mags is not None:
+            draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
+                            iq_corr, gain_mode, gain_db, gain_auto,
+                            freq_input)
 
     try:
         while True:
@@ -217,10 +210,9 @@ def _curses_main(stdscr):
 
             if freq_input is not None:
                 # ── frequency edit mode ───────────────────────────
-                if key == 27:                           # ESC — discard
+                if key == 27:
                     freq_input = None
-
-                elif key in (10, 13, curses.KEY_ENTER): # RET — commit
+                elif key in (10, 13, curses.KEY_ENTER):
                     parsed = parse_freq(freq_input)
                     if parsed is not None:
                         center_hz = parsed
@@ -229,53 +221,43 @@ def _curses_main(stdscr):
                                                  center_hz + bw_hz / 2,
                                                  FFT_BINS)
                     freq_input = None
-
                 elif key in (curses.KEY_BACKSPACE, 127, 8):
                     freq_input = freq_input[:-1]
-
-                elif 32 <= key <= 126:
-                    c = chr(key)
-                    if c in '0123456789.kKmM':
-                        freq_input += c
-
-                # Redraw immediately to reflect the updated input string.
-                # Reuse the last spectrum so we don't stall waiting for SDR reads.
-                if last_mags is not None:
-                    _h = stdscr.getmaxyx()[0] - 2
-                    draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
-                                    iq_corr, gain_mode,
-                                    gain_arrow_row(_h), gain_label(),
-                                    freq_input)
+                elif 32 <= key <= 126 and chr(key) in '0123456789.kKmM':
+                    freq_input += chr(key)
+                redraw()
 
             elif gain_mode:
-                # ── gain control mode — only G and arrows active ──
+                # ── gain control mode — left/right adjust gain ────
                 if key == ord('g') or key == ord('G'):
                     gain_mode = False
+                    redraw()
 
                 elif key == curses.KEY_UP:
-                    if gain_auto:
-                        gain_auto = False      # switch to manual at mid-range
-                    elif gain_idx < len(valid_gains) - 1:
-                        gain_idx += 1
-                    sdr.gain = valid_gains[gain_idx]
+                    gain_db = min(GAIN_MAX, gain_db + GAIN_STEP)
+                    sdr.gain = gain_db
+                    redraw()
 
                 elif key == curses.KEY_DOWN:
-                    if gain_auto:
-                        gain_auto = False
-                    elif gain_idx > 0:
-                        gain_idx -= 1
-                    sdr.gain = valid_gains[gain_idx]
+                    gain_db = max(GAIN_MIN, gain_db - GAIN_STEP)
+                    sdr.gain = gain_db
+                    redraw()
 
             else:
                 # ── normal mode ───────────────────────────────────
-                if key == 27:                           # ESC — quit
+                if key == ord('q') or key == ord('Q'):
                     break
 
                 elif key == ord('g') or key == ord('G'):
                     gain_mode = True
+                    if gain_auto:
+                        gain_auto = False
+                        sdr.gain  = gain_db
+                    redraw()
 
                 elif key == ord('f') or key == ord('F'):
                     freq_input = ""
+                    redraw()
 
                 elif key == ord('i') or key == ord('I'):
                     iq_corr = not iq_corr
@@ -300,31 +282,26 @@ def _curses_main(stdscr):
                         bw_hz = BW_STEPS[bw_idx]
                         sdr.sample_rate = bw_hz
 
-                # Read and draw at the target frame rate
-                now = time.monotonic()
-                if now - last_draw >= REFRESH_S:
-                    last_freqs = np.linspace(center_hz - bw_hz / 2,
-                                             center_hz + bw_hz / 2,
-                                             FFT_BINS)
-                    samples = sdr.read_samples(FFT_BINS * N_AVG)
-                    frames  = samples.reshape(N_AVG, FFT_BINS)
-                    power   = np.zeros(FFT_BINS)
-                    for frame in frames:
-                        if iq_corr:
-                            frame = correct_iq(frame)
-                        fft_out = np.fft.fftshift(
-                            np.fft.fft(frame * WINDOW, FFT_BINS))
-                        power += np.abs(fft_out) ** 2
-                    last_mags = 10 * np.log10(
-                        power / N_AVG / FFT_BINS ** 2 + 1e-20)
+            # ── read + draw at target frame rate ──────────────────
+            now = time.monotonic()
+            if now - last_draw >= REFRESH_S:
+                last_freqs = np.linspace(center_hz - bw_hz / 2,
+                                         center_hz + bw_hz / 2, FFT_BINS)
+                samples = sdr.read_samples(FFT_BINS * N_AVG)
+                frames  = samples.reshape(N_AVG, FFT_BINS)
+                power   = np.zeros(FFT_BINS)
+                for frame in frames:
+                    if iq_corr:
+                        frame = correct_iq(frame)
+                    fft_out = np.fft.fftshift(
+                        np.fft.fft(frame * WINDOW, FFT_BINS))
+                    power += np.abs(fft_out) ** 2
+                last_mags = 10 * np.log10(
+                    power / N_AVG / FFT_BINS ** 2 + 1e-20)
+                draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
+                                iq_corr, gain_mode, gain_db, gain_auto)
+                last_draw = time.monotonic()
 
-                    _h = stdscr.getmaxyx()[0] - 2
-                    draw_fft_matrix(stdscr, last_freqs, last_mags, bw_hz,
-                                    iq_corr, gain_mode,
-                                    gain_arrow_row(_h), gain_label())
-                    last_draw = time.monotonic()
-
-            # Yield the CPU when idle rather than spinning
             if key == -1:
                 time.sleep(0.005)
 
