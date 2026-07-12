@@ -166,7 +166,7 @@ def draw_fft_matrix(screen_obj, freqs, mags_db, bw_hz,
             iq_attr = curses.A_BOLD if iq_corr else curses.A_DIM
             screen_obj.addstr(ROWS - 1, 0, iq_tag, iq_attr)
 
-            rhs = "BW {}  G=gain  I=IQ  F=freq  Q=quit".format(fmt_freq(bw_hz))
+            rhs = "BW {}  A=auto  G=gain  I=IQ  F=freq  Q=quit".format(fmt_freq(bw_hz))
             screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
     except curses.error:
         pass
@@ -257,6 +257,14 @@ def _curses_main(stdscr):
 
                 elif key == ord('f') or key == ord('F'):
                     freq_input = ""
+                    redraw()
+
+                elif key == ord('a') or key == ord('A'):
+                    gain_auto = not gain_auto
+                    if gain_auto:
+                        sdr.gain = 'auto'
+                    else:
+                        sdr.gain = gain_db
                     redraw()
 
                 elif key == ord('i') or key == ord('I'):
