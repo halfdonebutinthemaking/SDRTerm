@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-import os, time, curses, queue, threading
+import os, time, curses, threading
+from collections import deque
 import numpy as np
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -25,8 +26,15 @@ GAIN_STEP  = 0.5
 GAIN_DEF   = 0.0
 BW_STEPS   = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
 AUDIO_RATE = 48_000
+# rtlsdr_read_sync triggers LIBUSB_ERROR_OVERFLOW above a hardware-dependent
+# limit.  16 384 samples (32 768 bytes) matches one librtlsdr async-callback
+# frame and is reliably safe across all sample rates on macOS.
+READ_MAX   = 16_384    # samples per rtlsdr_read_sync call
 
-WINDOW = np.hanning(FFT_BINS)
+WINDOW     = np.hanning(FFT_BINS)
+FM_BW_MIN  = 30_000
+FM_BW_MAX  = 200_000
+FM_BW_STEP = 10_000
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -58,6 +66,7 @@ def correct_iq(samples):
     return i + 1j * q
 
 
+
 # ── AppState ──────────────────────────────────────────────────────────────────
 @dataclass
 class AppState:
@@ -70,20 +79,12 @@ class AppState:
     freq_input:      Optional[str] = None
     quit:            bool          = False
     active_decoders: set           = field(default_factory=lambda: {'spectrum'})
+    fm_bw_hz:        int           = 100_000
 
     @property
     def bw_hz(self) -> int:
         return BW_STEPS[self.bw_idx]
 
-    @property
-    def chunk_size(self) -> int:
-        # When FM is active we need enough samples to fill a full refresh period
-        # so the audio stream gets continuous output (2.4 MHz × 0.15 s ≈ 360 k).
-        # SpectrumDecoder always truncates to FFT_BINS * N_AVG before processing.
-        base = FFT_BINS * N_AVG
-        if 'fm' in self.active_decoders:
-            return max(base, int(self.bw_hz * REFRESH_S) + FFT_BINS)
-        return base
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
@@ -122,77 +123,154 @@ class FMDecoder(Decoder):
     min_sample_rate = 2_400_000
 
     def __init__(self):
-        from scipy.signal import firwin, decimate as _dec, lfilter as _lf
-        self._dec   = _dec
-        self._lf    = _lf
-        # audio LPF: keep < 15 kHz (mono FM), applied at AUDIO_RATE after decimation
+        from scipy.signal import cheby1, lfilter, lfilter_zi, firwin
+        import sounddevice as _sd
+        self._sd         = _sd
+        self._lfilter    = lfilter
+        self._lfilter_zi = lfilter_zi
+
+        # Anti-alias IIR filters for two-stage decimation (×10 then ×5).
+        # Built manually (vs scipy.signal.decimate) so we can carry zi between
+        # chunks — decimate() resets to zero initial conditions every call,
+        # causing an audible transient at each chunk boundary.
+        b1, a1 = cheby1(8, 0.05, 0.8 / 10)
+        b2, a2 = cheby1(8, 0.05, 0.8 / 5)
+        self._b1 = b1.astype(np.float64);  self._a1 = a1.astype(np.float64)
+        self._b2 = b2.astype(np.float64);  self._a2 = a2.astype(np.float64)
+
+        # Audio LPF at 15 kHz (applied at AUDIO_RATE after decimation)
         self._lpf_b = firwin(64, 15_000 / (AUDIO_RATE / 2)).astype(np.float32)
-        # 50 µs de-emphasis IIR (European standard; use 75e-6 for North America)
-        tau         = 50e-6
-        dt          = 1.0 / AUDIO_RATE
-        a           = dt / (tau + dt)
-        self._de_b  = np.array([a],           dtype=np.float32)
-        self._de_a  = np.array([1., -(1. - a)], dtype=np.float32)
-        # running peak for soft AGC (slow decay avoids gain-pumping on silence)
-        self._peak  = 0.1
-        self._q     = queue.Queue(maxsize=8)
-        self._stream  = None
-        self._thread  = None
-        self._active  = False
+
+        # 50 µs de-emphasis IIR (EU; use 75e-6 for North America)
+        tau = 50e-6;  dt = 1.0 / AUDIO_RATE;  a = dt / (tau + dt)
+        self._de_b = np.array([a],             dtype=np.float32)
+        self._de_a = np.array([1., -(1. - a)], dtype=np.float32)
+
+        # IF (channel-select) filter — real LPF applied to I and Q separately.
+        # Rebuilt in process() whenever state.fm_bw_hz changes.
+        self._if_bw   = None
+        self._b_if    = None
+        self._a_if    = None
+        self._zi_if_i = None
+        self._zi_if_q = None
+
+        # Filter states — None triggers (re)initialisation on first process()
+        self._zi1    = None
+        self._zi2    = None
+        self._zi_lpf = np.zeros(len(self._lpf_b) - 1, dtype=np.float32)
+        self._zi_de  = np.zeros(1,                    dtype=np.float32)
+
+        # Soft AGC
+        self._peak = 0.1
+
+        # Shared audio buffer: process() appends, PortAudio callback drains.
+        # Protected by a plain threading.Lock — the callback holds it only for
+        # a short slice/concatenate, so contention with the main thread is brief.
+        self._buf_lock  = threading.Lock()
+        self._audio_buf = np.zeros(0, dtype=np.float32)
+
+        self._stream = None
+        self._active = False
+
+    # ── PortAudio callback (runs on audio-hw thread) ───────────────────────────
+    def _audio_callback(self, outdata: np.ndarray, frames: int,
+                        time_info, status) -> None:
+        with self._buf_lock:
+            have = len(self._audio_buf)
+            take = min(have, frames)
+            outdata[:take, 0] = self._audio_buf[:take]
+            outdata[take:, 0] = 0.0           # silence on underrun
+            if take:
+                self._audio_buf = self._audio_buf[take:]
 
     def start(self, state: AppState) -> None:
-        import sounddevice as sd
         self._active = True
-        self._stream = sd.OutputStream(
-            samplerate=AUDIO_RATE, channels=1, dtype='float32', latency='low')
+        # Pre-fill with one chunk of silence so the callback doesn't underrun
+        # during the first blocking read_samples() call (~157 ms at 2.4 MHz).
+        with self._buf_lock:
+            self._audio_buf = np.zeros(int(AUDIO_RATE * 0.20), dtype=np.float32)
+        self._stream = self._sd.OutputStream(
+            samplerate=AUDIO_RATE, channels=1, dtype='float32',
+            latency=0.05, callback=self._audio_callback, blocksize=2048,
+        )
         self._stream.start()
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
 
     def process(self, samples: np.ndarray, state: AppState) -> dict:
-        # instantaneous frequency via conjugate multiplication → FM demod
+        lf = self._lfilter
+
+        # Rebuild IF filter when fm_bw_hz changes
+        if state.fm_bw_hz != self._if_bw:
+            from scipy.signal import cheby1
+            self._if_bw = state.fm_bw_hz
+            wn = min(state.fm_bw_hz / (state.bw_hz / 2), 0.95)
+            b, a = cheby1(6, 0.1, wn)
+            self._b_if = b.astype(np.float64)
+            self._a_if = a.astype(np.float64)
+            self._zi_if_i = self._zi_if_q = None
+
+        # IF filter: same real LPF on I and Q → selects ±fm_bw_hz around centre
+        i_in = samples.real.astype(np.float64)
+        q_in = samples.imag.astype(np.float64)
+        if self._zi_if_i is None:
+            self._zi_if_i = self._lfilter_zi(self._b_if, self._a_if) * i_in[0]
+            self._zi_if_q = self._lfilter_zi(self._b_if, self._a_if) * q_in[0]
+        i_filt, self._zi_if_i = lf(self._b_if, self._a_if, i_in, zi=self._zi_if_i)
+        q_filt, self._zi_if_q = lf(self._b_if, self._a_if, q_in, zi=self._zi_if_q)
+        samples = i_filt + 1j * q_filt
+
+        # FM demod: instantaneous frequency via conjugate product
         diff  = samples[1:] * np.conj(samples[:-1])
-        audio = (np.angle(diff) / np.pi).astype(np.float32)
+        audio = (np.angle(diff) / np.pi).astype(np.float64)
 
-        # decimate 2.4 MHz → 48 kHz in two stages (×10 then ×5 = ×50)
-        audio = self._dec(audio, 10, zero_phase=False).astype(np.float32)
-        audio = self._dec(audio,  5, zero_phase=False).astype(np.float32)
+        # Decimate ×10 with persistent IIR state
+        if self._zi1 is None:
+            self._zi1 = self._lfilter_zi(self._b1, self._a1) * audio[0]
+        audio, self._zi1 = lf(self._b1, self._a1, audio, zi=self._zi1)
+        audio = audio.astype(np.float32)[::10]
 
-        # audio LPF then de-emphasis
-        audio = self._lf(self._lpf_b, 1.0,       audio).astype(np.float32)
-        audio = self._lf(self._de_b,  self._de_a, audio).astype(np.float32)
+        # Decimate ×5 with persistent IIR state
+        a64 = audio.astype(np.float64)
+        if self._zi2 is None:
+            self._zi2 = self._lfilter_zi(self._b2, self._a2) * a64[0]
+        a64, self._zi2 = lf(self._b2, self._a2, a64, zi=self._zi2)
+        audio = a64.astype(np.float32)[::5]
 
-        # soft AGC: track running peak with slow decay
+        # Audio LPF (FIR) and de-emphasis (IIR) with state
+        audio, self._zi_lpf = lf(self._lpf_b, 1.0,       audio, zi=self._zi_lpf)
+        audio = audio.astype(np.float32)
+        audio, self._zi_de  = lf(self._de_b,  self._de_a, audio, zi=self._zi_de)
+        audio = audio.astype(np.float32)
+
+        # Soft AGC
         peak       = float(np.max(np.abs(audio)))
         self._peak = max(peak, self._peak * 0.999)
         if self._peak > 1e-6:
-            audio = (audio / self._peak * 0.9)
+            audio = (audio / self._peak * 0.9).astype(np.float32)
 
-        try:
-            self._q.put_nowait(audio)
-        except queue.Full:
-            pass   # drop chunk; main loop must not block on audio
+        with self._buf_lock:
+            self._audio_buf = np.concatenate([self._audio_buf, audio])
+            # Cap to 2 s to prevent unbounded growth if playback ever stalls
+            cap = int(AUDIO_RATE * 2.0)
+            if len(self._audio_buf) > cap:
+                self._audio_buf = self._audio_buf[-cap:]
 
         return {'rms': float(np.sqrt(np.mean(audio ** 2)))}
 
     def stop(self) -> None:
         self._active = False
-        if self._thread:
-            self._thread.join(timeout=0.5)
-            self._thread = None
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
-
-    def _worker(self) -> None:
-        while self._active or not self._q.empty():
-            try:
-                chunk = self._q.get(timeout=0.05)
-                if self._stream and self._stream.active:
-                    self._stream.write(chunk)
-            except queue.Empty:
-                pass
+        # Reset filter states so a restart starts clean
+        self._zi_if_i = None
+        self._zi_if_q = None
+        self._zi1    = None
+        self._zi2    = None
+        self._zi_lpf = np.zeros(len(self._lpf_b) - 1, dtype=np.float32)
+        self._zi_de  = np.zeros(1,                    dtype=np.float32)
+        with self._buf_lock:
+            self._audio_buf = np.zeros(0, dtype=np.float32)
 
 
 # ── decoder registry helpers ──────────────────────────────────────────────────
@@ -278,13 +356,31 @@ def draw(screen_obj: curses.window, state: AppState, results: dict) -> None:
             (state.gain_db - GAIN_MIN) / (GAIN_MAX - GAIN_MIN) * (height - 1))
         arrow_row = max(0, min(height - 1, arrow_row))
 
+    # FM band column span for cyan highlight
+    band_l = band_r = None
+    if 'fm' in state.active_decoders and curses.has_colors():
+        band_l = int(max(0, (state.center_hz - state.fm_bw_hz - freq_min)
+                         / freq_range * plot_w))
+        band_r = int(min(plot_w, (state.center_hz + state.fm_bw_hz - freq_min)
+                         / freq_range * plot_w))
+
     for r in range(height):
         db_at = DB_MAX - (r / height) * DB_RANGE
         label = '{:4.0f} | '.format(db_at) if r in db_ticks else '     | '
         if r == arrow_row:
             label = label[:4] + '>| '
+        row_str = ''.join(out[r])
         try:
-            screen_obj.addstr(r + 1, 0, label + ''.join(out[r]))
+            screen_obj.addstr(r + 1, 0, label)
+            if band_l is not None and band_r > band_l:
+                if band_l > 0:
+                    screen_obj.addstr(r + 1, LABEL_W,          row_str[:band_l])
+                screen_obj.addstr(r + 1, LABEL_W + band_l,
+                                  row_str[band_l:band_r], curses.color_pair(1))
+                if band_r < plot_w:
+                    screen_obj.addstr(r + 1, LABEL_W + band_r, row_str[band_r:])
+            else:
+                screen_obj.addstr(r + 1, LABEL_W, row_str)
         except curses.error:
             pass
 
@@ -301,11 +397,12 @@ def draw(screen_obj: curses.window, state: AppState, results: dict) -> None:
                               curses.A_BOLD if state.iq_corr else curses.A_DIM)
             col = 9
             if fm is not None:
-                fm_tag = '[FM:{:3d}%] '.format(int(fm['rms'] * 100))
+                fm_tag = '[FM {:.0f}kHz {:3d}%] '.format(
+                    state.fm_bw_hz / 1000, int(fm['rms'] * 100))
                 screen_obj.addstr(ROWS - 1, col, fm_tag, curses.A_BOLD)
                 col += len(fm_tag)
 
-            rhs = 'BW {}  A=auto  G=gain  I=IQ  F=freq  M=FM  Q=quit'.format(
+            rhs = 'BW {}  A=auto  G=gain  I=IQ  F=freq  M=FM  [/]=band  Q=quit'.format(
                 fmt_freq(state.bw_hz))
             screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
     except curses.error:
@@ -377,6 +474,14 @@ def handle_keys(key: int, stdscr, state: AppState,
             toggle_decoder('fm', registry, state, sdr)
             redraw()
 
+        elif key == ord('['):
+            state.fm_bw_hz = max(FM_BW_MIN, state.fm_bw_hz - FM_BW_STEP)
+            redraw()
+
+        elif key == ord(']'):
+            state.fm_bw_hz = min(FM_BW_MAX, state.fm_bw_hz + FM_BW_STEP)
+            redraw()
+
         elif key == curses.KEY_LEFT:
             state.center_hz -= state.bw_hz / FFT_BINS
             sdr.center_freq  = state.center_hz
@@ -399,10 +504,14 @@ def handle_keys(key: int, stdscr, state: AppState,
 
 
 # ── main curses loop ──────────────────────────────────────────────────────────
-def _curses_main(stdscr: curses.window) -> None:
+def _curses_main(stdscr: curses.window, sdr: RtlSdr) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
+    if curses.has_colors():
+        curses.start_color()
+        curses.use_default_colors()
+        curses.init_pair(1, curses.COLOR_CYAN, -1)
 
     state    = AppState()
     registry = {
@@ -411,42 +520,98 @@ def _curses_main(stdscr: curses.window) -> None:
     }
     registry['spectrum'].start(state)
 
-    sdr             = RtlSdr()
     sdr.sample_rate = state.bw_hz
     sdr.center_freq = state.center_hz
     sdr.gain        = state.gain_db
 
-    last_draw = 0.0
+    SPEC_NEED = FFT_BINS * N_AVG
+    iq_deque  = deque(maxlen=64)
     results: dict = {}
+    stop_evt  = threading.Event()
+
+    # Async callback — called by librtlsdr's USB thread with no gaps between
+    # transfers (multiple overlapping USB buffers keep the stream continuous).
+    def _sdr_cb(samples, _ctx):
+        if stop_evt.is_set():
+            return
+        if 'fm' in state.active_decoders:
+            results['fm'] = registry['fm'].process(samples, state)
+        iq_deque.append(samples)
+
+    # Each call to read_samples_async blocks until cancel_read_async() is called,
+    # so it runs in its own thread.  Restart on sample-rate changes.
+    reader: list = [None]
+
+    def _start_reader():
+        if reader[0] and reader[0].is_alive():
+            sdr.cancel_read_async()
+            reader[0].join(timeout=1.0)
+        def _run():
+            sdr.read_samples_async(_sdr_cb, num_samples=READ_MAX)
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        reader[0] = t
+
+    _start_reader()
+
+    spec_chunks: list = []
+    spec_count  = 0
+    last_draw   = 0.0
+    last_bw     = state.bw_hz
 
     try:
         while not state.quit:
             key = stdscr.getch()
             handle_keys(key, stdscr, state, registry, sdr, results)
 
-            now = time.monotonic()
-            if now - last_draw >= REFRESH_S:
-                samples = sdr.read_samples(state.chunk_size)
-                for name in list(state.active_decoders):
-                    results[name] = registry[name].process(samples, state)
-                draw(stdscr, state, results)
-                last_draw = time.monotonic()
+            # BW changed (FM toggle, arrow keys) → restart async stream
+            if state.bw_hz != last_bw:
+                last_bw = state.bw_hz
+                spec_chunks.clear()
+                spec_count = 0
+                _start_reader()
 
-            if key == -1:
-                time.sleep(0.005)
+            while iq_deque:
+                try:
+                    c = iq_deque.popleft()
+                    spec_chunks.append(c)
+                    spec_count += len(c)
+                except IndexError:
+                    break
+
+            now = time.monotonic()
+            if now - last_draw >= REFRESH_S and spec_count >= SPEC_NEED:
+                samples = np.concatenate(spec_chunks)
+                results['spectrum'] = registry['spectrum'].process(
+                    samples[:SPEC_NEED], state)
+                spec_chunks.clear()
+                spec_count = 0
+                draw(stdscr, state, results)
+                last_draw = now
+            elif key == -1:
+                time.sleep(0.002)
+
     finally:
+        stop_evt.set()
+        sdr.cancel_read_async()
+        if reader[0]:
+            reader[0].join(timeout=2.0)
         for name in list(state.active_decoders):
             registry[name].stop()
         sdr.close()
 
 
 def main() -> None:
+    # Open the SDR before entering curses so a device conflict gives a readable
+    # error in the normal terminal rather than a silent blank screen.
+    sdr = RtlSdr()
+
     devnull  = os.open(os.devnull, os.O_WRONLY)
     saved_fd = os.dup(2)
     os.dup2(devnull, 2)
     os.close(devnull)
     try:
-        curses.wrapper(_curses_main)
+        curses.wrapper(lambda stdscr: _curses_main(stdscr, sdr))
     finally:
         os.dup2(saved_fd, 2)
         os.close(saved_fd)
