@@ -139,7 +139,7 @@ def toggle_decoder(name: str, registry: dict, state: AppState, sdr) -> None:
     else:
         needed = _required_bw(state.active_decoders | {name}, registry)
         new_bw = _nearest_bw(needed)
-        if new_bw != state.bw_hz:
+        if new_bw > state.bw_hz:
             state.bw_idx    = BW_STEPS.index(new_bw)
             sdr.sample_rate = new_bw
         registry[name].start(state)
