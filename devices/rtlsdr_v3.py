@@ -2,7 +2,7 @@ from core import Device
 
 
 class RtlSdrDevice(Device):
-    name     = 'RTL-SDR'
+    name     = 'RTL-SDR-V3'
     key_help = 'b=bias-tee'
 
     def __init__(self):
