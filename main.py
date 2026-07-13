@@ -392,7 +392,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         frame_results = {}
         for plugin in all_plugins:
             if plugin.name in state.active_decoders:
-                r = plugin.process(samples, state, frame_results)
+                r = plugin.process(samples, state, frame_results, sdr)
                 if r is not None:
                     frame_results[plugin.name] = r
         results.update(frame_results)
@@ -427,6 +427,14 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
             key = stdscr.getch()
             handle_keys(key, stdscr, state, registry,
                         tab_plugins, all_plugins, sdr, results)
+
+            # Sample-rate change requested by active RTL-TCP plugin
+            if state.pending_sr is not None:
+                new_bw = _nearest_bw(state.pending_sr)
+                state.bw_idx = BW_STEPS.index(new_bw)
+                sdr.sample_rate = state.bw_hz
+                state.pending_sr = None
+                # bw_hz changed → the check below restarts the reader
 
             if state.bw_hz != last_bw:
                 last_bw = state.bw_hz

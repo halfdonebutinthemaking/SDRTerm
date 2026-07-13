@@ -74,6 +74,7 @@ class AppState:
     menu_active:       Optional[set] = None  # None=closed; set=pending enabled set
     path_input:        Optional[str] = None  # None=closed; str=collecting input
     path_input_target: Optional[str] = None  # plugin name that opened the input
+    pending_sr:        Optional[int] = None  # sample-rate change queued by active plugin
 
     @property
     def bw_hz(self) -> int:
@@ -89,7 +90,7 @@ class Decoder:
 
     def start(self, state: AppState) -> None:       pass
     def process(self, samples: np.ndarray, state: AppState,
-                results: dict = None):              return None
+                results: dict = None, sdr=None):   return None
     def stop(self) -> None:                         pass
 
     # optional hooks — return None / False to opt out

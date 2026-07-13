@@ -72,7 +72,7 @@ class FMDecoder(Decoder):
         self._stream.start()
 
     def process(self, samples: np.ndarray, state: AppState,
-                results: dict = None) -> dict:
+                results: dict = None, sdr=None) -> dict:
         from scipy.signal import resample_poly
         lf = self._lfilter
         sr = int(state.bw_hz)

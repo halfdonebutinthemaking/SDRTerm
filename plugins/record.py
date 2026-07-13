@@ -28,7 +28,7 @@ class RecordDecoder(Decoder):
         self._file   = None        # opened on first process() once mode is known
 
     def process(self, samples: np.ndarray, state: AppState,
-                results: dict = None) -> dict:
+                results: dict = None, sdr=None) -> dict:
         if self._error:
             return {'error': self._error}
 

@@ -4,17 +4,29 @@ import queue
 import struct
 import threading
 import numpy as np
-from core import Decoder, AppState
+from core import Decoder, AppState, BW_STEPS, _nearest_bw
 
 
-class RtlTcpPassiveDecoder(Decoder):
-    name            = 'rtl-tcp-passive'
-    key             = 't'
+class RtlTcpActiveDecoder(Decoder):
+    """RTL-TCP server — applies client commands (frequency, gain, sample rate)
+    back to the SDR hardware.  Frequency and gain are applied immediately from
+    the SDR callback thread (safe: separate USB control endpoint).  Sample-rate
+    changes are queued via state.pending_sr and applied by the main loop to
+    avoid calling sdr.sample_rate from inside the async-read callback."""
+
+    name            = 'rtl-tcp-active'
+    key             = 'u'
     key_help        = 'o=port'
     min_sample_rate = 250_000
 
     _MAGIC        = b'RTL0'
     _TUNER_R820T2 = 5
+
+    # RTL-TCP command IDs
+    _CMD_FREQ       = 0x01
+    _CMD_RATE       = 0x02
+    _CMD_GAIN_MODE  = 0x03
+    _CMD_GAIN       = 0x04
 
     def __init__(self):
         self._port        = 1234
@@ -24,7 +36,8 @@ class RtlTcpPassiveDecoder(Decoder):
         self._bytes_sent  = 0
         self._error       = None
         self._lock        = threading.Lock()
-        self._queue       = None
+        self._iq_queue    = None
+        self._cmd_queue   = None
         self._stop_evt    = threading.Event()
         self._thread      = None
 
@@ -38,7 +51,8 @@ class RtlTcpPassiveDecoder(Decoder):
 
     def start(self, state: AppState) -> None:
         self._stop_evt.clear()
-        self._queue      = queue.Queue(maxsize=16)
+        self._iq_queue   = queue.Queue(maxsize=16)
+        self._cmd_queue  = queue.Queue(maxsize=64)
         self._bytes_sent = 0
         self._error      = None
         try:
@@ -80,19 +94,32 @@ class RtlTcpPassiveDecoder(Decoder):
                     self._client_addr = None
                 continue
 
+            cmd_buf = b''
+
             while not self._stop_evt.is_set():
-                # Drain incoming command bytes (passive mode: discard them all)
+                # Read incoming command bytes
                 r, _, _ = select.select([conn], [], [], 0)
                 if r:
                     try:
                         data = conn.recv(4096)
                         if not data:
                             break   # clean disconnect
+                        cmd_buf += data
+                        # Parse complete 5-byte command packets
+                        while len(cmd_buf) >= 5:
+                            cmd = cmd_buf[0]
+                            val = struct.unpack('>I', cmd_buf[1:5])[0]
+                            cmd_buf = cmd_buf[5:]
+                            try:
+                                self._cmd_queue.put_nowait((cmd, val))
+                            except queue.Full:
+                                pass
                     except OSError:
                         break
 
+                # Send queued IQ chunk
                 try:
-                    chunk = self._queue.get(timeout=0.05)
+                    chunk = self._iq_queue.get(timeout=0.05)
                 except queue.Empty:
                     continue
                 try:
@@ -106,18 +133,48 @@ class RtlTcpPassiveDecoder(Decoder):
             with self._lock:
                 self._client_sock = None
                 self._client_addr = None
-            # Drain stale chunks so next client starts fresh
-            while not self._queue.empty():
-                try:
-                    self._queue.get_nowait()
-                except queue.Empty:
-                    break
+            for q in (self._iq_queue, self._cmd_queue):
+                while not q.empty():
+                    try:
+                        q.get_nowait()
+                    except queue.Empty:
+                        break
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
         if self._error:
             return {'port': self._port, 'client': None, 'bytes': 0,
                     'error': self._error}
+
+        # Apply commands received from client
+        while True:
+            try:
+                cmd, val = self._cmd_queue.get_nowait()
+            except queue.Empty:
+                break
+
+            if cmd == self._CMD_FREQ:
+                hz = float(val)
+                state.center_hz = hz
+                if sdr is not None:
+                    sdr.center_freq = hz
+
+            elif cmd == self._CMD_RATE:
+                # Defer to main loop — unsafe to call sdr.sample_rate
+                # from inside the async-read callback thread
+                state.pending_sr = int(val)
+
+            elif cmd == self._CMD_GAIN_MODE:
+                state.gain_auto = (val == 0)
+                if sdr is not None:
+                    sdr.gain = 'auto' if state.gain_auto else state.gain_db
+
+            elif cmd == self._CMD_GAIN:
+                db = val / 10.0
+                state.gain_db   = db
+                state.gain_auto = False
+                if sdr is not None:
+                    sdr.gain = db
 
         with self._lock:
             connected = self._client_sock is not None
@@ -128,9 +185,9 @@ class RtlTcpPassiveDecoder(Decoder):
             arr[0::2] = np.clip(iq.real * 127.5 + 127.5, 0, 255).astype(np.uint8)
             arr[1::2] = np.clip(iq.imag * 127.5 + 127.5, 0, 255).astype(np.uint8)
             try:
-                self._queue.put_nowait(arr.tobytes())
+                self._iq_queue.put_nowait(arr.tobytes())
             except queue.Full:
-                pass   # client too slow — drop chunk rather than back-pressuring
+                pass
 
         with self._lock:
             return {
@@ -165,10 +222,10 @@ class RtlTcpPassiveDecoder(Decoder):
         if not result:
             return ''
         if 'error' in result:
-            return '[RTL-TCP error: {}] '.format(result['error'][:24])
+            return '[RTL-TCP-A error: {}] '.format(result['error'][:20])
         port   = result['port']
         client = result['client']
         if client is None:
-            return '[RTL-TCP :{} waiting] '.format(port)
+            return '[RTL-TCP-A :{} waiting] '.format(port)
         mb = result['bytes'] / 1_048_576
-        return '[RTL-TCP :{} {} {:.1f}MB] '.format(port, client, mb)
+        return '[RTL-TCP-A :{} {} {:.1f}MB] '.format(port, client, mb)
