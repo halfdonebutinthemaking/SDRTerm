@@ -2,15 +2,19 @@ from core import Device
 
 
 class RtlSdrDevice(Device):
-    name = 'RTL-SDR'
+    name     = 'RTL-SDR'
+    key_help = 'b=bias-tee'
 
     def __init__(self):
-        self._sdr = None
+        self._sdr      = None
+        self._bias_tee = False
+        self._has_bias_tee = False   # set True in open() if hardware supports it
 
     def open(self) -> bool:
         try:
             from rtlsdr import RtlSdr
             self._sdr = RtlSdr()
+            self._has_bias_tee = hasattr(self._sdr, 'set_bias_tee')
             return True
         except Exception:
             return False
@@ -48,3 +52,19 @@ class RtlSdrDevice(Device):
 
     def cancel_read_async(self) -> None:
         self._sdr.cancel_read_async()
+
+    # ── device UI hooks ───────────────────────────────────────────────────────
+    def handle_key(self, key: int, state) -> bool:
+        if key == ord('b') and self._has_bias_tee:
+            self._bias_tee = not self._bias_tee
+            try:
+                self._sdr.set_bias_tee(self._bias_tee)
+            except Exception:
+                self._bias_tee = False
+            return True
+        return False
+
+    def status_text(self, state) -> str:
+        if not self._has_bias_tee:
+            return ''
+        return '[bias-tee:on] ' if self._bias_tee else '[bias-tee:off] '
