@@ -1,4 +1,5 @@
 import threading
+from math import gcd
 import numpy as np
 from core import Decoder, AppState, AUDIO_RATE
 
@@ -7,25 +8,16 @@ class FMDecoder(Decoder):
     name            = 'fm'
     key             = 'm'
     key_help        = '[/]=band'
-    min_sample_rate = 2_400_000
+    min_sample_rate = 250_000
 
     def __init__(self):
-        from scipy.signal import cheby1, lfilter, lfilter_zi, firwin
+        from scipy.signal import lfilter, lfilter_zi, firwin
         import sounddevice as _sd
         self._sd         = _sd
         self._lfilter    = lfilter
         self._lfilter_zi = lfilter_zi
 
-        # Anti-alias IIR filters for two-stage decimation (×10 then ×5).
-        # Built manually (vs scipy.signal.decimate) so we can carry zi between
-        # chunks — decimate() resets to zero initial conditions every call,
-        # causing an audible transient at each chunk boundary.
-        b1, a1 = cheby1(8, 0.05, 0.8 / 10)
-        b2, a2 = cheby1(8, 0.05, 0.8 / 5)
-        self._b1 = b1.astype(np.float64);  self._a1 = a1.astype(np.float64)
-        self._b2 = b2.astype(np.float64);  self._a2 = a2.astype(np.float64)
-
-        # Audio LPF at 15 kHz (applied at AUDIO_RATE after decimation)
+        # Audio LPF at 15 kHz (applied at AUDIO_RATE after resampling)
         self._lpf_b = firwin(64, 15_000 / (AUDIO_RATE / 2)).astype(np.float32)
 
         # 50 µs de-emphasis IIR (EU; use 75e-6 for North America)
@@ -33,17 +25,19 @@ class FMDecoder(Decoder):
         self._de_b = np.array([a],             dtype=np.float32)
         self._de_a = np.array([1., -(1. - a)], dtype=np.float32)
 
-        # IF (channel-select) filter — real LPF applied to I and Q separately.
-        # Rebuilt in process() whenever state.fm_bw_hz changes.
+        # IF (channel-select) filter — rebuilt when fm_bw_hz or sample rate changes
         self._if_bw   = None
+        self._sr      = None
         self._b_if    = None
         self._a_if    = None
         self._zi_if_i = None
         self._zi_if_q = None
 
-        # Filter states — None triggers (re)initialisation on first process()
-        self._zi1    = None
-        self._zi2    = None
+        # Rational resample ratio reduced by gcd(sample_rate, AUDIO_RATE)
+        self._resamp_up = 1
+        self._resamp_dn = 1
+
+        # Filter states
         self._zi_lpf = np.zeros(len(self._lpf_b) - 1, dtype=np.float32)
         self._zi_de  = np.zeros(1,                    dtype=np.float32)
 
@@ -51,8 +45,6 @@ class FMDecoder(Decoder):
         self._peak = 0.1
 
         # Shared audio buffer: process() appends, PortAudio callback drains.
-        # Protected by a plain threading.Lock — the callback holds it only for
-        # a short slice/concatenate, so contention with the main thread is brief.
         self._buf_lock  = threading.Lock()
         self._audio_buf = np.zeros(0, dtype=np.float32)
 
@@ -71,7 +63,6 @@ class FMDecoder(Decoder):
 
     def start(self, state: AppState) -> None:
         self._active = True
-        # Pre-fill with silence so the callback doesn't underrun on first chunk
         with self._buf_lock:
             self._audio_buf = np.zeros(int(AUDIO_RATE * 0.20), dtype=np.float32)
         self._stream = self._sd.OutputStream(
@@ -81,17 +72,23 @@ class FMDecoder(Decoder):
         self._stream.start()
 
     def process(self, samples: np.ndarray, state: AppState) -> dict:
+        from scipy.signal import resample_poly
         lf = self._lfilter
+        sr = int(state.bw_hz)
 
-        # Rebuild IF filter when fm_bw_hz changes
-        if state.fm_bw_hz != self._if_bw:
+        # Rebuild IF filter and resample ratio when fm_bw_hz or sample rate changes
+        if state.fm_bw_hz != self._if_bw or sr != self._sr:
             from scipy.signal import cheby1
             self._if_bw = state.fm_bw_hz
-            wn = min(state.fm_bw_hz / (state.bw_hz / 2), 0.95)
+            self._sr    = sr
+            wn = min(state.fm_bw_hz / (sr / 2), 0.95)
             b, a = cheby1(6, 0.1, wn)
             self._b_if = b.astype(np.float64)
             self._a_if = a.astype(np.float64)
             self._zi_if_i = self._zi_if_q = None
+            g = gcd(sr, AUDIO_RATE)
+            self._resamp_up = AUDIO_RATE // g
+            self._resamp_dn = sr // g
 
         # IF filter: same real LPF on I and Q → selects ±fm_bw_hz around centre
         i_in = samples.real.astype(np.float64)
@@ -105,20 +102,11 @@ class FMDecoder(Decoder):
 
         # FM demod: instantaneous frequency via conjugate product
         diff  = samples[1:] * np.conj(samples[:-1])
-        audio = (np.angle(diff) / np.pi).astype(np.float64)
+        audio = (np.angle(diff) / np.pi).astype(np.float32)
 
-        # Decimate ×10 with persistent IIR state
-        if self._zi1 is None:
-            self._zi1 = self._lfilter_zi(self._b1, self._a1) * audio[0]
-        audio, self._zi1 = lf(self._b1, self._a1, audio, zi=self._zi1)
-        audio = audio.astype(np.float32)[::10]
-
-        # Decimate ×5 with persistent IIR state
-        a64 = audio.astype(np.float64)
-        if self._zi2 is None:
-            self._zi2 = self._lfilter_zi(self._b2, self._a2) * a64[0]
-        a64, self._zi2 = lf(self._b2, self._a2, a64, zi=self._zi2)
-        audio = a64.astype(np.float32)[::5]
+        # Resample to AUDIO_RATE — works for any rational ratio
+        if self._resamp_up != self._resamp_dn:
+            audio = resample_poly(audio, self._resamp_up, self._resamp_dn).astype(np.float32)
 
         # Audio LPF (FIR) and de-emphasis (IIR) with state
         audio, self._zi_lpf = lf(self._lpf_b, 1.0,       audio, zi=self._zi_lpf)
@@ -134,7 +122,6 @@ class FMDecoder(Decoder):
 
         with self._buf_lock:
             self._audio_buf = np.concatenate([self._audio_buf, audio])
-            # Cap to 2 s to prevent unbounded growth if playback stalls
             cap = int(AUDIO_RATE * 2.0)
             if len(self._audio_buf) > cap:
                 self._audio_buf = self._audio_buf[-cap:]
@@ -147,13 +134,12 @@ class FMDecoder(Decoder):
             self._stream.stop()
             self._stream.close()
             self._stream = None
-        # Reset all filter states so a restart starts clean
+        self._if_bw   = None
+        self._sr      = None
         self._zi_if_i = None
         self._zi_if_q = None
-        self._zi1    = None
-        self._zi2    = None
-        self._zi_lpf = np.zeros(len(self._lpf_b) - 1, dtype=np.float32)
-        self._zi_de  = np.zeros(1,                    dtype=np.float32)
+        self._zi_lpf  = np.zeros(len(self._lpf_b) - 1, dtype=np.float32)
+        self._zi_de   = np.zeros(1,                    dtype=np.float32)
         with self._buf_lock:
             self._audio_buf = np.zeros(0, dtype=np.float32)
 
