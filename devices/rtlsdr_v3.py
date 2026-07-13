@@ -1,4 +1,4 @@
-from core import Device
+from core import Device, fmt_freq
 
 
 class RtlSdrDevice(Device):
@@ -65,6 +65,7 @@ class RtlSdrDevice(Device):
         return False
 
     def status_text(self, state) -> str:
-        if not self._has_bias_tee:
-            return ''
-        return '[bias-tee:on] ' if self._bias_tee else '[bias-tee:off] '
+        parts = ['BW {}'.format(fmt_freq(state.bw_hz))]
+        if self._has_bias_tee:
+            parts.append('[bias-tee:on]' if self._bias_tee else '[bias-tee:off]')
+        return '  '.join(parts) + ' '
