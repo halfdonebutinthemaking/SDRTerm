@@ -101,6 +101,14 @@ class Decoder:
     def band_columns(self, state: AppState, freq_min: float,
                      freq_range: float, plot_w: int):     return None
 
+    # recording hooks — implement to make this plugin's output recordable by
+    # the record plugin.  record_ext=None means "not recordable".
+    record_ext: Optional[str] = None
+
+    def record_open(self, path: str): return open(path, 'wb')
+    def record_write(self, handle, result: dict) -> int: return 0
+    def record_close(self, handle) -> None: handle.close()
+
 
 # ── Device base ──────────────────────────────────────────────────────────────
 class Device:
@@ -112,9 +120,14 @@ class Device:
       key_help   — shortcut hint shown in the core footer rhs
       handle_key — called for unhandled keys on the core tab; return True to consume
       status_text — short status string shown in the core footer lhs after [IQ]
+
+    supported_bandwidths — ordered subset of BW_STEPS the device can use.
+      The BW up/down toggle skips any step not in this list.
+      Defaults to the full BW_STEPS list so existing devices need no change.
     """
-    name: str     = ''
-    key_help: str = ''
+    name:                str  = ''
+    key_help:            str  = ''
+    supported_bandwidths: list = BW_STEPS
 
     def open(self) -> bool:             return False
     def close(self) -> None:            pass

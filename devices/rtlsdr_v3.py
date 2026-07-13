@@ -1,9 +1,14 @@
 from core import Device, fmt_freq
 
+# RTL-SDR V3 reliable sample rates (Hz).  Values outside this set cause
+# librtlsdr to silently round or produce spurious tones on some hardware.
+_RTL_BW = [250_000, 1_024_000, 1_400_000, 1_800_000, 2_048_000, 2_400_000]
+
 
 class RtlSdrDevice(Device):
-    name     = 'RTL-SDR-V3'
-    key_help = 'b=bias-tee'
+    name                 = 'RTL-SDR-V3'
+    key_help             = 'b=bias-tee'
+    supported_bandwidths = _RTL_BW
 
     def __init__(self):
         self._sdr      = None

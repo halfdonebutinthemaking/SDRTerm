@@ -33,3 +33,18 @@ def open_device_by_name(name: str):
         if device.name.lower() == name.lower():
             return device if device.open() else None
     return None
+
+
+def open_file_device(path: str, file_rate: int = None):
+    """Open the localfile device with the given IQ file path.
+
+    file_rate: sample rate the file was recorded at (Hz).  Defaults to the
+    device's built-in default (2.4 MHz) when not specified.
+    """
+    for device in load_devices():
+        if device.name.lower() == 'localfile':
+            device.set_path(path)
+            if file_rate is not None:
+                device.set_file_rate(file_rate)
+            return device if device.open() else None
+    return None

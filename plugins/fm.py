@@ -1,3 +1,4 @@
+import wave
 import threading
 from math import gcd
 import numpy as np
@@ -165,3 +166,24 @@ class FMDecoder(Decoder):
         r = int(min(plot_w, (state.center_hz + state.fm_bw_hz - freq_min)
                     / freq_range * plot_w))
         return (l, r) if r > l else None
+
+    # ── recording hooks ───────────────────────────────────────────────────────
+    record_ext = 'wav'
+
+    def record_open(self, path: str):
+        wf = wave.open(path, 'wb')
+        wf.setnchannels(1)
+        wf.setsampwidth(2)    # int16
+        wf.setframerate(AUDIO_RATE)
+        return wf
+
+    def record_write(self, handle, result: dict) -> int:
+        audio = result.get('audio')
+        if audio is None:
+            return 0
+        pcm = (np.clip(audio, -1.0, 1.0) * 32767).astype(np.int16)
+        handle.writeframes(pcm.tobytes())
+        return pcm.nbytes
+
+    def record_close(self, handle) -> None:
+        handle.close()

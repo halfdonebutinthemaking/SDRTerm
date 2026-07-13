@@ -13,7 +13,7 @@ from core import (
     LABEL_W, REFRESH_S, GAIN_MIN, GAIN_MAX, GAIN_STEP, READ_MAX,
     _required_bw, _nearest_bw, toggle_decoder,
 )
-from devices import load_devices, open_first_device, open_device_by_name
+from devices import load_devices, open_first_device, open_device_by_name, open_file_device
 from plugins import load_plugins
 
 
@@ -327,13 +327,19 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.center_hz += state.bw_hz / FFT_BINS
             sdr.center_freq  = state.center_hz
         elif key == curses.KEY_UP:
-            if state.bw_idx < len(BW_STEPS) - 1:
-                state.bw_idx   += 1
+            supported = set(sdr.supported_bandwidths)
+            next_idx  = next((i for i in range(state.bw_idx + 1, len(BW_STEPS))
+                              if BW_STEPS[i] in supported), None)
+            if next_idx is not None:
+                state.bw_idx    = next_idx
                 sdr.sample_rate = state.bw_hz
         elif key == curses.KEY_DOWN:
-            min_bw = _required_bw(state.active_decoders, registry)
-            if state.bw_idx > 0 and BW_STEPS[state.bw_idx - 1] >= min_bw:
-                state.bw_idx   -= 1
+            supported = set(sdr.supported_bandwidths)
+            min_bw    = _required_bw(state.active_decoders, registry)
+            prev_idx  = next((i for i in range(state.bw_idx - 1, -1, -1)
+                              if BW_STEPS[i] in supported and BW_STEPS[i] >= min_bw), None)
+            if prev_idx is not None:
+                state.bw_idx    = prev_idx
                 sdr.sample_rate = state.bw_hz
         else:
             sdr.handle_key(key, state)
@@ -365,6 +371,14 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     # stable ordered list of all toggleable plugins (used for the menu)
     all_plugins = [p for p in registry.values() if p.key]
 
+    # Clamp bw_idx to a bandwidth the device actually supports.  Matters when
+    # --bw was given but the value isn't in the device's supported list.
+    supported = set(sdr.supported_bandwidths)
+    if BW_STEPS[state.bw_idx] not in supported:
+        valid = [i for i, b in enumerate(BW_STEPS) if b in supported]
+        if valid:
+            state.bw_idx = min(valid, key=lambda i: abs(BW_STEPS[i] - state.bw_hz))
+
     sdr.sample_rate = state.bw_hz
     sdr.center_freq = state.center_hz
     sdr.gain        = 'auto' if state.gain_auto else state.gain_db
@@ -377,14 +391,17 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     def _sdr_cb(samples, _ctx):
         if stop_evt.is_set():
             return
-        # Process plugins in discovery order so earlier plugins' output is
-        # available to later ones via the results bus (e.g. fm → record).
+        # Process plugins in pipeline order.  _prev_plugin lets the record
+        # plugin find its immediate predecessor without scanning all_plugins.
         frame_results = {}
+        prev_plugin   = None
         for plugin in all_plugins:
             if plugin.name in state.active_decoders:
+                frame_results['_prev_plugin'] = prev_plugin
                 r = plugin.process(samples, state, frame_results, sdr)
                 if r is not None:
                     frame_results[plugin.name] = r
+                prev_plugin = plugin
         results.update(frame_results)
         iq_deque.append(samples)
 
@@ -487,8 +504,14 @@ def main() -> None:
         description='SDRTerm — terminal SDR spectrum analyser',
         formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--d', metavar='NAME',
-                        help='device to open, e.g. RTL-SDR\n'
+                        help='device to open, e.g. RTL-SDR-V3\n'
                              'omit to use the first available device')
+    parser.add_argument('--file', metavar='PATH',
+                        help='replay a raw complex64 .iq file (selects the localfile device)')
+    parser.add_argument('--bw', metavar='BW',
+                        help='capture bandwidth / sample rate, e.g. 2.4M, 1024k, 250000\n'
+                             'for real hardware: sets the initial sample rate\n'
+                             'for --file: must match the rate used when recording')
     parser.add_argument('--f', metavar='FREQ',
                         help='centre frequency, e.g. 105.8M, 1420000000')
     parser.add_argument('--g', metavar='GAIN',
@@ -504,6 +527,13 @@ def main() -> None:
         if hz is None:
             parser.error('invalid frequency: {}'.format(args.f))
         state.center_hz = hz
+    bw_hz = None
+    if args.bw:
+        bw_hz = parse_freq(args.bw)
+        if bw_hz is None:
+            parser.error('invalid --bw value: {}'.format(args.bw))
+        bw_hz = int(bw_hz)
+        state.bw_idx = BW_STEPS.index(_nearest_bw(bw_hz))
     if args.g:
         if args.g.lower() == 'auto':
             state.gain_auto = True
@@ -522,7 +552,11 @@ def main() -> None:
     os.close(devnull)
     error_msg = None
     try:
-        if args.d:
+        if args.file:
+            sdr = open_file_device(args.file, bw_hz)
+            if sdr is None:
+                error_msg = 'cannot open IQ file: {}'.format(args.file)
+        elif args.d:
             sdr = open_device_by_name(args.d)
             if sdr is None:
                 known = ', '.join(d.name for d in load_devices()) or 'none'
