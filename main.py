@@ -13,7 +13,7 @@ from core import (
     LABEL_W, REFRESH_S, GAIN_MIN, GAIN_MAX, GAIN_STEP, READ_MAX,
     _required_bw, _nearest_bw, toggle_decoder,
 )
-from devices import open_first_device
+from devices import load_devices, open_first_device, open_device_by_name
 from plugins import load_plugins
 
 
@@ -313,7 +313,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
 
 
 # ── main curses loop ──────────────────────────────────────────────────────────
-def _curses_main(stdscr: curses.window, sdr: Device) -> None:
+def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
@@ -322,7 +322,6 @@ def _curses_main(stdscr: curses.window, sdr: Device) -> None:
         curses.use_default_colors()
         curses.init_pair(1, curses.COLOR_CYAN, -1)
 
-    state    = AppState()
     registry = load_plugins()
     registry['spectrum'].start(state)
 
@@ -331,7 +330,7 @@ def _curses_main(stdscr: curses.window, sdr: Device) -> None:
 
     sdr.sample_rate = state.bw_hz
     sdr.center_freq = state.center_hz
-    sdr.gain        = state.gain_db
+    sdr.gain        = 'auto' if state.gain_auto else state.gain_db
 
     SPEC_NEED = FFT_BINS * N_AVG
     iq_deque  = deque(maxlen=64)
@@ -413,18 +412,59 @@ def _curses_main(stdscr: curses.window, sdr: Device) -> None:
 
 
 def main() -> None:
-    # Suppress librtlsdr/libusb noise on stderr for the entire session.
+    import argparse
+    parser = argparse.ArgumentParser(
+        prog='sdrterm',
+        description='SDRTerm — terminal SDR spectrum analyser',
+        formatter_class=argparse.RawTextHelpFormatter)
+    parser.add_argument('--d', metavar='NAME',
+                        help='device to open, e.g. RTL-SDR\n'
+                             'omit to use the first available device')
+    parser.add_argument('--f', metavar='FREQ',
+                        help='centre frequency, e.g. 105.8M, 1420000000')
+    parser.add_argument('--g', metavar='GAIN',
+                        help='gain in dB (e.g. 30.0) or "auto"')
+    parser.add_argument('--i', metavar='on|off', choices=['on', 'off'],
+                        help='enable IQ correction at startup')
+    args = parser.parse_args()
+
+    # build initial AppState from CLI overrides
+    state = AppState()
+    if args.f:
+        hz = parse_freq(args.f)
+        if hz is None:
+            parser.error('invalid frequency: {}'.format(args.f))
+        state.center_hz = hz
+    if args.g:
+        if args.g.lower() == 'auto':
+            state.gain_auto = True
+        else:
+            try:
+                state.gain_db = float(args.g)
+            except ValueError:
+                parser.error('invalid gain value: {}'.format(args.g))
+    if args.i:
+        state.iq_corr = (args.i == 'on')
+
+    # suppress librtlsdr/libusb noise on stderr for the entire session
     devnull  = os.open(os.devnull, os.O_WRONLY)
     saved_fd = os.dup(2)
     os.dup2(devnull, 2)
     os.close(devnull)
     error_msg = None
     try:
-        sdr = open_first_device()
-        if sdr is None:
-            error_msg = 'no device found'
+        if args.d:
+            sdr = open_device_by_name(args.d)
+            if sdr is None:
+                known = ', '.join(d.name for d in load_devices()) or 'none'
+                error_msg = 'device not found: {}  (known drivers: {})'.format(
+                    args.d, known)
         else:
-            curses.wrapper(lambda stdscr: _curses_main(stdscr, sdr))
+            sdr = open_first_device()
+            if sdr is None:
+                error_msg = 'no device found'
+        if error_msg is None:
+            curses.wrapper(lambda stdscr: _curses_main(stdscr, sdr, state))
     finally:
         os.dup2(saved_fd, 2)
         os.close(saved_fd)

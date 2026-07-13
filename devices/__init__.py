@@ -25,3 +25,11 @@ def open_first_device():
         if device.open():
             return device
     return None
+
+
+def open_device_by_name(name: str):
+    """Open a specific device by name (case-insensitive). Return None if not found or unavailable."""
+    for device in load_devices():
+        if device.name.lower() == name.lower():
+            return device if device.open() else None
+    return None

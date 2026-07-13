@@ -2,7 +2,7 @@ from core import Device
 
 
 class RtlSdrDevice(Device):
-    name = 'rtl-sdr'
+    name = 'RTL-SDR'
 
     def __init__(self):
         self._sdr = None
