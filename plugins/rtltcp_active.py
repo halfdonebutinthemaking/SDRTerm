@@ -29,7 +29,7 @@ class RtlTcpActiveDecoder(Decoder):
     _CMD_GAIN       = 0x04
 
     def __init__(self):
-        self._port        = 1234
+        self._port        = 1235
         self._server_sock = None
         self._client_sock = None
         self._client_addr = None
