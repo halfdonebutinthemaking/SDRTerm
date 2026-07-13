@@ -153,28 +153,22 @@ class RtlTcpActiveDecoder(Decoder):
             except queue.Empty:
                 break
 
+            # All hardware calls are deferred to the main loop via pending_*
+            # fields — calling sdr.* from inside the async-read callback
+            # deadlocks libusb's internal event-loop locks.
             if cmd == self._CMD_FREQ:
-                hz = float(val)
-                state.center_hz = hz
-                if sdr is not None:
-                    sdr.center_freq = hz
+                state.pending_freq = float(val)
 
             elif cmd == self._CMD_RATE:
-                # Defer to main loop — unsafe to call sdr.sample_rate
-                # from inside the async-read callback thread
                 state.pending_sr = int(val)
 
             elif cmd == self._CMD_GAIN_MODE:
-                state.gain_auto = (val == 0)
-                if sdr is not None:
-                    sdr.gain = 'auto' if state.gain_auto else state.gain_db
+                if val == 0:              # 0 = auto
+                    state.pending_gain = -1.0
+                # 1 = manual: wait for SET_GAIN to carry the actual value
 
             elif cmd == self._CMD_GAIN:
-                db = val / 10.0
-                state.gain_db   = db
-                state.gain_auto = False
-                if sdr is not None:
-                    sdr.gain = db
+                state.pending_gain = val / 10.0
 
         with self._lock:
             connected = self._client_sock is not None

@@ -74,7 +74,9 @@ class AppState:
     menu_active:       Optional[set] = None  # None=closed; set=pending enabled set
     path_input:        Optional[str] = None  # None=closed; str=collecting input
     path_input_target: Optional[str] = None  # plugin name that opened the input
-    pending_sr:        Optional[int] = None  # sample-rate change queued by active plugin
+    pending_sr:        Optional[int]   = None  # sample-rate change queued by active plugin
+    pending_freq:      Optional[float] = None  # frequency change queued by active plugin
+    pending_gain:      Optional[float] = None  # gain change (≥0 = dB, <0 = auto)
 
     @property
     def bw_hz(self) -> int:

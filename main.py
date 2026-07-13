@@ -428,7 +428,25 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
             handle_keys(key, stdscr, state, registry,
                         tab_plugins, all_plugins, sdr, results)
 
-            # Sample-rate change requested by active RTL-TCP plugin
+            # Hardware changes queued by active RTL-TCP plugin.
+            # Applied here (main loop) not in process() to avoid calling
+            # sdr.* from inside the librtlsdr async-read callback, which
+            # deadlocks libusb's internal event-loop locks.
+            if state.pending_freq is not None:
+                state.center_hz   = state.pending_freq
+                sdr.center_freq   = state.pending_freq
+                state.pending_freq = None
+
+            if state.pending_gain is not None:
+                if state.pending_gain < 0:
+                    state.gain_auto = True
+                    sdr.gain        = 'auto'
+                else:
+                    state.gain_auto = False
+                    state.gain_db   = state.pending_gain
+                    sdr.gain        = state.pending_gain
+                state.pending_gain = None
+
             if state.pending_sr is not None:
                 new_bw = _nearest_bw(state.pending_sr)
                 state.bw_idx = BW_STEPS.index(new_bw)
