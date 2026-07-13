@@ -46,7 +46,8 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
 
 # ── renderer ──────────────────────────────────────────────────────────────────
 def draw(screen_obj: curses.window, state: AppState, results: dict,
-         registry: dict, tab_plugins: list, all_plugins: list) -> None:
+         registry: dict, tab_plugins: list, all_plugins: list,
+         sdr: Device) -> None:
     sp = results.get('spectrum')
     if sp is None:
         return
@@ -138,18 +139,27 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
         elif state.tab_idx == 0:
-            # core tab
+            # core tab — left side
             screen_obj.addstr(ROWS - 1, 0, '[core]', curses.A_BOLD)
             col = 7
             iq_tag = '[IQ:ON]' if state.iq_corr else '[IQ:off]'
             screen_obj.addstr(ROWS - 1, col, iq_tag,
                               curses.A_BOLD if state.iq_corr else curses.A_DIM)
             col += len(iq_tag) + 1
+            dev_status = sdr.status_text(state)
+            if dev_status:
+                screen_obj.addstr(ROWS - 1, col, dev_status)
+                col += len(dev_status) + 1
+            # core tab — right side
             plugin_toggles = '  '.join(
                 '{}={}'.format(p.key, p.name) for p in all_plugins if p.key)
             rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins']
             if plugin_toggles:
                 rhs_parts.append(plugin_toggles)
+            if sdr.key_help:
+                rhs_parts.append(sdr.key_help)
+            if tab_plugins:
+                rhs_parts.append('tab=plugin settings')
             rhs_parts += ['f=freq', 'q=quit']
             rhs = '  '.join(rhs_parts)
             screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
@@ -194,7 +204,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         if results:
             cur_tabs = [p for p in all_plugins if p.name in state.active_decoders]
             state.tab_idx = min(state.tab_idx, len(cur_tabs))
-            draw(stdscr, state, results, registry, cur_tabs, all_plugins)
+            draw(stdscr, state, results, registry, cur_tabs, all_plugins, sdr)
 
     # ── plugin menu modal ─────────────────────────────────────────────────────
     if state.menu_active is not None:
@@ -295,11 +305,13 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
                 state.bw_idx   -= 1
                 sdr.sample_rate = state.bw_hz
         else:
-            # per-plugin quick-toggle keys
+            # per-plugin quick-toggle keys, then device-specific keys
             for name, plugin in registry.items():
                 if plugin.key and key == ord(plugin.key):
                     toggle_decoder(name, registry, state, sdr)
                     break
+            else:
+                sdr.handle_key(key, state)
         redraw()
         return
 
@@ -396,7 +408,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                     samples[:SPEC_NEED], state)
                 spec_chunks.clear()
                 spec_count = 0
-                draw(stdscr, state, results, registry, tab_plugins, all_plugins)
+                draw(stdscr, state, results, registry, tab_plugins, all_plugins, sdr)
                 last_draw = now
             elif key == -1:
                 time.sleep(0.002)

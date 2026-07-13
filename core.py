@@ -100,13 +100,22 @@ class Decoder:
 class Device:
     """Hardware SDR interface. Subclasses in devices/ are auto-discovered.
     open() is called once at startup; return False if hardware is unavailable.
-    Subclasses must also expose sample_rate, center_freq, gain as properties."""
-    name: str = ''
+    Subclasses must also expose sample_rate, center_freq, gain as properties.
+
+    Optional UI hooks (core-tab only):
+      key_help   — shortcut hint shown in the core footer rhs
+      handle_key — called for unhandled keys on the core tab; return True to consume
+      status_text — short status string shown in the core footer lhs after [IQ]
+    """
+    name: str     = ''
+    key_help: str = ''
 
     def open(self) -> bool:             return False
     def close(self) -> None:            pass
     def read_samples_async(self, callback, num_samples: int) -> None: pass
     def cancel_read_async(self) -> None: pass
+    def handle_key(self, key: int, state: 'AppState') -> bool: return False
+    def status_text(self, state: 'AppState') -> str: return ''
 
 
 # ── registry helpers ──────────────────────────────────────────────────────────
