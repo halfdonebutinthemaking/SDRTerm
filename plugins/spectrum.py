@@ -7,7 +7,8 @@ class SpectrumDecoder(Decoder):
     min_sample_rate = 250_000
     # no key — always active, never toggled
 
-    def process(self, samples: np.ndarray, state: AppState) -> dict:
+    def process(self, samples: np.ndarray, state: AppState,
+                results: dict = None) -> dict:
         s      = samples[:FFT_BINS * N_AVG]
         frames = s.reshape(N_AVG, FFT_BINS)
         power  = np.zeros(FFT_BINS)

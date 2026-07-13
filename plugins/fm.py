@@ -71,7 +71,8 @@ class FMDecoder(Decoder):
         )
         self._stream.start()
 
-    def process(self, samples: np.ndarray, state: AppState) -> dict:
+    def process(self, samples: np.ndarray, state: AppState,
+                results: dict = None) -> dict:
         from scipy.signal import resample_poly
         lf = self._lfilter
         sr = int(state.bw_hz)
@@ -126,7 +127,7 @@ class FMDecoder(Decoder):
             if len(self._audio_buf) > cap:
                 self._audio_buf = self._audio_buf[-cap:]
 
-        return {'rms': float(np.sqrt(np.mean(audio ** 2)))}
+        return {'rms': float(np.sqrt(np.mean(audio ** 2))), 'audio': audio}
 
     def stop(self) -> None:
         self._active = False

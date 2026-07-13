@@ -68,10 +68,12 @@ class AppState:
     freq_input:      Optional[str] = None
     quit:            bool          = False
     active_decoders: set           = field(default_factory=lambda: {'spectrum'})
-    fm_bw_hz:        int           = 100_000
-    tab_idx:         int           = 0     # 0=core, N=Nth enabled plugin
-    menu_cursor:     int           = 0
-    menu_active:     Optional[set] = None  # None=closed; set=pending enabled set
+    fm_bw_hz:          int           = 100_000
+    tab_idx:           int           = 0     # 0=core, N=Nth enabled plugin
+    menu_cursor:       int           = 0
+    menu_active:       Optional[set] = None  # None=closed; set=pending enabled set
+    path_input:        Optional[str] = None  # None=closed; str=collecting input
+    path_input_target: Optional[str] = None  # plugin name that opened the input
 
     @property
     def bw_hz(self) -> int:
@@ -86,7 +88,8 @@ class Decoder:
     min_sample_rate: int = 250_000
 
     def start(self, state: AppState) -> None:       pass
-    def process(self, samples: np.ndarray, state: AppState): return None
+    def process(self, samples: np.ndarray, state: AppState,
+                results: dict = None):              return None
     def stop(self) -> None:                         pass
 
     # optional hooks — return None / False to opt out

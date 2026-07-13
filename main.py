@@ -138,6 +138,11 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
             screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
+        elif state.path_input is not None:
+            prompt = 'Path: {}_'.format(state.path_input)
+            screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+            screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
+
         elif state.tab_idx == 0:
             # core tab — left side
             screen_obj.addstr(ROWS - 1, 0, '[core]', curses.A_BOLD)
@@ -242,6 +247,22 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.freq_input = state.freq_input[:-1]
         elif 32 <= key <= 126 and chr(key) in '0123456789.kKmM':
             state.freq_input += chr(key)
+        redraw()
+        return
+
+    # ── path input modal ─────────────────────────────────────────────────────
+    if state.path_input is not None:
+        if key == 27:
+            state.path_input = state.path_input_target = None
+        elif key in (10, 13, curses.KEY_ENTER):
+            target = registry.get(state.path_input_target)
+            if target and hasattr(target, 'set_path'):
+                target.set_path(state.path_input or None)
+            state.path_input = state.path_input_target = None
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            state.path_input = state.path_input[:-1]
+        elif 32 <= key <= 126:
+            state.path_input += chr(key)
         redraw()
         return
 
@@ -352,9 +373,15 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     def _sdr_cb(samples, _ctx):
         if stop_evt.is_set():
             return
-        for name in list(state.active_decoders):
-            if name != 'spectrum':
-                results[name] = registry[name].process(samples, state)
+        # Process plugins in discovery order so earlier plugins' output is
+        # available to later ones via the results bus (e.g. fm → record).
+        frame_results = {}
+        for plugin in all_plugins:
+            if plugin.name in state.active_decoders:
+                r = plugin.process(samples, state, frame_results)
+                if r is not None:
+                    frame_results[plugin.name] = r
+        results.update(frame_results)
         iq_deque.append(samples)
 
     reader: list = [None]
