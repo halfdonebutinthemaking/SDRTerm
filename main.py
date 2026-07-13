@@ -23,7 +23,7 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
     if not all_plugins:
         return
     hint1 = ' spc=toggle  ret=apply  esc=cancel '
-    hint2 = ' shift+↑↓=reorder pipeline '
+    hint2 = ' </>=reorder pipeline '
     min_w = max(len(hint1) + 4, len(hint2) + 4,
                 max(len(p.name) for p in all_plugins) + 26, 44)
     w  = min(COLS - 4, min_w)
@@ -234,12 +234,12 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.menu_cursor = max(0, state.menu_cursor - 1)
         elif key == curses.KEY_DOWN:
             state.menu_cursor = min(len(all_plugins) - 1, state.menu_cursor + 1)
-        elif key == curses.KEY_SR:                # shift+up — move earlier in pipeline
+        elif key == ord('<'):                     # move earlier in pipeline
             i = state.menu_cursor
             if i > 0:
                 all_plugins[i], all_plugins[i - 1] = all_plugins[i - 1], all_plugins[i]
                 state.menu_cursor = i - 1
-        elif key == curses.KEY_SF:                # shift+down — move later in pipeline
+        elif key == ord('>'):                     # move later in pipeline
             i = state.menu_cursor
             if i < len(all_plugins) - 1:
                 all_plugins[i], all_plugins[i + 1] = all_plugins[i + 1], all_plugins[i]
