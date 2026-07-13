@@ -22,8 +22,12 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
                       all_plugins: list, ROWS: int, COLS: int) -> None:
     if not all_plugins:
         return
-    w  = min(COLS - 4, max(36, max(len(p.name) for p in all_plugins) + 20))
-    h  = len(all_plugins) + 4
+    hint1 = ' spc=toggle  ret=apply  esc=cancel '
+    hint2 = ' shift+↑↓=reorder pipeline '
+    min_w = max(len(hint1) + 4, len(hint2) + 4,
+                max(len(p.name) for p in all_plugins) + 26, 44)
+    w  = min(COLS - 4, min_w)
+    h  = len(all_plugins) + 5   # title + sep + plugins + 2 hint lines
     y0 = max(0, (ROWS - h) // 2)
     x0 = max(0, (COLS - w) // 2)
     try:
@@ -35,11 +39,11 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
             enabled = plugin.name in state.menu_active
             tick    = 'x' if enabled else ' '
             attr    = curses.A_REVERSE if i == state.menu_cursor else curses.A_NORMAL
-            label   = '[{}]  {:14}  key: {}'.format(
-                tick, plugin.name, plugin.key or '—')
+            label   = '[{}] #{:d}  {:14}  key: {}'.format(
+                tick, i + 1, plugin.name, plugin.key or '—')
             screen_obj.addstr(y0 + 2 + i, x0 + 2, label[:w - 4].ljust(w - 4), attr)
-        hint = ' spc=toggle   ret=apply   esc=cancel '
-        screen_obj.addstr(y0 + h - 1, x0 + 2, hint[:w - 4], curses.A_DIM)
+        screen_obj.addstr(y0 + h - 2, x0 + 2, hint1[:w - 4], curses.A_DIM)
+        screen_obj.addstr(y0 + h - 1, x0 + 2, hint2[:w - 4], curses.A_DIM)
     except curses.error:
         pass
 
@@ -230,6 +234,16 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.menu_cursor = max(0, state.menu_cursor - 1)
         elif key == curses.KEY_DOWN:
             state.menu_cursor = min(len(all_plugins) - 1, state.menu_cursor + 1)
+        elif key == curses.KEY_SR:                # shift+up — move earlier in pipeline
+            i = state.menu_cursor
+            if i > 0:
+                all_plugins[i], all_plugins[i - 1] = all_plugins[i - 1], all_plugins[i]
+                state.menu_cursor = i - 1
+        elif key == curses.KEY_SF:                # shift+down — move later in pipeline
+            i = state.menu_cursor
+            if i < len(all_plugins) - 1:
+                all_plugins[i], all_plugins[i + 1] = all_plugins[i + 1], all_plugins[i]
+                state.menu_cursor = i + 1
         redraw()
         return
 
