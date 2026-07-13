@@ -160,11 +160,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 screen_obj.addstr(ROWS - 1, col, dev_status)
                 col += len(dev_status) + 1
             # core tab — right side
-            plugin_toggles = '  '.join(
-                '{}={}'.format(p.key, p.name) for p in all_plugins if p.key)
             rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins']
-            if plugin_toggles:
-                rhs_parts.append(plugin_toggles)
             if sdr.key_help:
                 rhs_parts.append(sdr.key_help)
             if tab_plugins:
@@ -340,13 +336,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
                 state.bw_idx   -= 1
                 sdr.sample_rate = state.bw_hz
         else:
-            # per-plugin quick-toggle keys, then device-specific keys
-            for name, plugin in registry.items():
-                if plugin.key and key == ord(plugin.key):
-                    toggle_decoder(name, registry, state, sdr)
-                    break
-            else:
-                sdr.handle_key(key, state)
+            sdr.handle_key(key, state)
         redraw()
         return
 
