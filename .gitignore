@@ -8,3 +8,10 @@ wheels/
 
 # Virtual environments
 .venv
+
+# macOS metadata
+.DS_Store
+
+# SDRTerm recordings
+sdrterm_*.iq
+sdrterm_*.wav
