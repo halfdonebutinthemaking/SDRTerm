@@ -1,22 +1,28 @@
 """NRSC-5 HD Radio signal processor — pure Python/NumPy.
 
-SIGNAL CHAIN (each stage is a labelled function):
+SIGNAL CHAIN:
 
-  1. Resample         — FFT-based, O(N log N), no FIR design cost
-  2. CP correlation   — finds OFDM symbol timing
-  3. OFDM FFT         — one batched 2-D FFT per block (GIL-free)
-  4. Pilot tracking   — SC 0 (DC) is a reference carrier; used to remove
-                        per-symbol carrier-phase drift before coherent detect
-  5. Coherent BPSK    — real part of (subcarrier × conj(pilot)) gives LLR
-                        (replaces the old differential approach which
-                         accumulated cross-symbol phase errors)
-  6. MER estimate     — signal² / noise² from real vs imag constellation arms
-  7. Deinterleave     — block deinterleaver spanning 32 symbols × 382 SC.
-                        *** NEEDS NRSC-5-C TABLE 11-8 permutation ***
-                        Currently identity → Viterbi input is scrambled.
-  8. Descramble       — XOR with 9-bit LFSR PN sequence.
-                        *** NEEDS NRSC-5-C poly + init per frame ***
-                        Currently identity → coded bits still scrambled.
+  1. Resample         — FFT-based (scipy.signal.resample), O(N log N)
+  2. Sideband filter  — FFT → mask → IFFT; keeps SC ±356..±sc_outer only.
+                        Removes the strong FM carrier (≈15 dB above the
+                        digital sidebands) so it cannot dominate the CP
+                        correlation and mask the OFDM structure.
+  3. CP correlation   — two-peak average rejects incidental single peaks.
+                        Pure noise ≈ 1.3; real NRSC-5 signal ≥ 6.
+  4. OFDM FFT         — batched 2-D FFT; one GIL-release per block.
+  5. Phase estimation — squared-mean trick per subcarrier:
+                          s = ±A·e^(jθ)+noise  →  E[s²] = A²·e^(j2θ)
+                          θ = angle(E[s²]) / 2
+                        No pilot knowledge required.  Works for any
+                        coherent BPSK signal.  Residual ±π per-subcarrier
+                        ambiguity is consistent across all symbols.
+  5½. MER             — from the phase-corrected BPSK constellation:
+                          MER = 10·log10(mean(real²) / mean(imag²))
+  6. Soft LLR         — real part of phase-corrected subcarrier symbols.
+  7. Deinterleave     — *** PLACEHOLDER: NRSC-5-C Table 11-x permutation ***
+                        Identity for now → Viterbi sees scrambled bit order.
+  8. Descramble       — *** PLACEHOLDER: NRSC-5-C §11.5 LFSR ***
+                        Identity for now → coded bits still PN-scrambled.
   9. Viterbi          — rate-½, K=7, G=(0o133, 0o171), vectorised ACS
  10. SIS PDU scan     — slide over decoded bytes; validate CRC-16/CCITT
 
@@ -46,7 +52,6 @@ _FRAME_SYMS   = 32           # OFDM symbols per Layer-1 frame
 _MIN_SR        = 1_024_000
 
 # How many full frames to accumulate before one decode pass.
-# More frames → more data to scan for valid SIS PDUs.
 _DECODE_FRAMES   = 4         # 4 × 32 × 2160 = 276 480 samples at 744 kHz
 _DECODE_INTERVAL = 2.0       # minimum wall-clock seconds between passes
 
@@ -142,7 +147,44 @@ def _scan_pdus(bits: np.ndarray) -> dict:
     return out
 
 
-# ── Stage 2: CP correlation (symbol timing) ───────────────────────────────────
+# ── Stage 2: Sideband bandpass filter ────────────────────────────────────────
+
+def _sideband_only(iq: np.ndarray, sc_outer: int) -> np.ndarray:
+    """Bandpass-filter IQ to the NRSC-5 digital sideband region only.
+
+    The FM carrier at DC is typically 15 dB stronger than the NRSC-5
+    digital sidebands.  Without this filter it dominates the CP correlation
+    (Stage 3), pulling sync_q down toward the noise floor and preventing
+    symbol timing acquisition.
+
+    Implementation: FFT the full buffer → zero all bins outside
+    SC ±_HI_A..±sc_outer → IFFT.  This is a rectangular spectral mask,
+    so there is no phase distortion (just steep but ideal band edges).
+    The bin correspondence follows from the fact that NRSC-5's subcarrier
+    spacing (_SR/_FFT = 363.4 Hz) is also the DFT bin spacing for a
+    buffer whose length is a multiple of _FFT at sample rate _SR.
+
+    For a buffer of N samples at _SR: DFT bin k ↔ frequency k·_SR/N.
+    NRSC-5 SC index m ↔ frequency m·_SR/_FFT.
+    Therefore SC m ↔ DFT bin m·N/_FFT.
+    """
+    N = len(iq)
+    if N < _FFT * 2:
+        return iq
+    scale = N / _FFT          # SC index m → DFT bin m × scale
+    lo_a  = int(_HI_A * scale)
+    lo_b  = int((sc_outer + 1) * scale)
+    hi_a  = N - lo_b          # lower sideband (negative frequencies)
+    hi_b  = N - lo_a
+    spec  = np.fft.fft(iq)
+    mask  = np.zeros(N, dtype=bool)
+    mask[lo_a:lo_b] = True
+    mask[hi_a:hi_b] = True
+    spec[~mask] = 0.0
+    return np.fft.ifft(spec).astype(np.complex64)
+
+
+# ── Stage 3: CP correlation (symbol timing) ──────────────────────────────────
 
 def _cp_metric(iq: np.ndarray) -> np.ndarray:
     """Windowed CP correlation.  Peak at symbol start because the CP is an
@@ -163,7 +205,7 @@ def _find_timing(iq: np.ndarray):
     """Return (offset, sync_quality) — quality = two-peak average / mean.
 
     Using two peaks (one symbol apart) rejects incidental single-peak noise.
-    Pure noise → quality ≈ 1.3; real NRSC-5 OFDM → quality ≥ 8.
+    After sideband filtering: pure noise → quality ≈ 1.3; NRSC-5 → ≥ 6.
     """
     metric = _cp_metric(iq)
     if len(metric) < _SYM:
@@ -175,7 +217,7 @@ def _find_timing(iq: np.ndarray):
     return offset, (q1 + q2) / 2.0
 
 
-# ── Stage 3: OFDM FFT (batched, GIL-free) ────────────────────────────────────
+# ── Stage 4: OFDM FFT (batched, GIL-free) ────────────────────────────────────
 
 def _ofdm_fft(iq: np.ndarray, offset: int, n_sym: int) -> np.ndarray:
     """Remove CP and FFT-demodulate n_sym symbols.
@@ -191,121 +233,41 @@ def _ofdm_fft(iq: np.ndarray, offset: int, n_sym: int) -> np.ndarray:
     return np.fft.fft(syms, axis=1).astype(np.complex64)
 
 
-# ── Stage 4: Pilot phase tracking ────────────────────────────────────────────
+# ── Stage 5: Per-subcarrier BPSK phase estimation ────────────────────────────
 
-def _pilot_phase(ffts: np.ndarray) -> np.ndarray:
-    """Extract the unit-phasor of SC 0 (DC reference carrier) per symbol.
+def _estimate_phase_and_mer(hi: np.ndarray, lo: np.ndarray):
+    """Per-subcarrier carrier-phase estimation using the squared-mean trick.
 
-    NRSC-5 transmits a continuous-wave reference at SC 0 with a fixed
-    known amplitude.  Its phase rotates only with residual frequency error
-    and channel phase drift — NOT with data.  Dividing every data subcarrier
-    by this phasor removes common-mode carrier phase drift, enabling coherent
-    (rather than differential) BPSK detection.
+    For coherent BPSK each symbol carries s = ±A·e^(jθ) + noise, where θ
+    is the carrier phase on that subcarrier.  Squaring removes the ±1
+    data ambiguity:
 
-    Note: the absolute polarity (+1 or -1) of the DC pilot changes with
-    the frame number according to a PN sequence defined in NRSC-5-C §11.3.
-    We don't know that sequence here, so the absolute sign of the LLRs
-    alternates; the Viterbi decoder sees the right magnitude but sometimes
-    the wrong polarity for whole frames.  Solving this requires frame sync
-    (Stage 5, below) combined with the pilot PN lookup table.
+        s² = A²·e^(j2θ) + cross-terms (small for large N)
+
+    Averaging over all symbols in the block:
+
+        E[s²] ≈ A²·e^(j2θ)   →   θ = angle(E[s²]) / 2
+
+    Remaining ±π ambiguity (θ and θ+π both satisfy the equation) is
+    consistent across all symbols on the same subcarrier, so the Viterbi
+    sees correct LLR magnitudes — just possibly an overall bit-polarity
+    flip per subcarrier that the descrambler (Stage 8) normally corrects.
+
+    MER = 10·log10(mean(real²) / mean(imag²)) from the corrected
+    constellation.  Pure noise → 0 dB; real BPSK → positive values.
+
+    Returns (hi_corrected, lo_corrected, mer_db).
     """
-    pilot = ffts[:, 0]                          # (n_sym,) complex
-    mag   = np.abs(pilot) + 1e-12
-    return (pilot / mag).astype(np.complex64)   # unit phasor per symbol
+    def _correct(sc):                               # sc: (n_sym, n_sc)
+        theta = np.angle(np.mean(sc ** 2, axis=0)) / 2.0
+        return (sc * np.exp(-1j * theta)).astype(np.complex64)
 
-
-# ── Stage 5: Frame sync ───────────────────────────────────────────────────────
-
-def _frame_sync(pilot_phasors: np.ndarray) -> int:
-    """Find the start of a 32-symbol frame using pilot-phase periodicity.
-
-    Within each frame, the DC pilot polarity follows a fixed PN pattern
-    (same for every frame).  Between frames the pattern repeats, so
-    computing the autocorrelation of the pilot phasor at lag=32 symbols
-    gives a peak at multiples of the frame boundary.
-
-    We search the first _FRAME_SYMS symbols for the offset that maximises
-    this autocorrelation: the symbol with the highest 'frame-phase coherence'
-    is symbol 0 of a frame.
-
-    Without the PN lookup table (NRSC-5-C §11.3 Table 11-x) we cannot
-    correct the per-symbol pilot polarity, so this gives us FRAME TIMING
-    but not absolute BIT PHASE within the frame.  That correction is applied
-    after the deinterleaver (Stage 7).
-    """
-    n = len(pilot_phasors)
-    if n < _FRAME_SYMS * 2:
-        return 0
-    # Autocorrelation at lag = one frame
-    corr = (pilot_phasors[:n - _FRAME_SYMS]
-            * np.conj(pilot_phasors[_FRAME_SYMS:]))
-    # Rolling sum over one frame window
-    window = np.ones(_FRAME_SYMS)
-    strength = np.abs(np.convolve(corr.real, window, mode='valid'))
-    return int(np.argmax(strength[:_FRAME_SYMS]))
-
-
-# ── Stage 5½: Sideband SNR from pilot-corrected constellation ────────────────
-
-def _mer_db(ffts: np.ndarray, phase: np.ndarray, sc_outer: int) -> float:
-    """Modulation Error Ratio from the BPSK constellation.
-
-    After phase correction the constellation should cluster at ±A on the
-    real axis with noise on the imaginary axis.
-    MER = 10 log10( mean(real²) / mean(imag²) )
-
-    This is a real signal-quality metric — distinct from the old SNR proxy
-    which compared sideband power to an adjacent noise band.
-    """
-    hi = ffts[:, _HI_A: sc_outer + 1]
-    lo = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1]
-    p  = phase[:, np.newaxis]
-    hi_d = hi * np.conj(p)
-    lo_d = lo * np.conj(p)
-    both = np.concatenate([hi_d, lo_d], axis=1)
+    hi_c = _correct(hi)
+    lo_c = _correct(lo)
+    both = np.concatenate([hi_c, lo_c], axis=1)
     sig  = float(np.mean(both.real ** 2))
     nse  = float(np.mean(both.imag ** 2)) + 1e-20
-    return float(10.0 * np.log10(sig / nse))
-
-
-# ── Stage 6: Coherent BPSK → soft LLR ───────────────────────────────────────
-
-def _bpsk_llr(ffts: np.ndarray, phase: np.ndarray, sc_outer: int,
-               frame_off: int) -> np.ndarray:
-    """Coherent BPSK soft-decisions for both sidebands.
-
-    Returns float32 array of shape (n_usable_syms × n_sc,) where positive
-    values are 'likely +1' and negative values are 'likely −1'.
-
-    Layout: for each symbol (in frame order starting at frame_off), all
-    upper-sideband subcarriers SC 356..sc_outer followed by all lower-side-
-    band subcarriers SC (FFT-sc_outer)..(FFT-356), both in ascending FFT-bin
-    order.  The interleaver (Stage 7) permutes this flat array.
-
-    WHY coherent instead of differential:
-      Differential BPSK (angle of s[n]×conj(s[n-1])) only works when
-      consecutive symbols on the same subcarrier are INTENDED to encode the
-      difference.  NRSC-5 uses COHERENT BPSK: each symbol independently
-      encodes +1 or -1 relative to an absolute phase reference (the pilot).
-      Differential detection introduces error propagation and doubles the
-      noise variance compared to coherent.
-    """
-    n_sym    = ffts.shape[0]
-    # Align to frame boundary so the deinterleaver sees symbol 0 first.
-    start    = frame_off % n_sym
-    ordered  = np.roll(ffts, -start, axis=0)
-    ph_ord   = np.roll(phase, -start)
-    n_usable = (n_sym // _FRAME_SYMS) * _FRAME_SYMS   # keep whole frames only
-
-    hi = ordered[:n_usable, _HI_A: sc_outer + 1]
-    lo = ordered[:n_usable, _FFT - sc_outer: _FFT - _HI_A + 1]
-    p  = ph_ord[:n_usable, np.newaxis]
-
-    hi_d = (hi * np.conj(p)).real
-    lo_d = (lo * np.conj(p)).real
-    # (n_usable, n_hi + n_lo) → flatten in symbol-major order
-    both = np.concatenate([hi_d, lo_d], axis=1)
-    return both.astype(np.float32).ravel()
+    return hi_c, lo_c, float(10.0 * np.log10(sig / nse))
 
 
 # ── Stage 7: Block deinterleaver ─────────────────────────────────────────────
@@ -314,8 +276,8 @@ def _deinterleave(llr: np.ndarray, n_sym: int, n_sc: int) -> np.ndarray:
     """Reverse the NRSC-5 time-frequency block interleaver.
 
     The NRSC-5-C interleaver (§11.4) spreads coded bits across all n_sym
-    symbols and n_sc subcarriers of a 'super-frame' (multiple L1 frames)
-    to maximise time AND frequency diversity against fading.
+    symbols and n_sc subcarriers of a 'super-frame' to maximise time AND
+    frequency diversity against fading.
 
     The permutation π(i) is defined by a formula in NRSC-5-C Table 11-x.
     We don't have that table, so this function currently returns the input
@@ -377,7 +339,7 @@ class NRSC5TextDecoder(Decoder):
         self._info = {
             'status': 'searching…',
             'name': '', 'slogan': '', 'psd': '',
-            'mer': -99.0, 'sync_q': 0.0, 'frame_off': 0,
+            'mer': -99.0, 'sync_q': 0.0,
         }
         self._active = False
         self._event  = threading.Event()
@@ -459,40 +421,44 @@ class NRSC5TextDecoder(Decoder):
     def _run_pipeline(self, iq: np.ndarray, sc_outer: int) -> dict:
         info = {}
 
-        # Stage 2: CP correlation → symbol timing
-        offset, sync_q = _find_timing(iq)
+        # Stage 2: Sideband bandpass filter — removes FM carrier from timing.
+        # The FM carrier is ≈15 dB above the digital sidebands; without this
+        # it dominates the CP metric and sync_q stays near the noise floor.
+        iq_filt = _sideband_only(iq, sc_outer)
+
+        # Stage 3: CP correlation on filtered signal → symbol timing
+        offset, sync_q = _find_timing(iq_filt)
         info['sync_q'] = round(sync_q, 1)
-        n_sym = (len(iq) - offset) // _SYM
+        n_sym = (len(iq_filt) - offset) // _SYM
         if n_sym < _FRAME_SYMS:
             info['status'] = 'no sync'
             return info
 
-        # Stage 3: OFDM FFT
-        ffts = _ofdm_fft(iq, offset, n_sym)   # (n_sym, 2048) complex64
+        # Stage 4: OFDM FFT on sideband-filtered signal
+        ffts = _ofdm_fft(iq_filt, offset, n_sym)   # (n_sym, 2048) complex64
 
-        # Stage 4: DC pilot phase tracking
-        phase = _pilot_phase(ffts)             # (n_sym,) unit phasor
+        # Extract sideband subcarrier bins
+        hi = ffts[:, _HI_A: sc_outer + 1]
+        lo = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1]
 
-        # Stage 5: Frame sync from pilot autocorrelation
-        frame_off = _frame_sync(phase)
-        info['frame_off'] = frame_off
-
-        # Stage 5½: MER and status from phase-corrected constellation
-        mer = _mer_db(ffts, phase, sc_outer)
+        # Stage 5 + 5½: Per-subcarrier phase estimation and MER
+        hi_c, lo_c, mer = _estimate_phase_and_mer(hi, lo)
         info['mer'] = round(mer, 1)
 
-        if sync_q > 8.0 and mer > 0.0:
+        if sync_q > 6.0 and mer > 3.0:
             info['status'] = 'locked'
-        elif sync_q > 4.0:
+        elif sync_q > 3.0 or mer > 1.0:
             info['status'] = 'syncing'
         else:
             info['status'] = 'searching…'
-            return info
 
-        # Stage 6: Coherent BPSK → soft LLR
-        llr = _bpsk_llr(ffts, phase, sc_outer, frame_off)
+        # Stage 6: Soft LLR from phase-corrected BPSK constellation
+        # Real part of corrected symbols → positive = likely +1, negative = likely -1
+        llr = np.concatenate(
+            [hi_c.real, lo_c.real], axis=1
+        ).astype(np.float32).ravel()
 
-        n_sc  = (sc_outer - _HI_A + 1) * 2   # upper + lower SC count
+        n_sc       = (sc_outer - _HI_A + 1) * 2
         n_sym_used = (n_sym // _FRAME_SYMS) * _FRAME_SYMS
 
         # Stage 7: Deinterleave  *** PLACEHOLDER — needs NRSC-5-C table ***
@@ -569,12 +535,11 @@ class NRSC5TextDecoder(Decoder):
         status  = result.get('status',  'searching…')
         mer     = result.get('mer',     -99.0)
         sync_q  = result.get('sync_q',  0.0)
-        foff    = result.get('frame_off', 0)
         station = result.get('name') or result.get('id') or '—'
 
         lines = [
-            'HD Radio  {}  MER {:+.0f} dB  sync {:.1f}  frame@{}'.format(
-                status, mer, sync_q, foff),
+            'HD Radio  {}  MER {:+.0f} dB  sync {:.1f}'.format(
+                status, mer, sync_q),
             'Station: {}'.format(station),
             'Slogan:  {}'.format(result.get('slogan') or '—'),
             'Now:     {}'.format(result.get('psd')    or '—'),
