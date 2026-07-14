@@ -1,131 +1,156 @@
-"""NRSC-5 HD Radio text decoder.
+"""NRSC-5 HD Radio signal processor — pure Python/NumPy.
 
-Uses libnrsc5 (https://github.com/theori-io/nrsc5) via ctypes when the
-library is installed ('brew install nrsc5' on macOS).  Falls back to a
-signal-presence / SNR display when the library is absent.
+SIGNAL CHAIN (each stage is a labelled function):
+
+  1. Resample         — FFT-based, O(N log N), no FIR design cost
+  2. CP correlation   — finds OFDM symbol timing
+  3. OFDM FFT         — one batched 2-D FFT per block (GIL-free)
+  4. Pilot tracking   — SC 0 (DC) is a reference carrier; used to remove
+                        per-symbol carrier-phase drift before coherent detect
+  5. Coherent BPSK    — real part of (subcarrier × conj(pilot)) gives LLR
+                        (replaces the old differential approach which
+                         accumulated cross-symbol phase errors)
+  6. MER estimate     — signal² / noise² from real vs imag constellation arms
+  7. Deinterleave     — block deinterleaver spanning 32 symbols × 382 SC.
+                        *** NEEDS NRSC-5-C TABLE 11-8 permutation ***
+                        Currently identity → Viterbi input is scrambled.
+  8. Descramble       — XOR with 9-bit LFSR PN sequence.
+                        *** NEEDS NRSC-5-C poly + init per frame ***
+                        Currently identity → coded bits still scrambled.
+  9. Viterbi          — rate-½, K=7, G=(0o133, 0o171), vectorised ACS
+ 10. SIS PDU scan     — slide over decoded bytes; validate CRC-16/CCITT
 
 OFDM parameters (FM Hybrid mode, NRSC-5-C §11):
   Native sample rate : 744 187.5 Hz
-  FFT size           : 2048
+  FFT size           : 2048 subcarriers
   Cyclic prefix      : 112 samples
-  Symbol period      : 2160 samples
+  Symbol period      : 2160 samples  (~345 symbols/s)
   Subcarrier spacing : 363.4 Hz
-  Primary sidebands  : SC ±356…±546  (191 subcarriers each)
-  Secondary sidebands: SC ±547…±682  (136 subcarriers each)
+  Primary sidebands  : SC ±356…±546 (191 SC each, 382 total)
+  Frame              : 32 OFDM symbols (~92.8 ms)
 """
-import ctypes as ct
-import ctypes.util
 import curses
 import threading
 import time
 import numpy as np
 from core import Decoder, AppState, LABEL_W
 
-# ── OFDM constants ────────────────────────────────────────────────────────────
-_SR   = 744_187          # processing rate (native: 744 187.5 Hz)
+# ── NRSC-5 OFDM constants ─────────────────────────────────────────────────────
+_SR   = 744_187
 _FFT  = 2048
 _CP   = 112
-_SYM  = _FFT + _CP       # 2160 samples / symbol
+_SYM  = _FFT + _CP        # 2160 samples / symbol
 
-_HI_A, _HI_B =  356,  546   # primary upper sideband SC range
-_MIN_SR       = 1_024_000
-_DECODE_SYMS  = 64
-_DECODE_INTERVAL = 3.0
+_HI_A, _HI_B =  356,  546   # upper primary sideband SC range
+_FRAME_SYMS   = 32           # OFDM symbols per Layer-1 frame
+_MIN_SR        = 1_024_000
 
-# ── libnrsc5 ctypes interface ─────────────────────────────────────────────────
-_EVT_SYNC      = 2
-_EVT_LOST_SYNC = 3
-_EVT_MER       = 4
-_EVT_ID3       = 8
-_EVT_SIS       = 11
+# How many full frames to accumulate before one decode pass.
+# More frames → more data to scan for valid SIS PDUs.
+_DECODE_FRAMES   = 4         # 4 × 32 × 2160 = 276 480 samples at 744 kHz
+_DECODE_INTERVAL = 2.0       # minimum wall-clock seconds between passes
 
+# Viterbi / convolutional code (rate-1/2, K=7)
+_K       = 7
+_NSTATES = 1 << (_K - 1)    # 64
 
-class _Mer(ct.Structure):
-    _fields_ = [('lower', ct.c_float), ('upper', ct.c_float)]
+# ── Stage 9 helpers: Viterbi (rate-1/2, K=7, G=0o133/0o171) ─────────────────
 
-
-class _Sis(ct.Structure):
-    # Matches nrsc5.h on 64-bit little-endian (ARM64 / x86_64).
-    # ctypes inserts 4 B of padding after fcc_facility_id to align the
-    # following char* to an 8-byte boundary — matching the C ABI.
-    _fields_ = [
-        ('country_code',    ct.c_char_p),
-        ('fcc_facility_id', ct.c_int),
-        ('name',            ct.c_char_p),
-        ('slogan',          ct.c_char_p),
-        ('message',         ct.c_char_p),
-        ('alert',           ct.c_char_p),
-        ('latitude',        ct.c_float),
-        ('longitude',       ct.c_float),
-        ('altitude',        ct.c_int),
-        ('num_services',    ct.c_uint),
-        ('services',        ct.c_void_p),
-    ]
+def _build_trellis():
+    G  = (0b1011011, 0b1111001)
+    ns = np.zeros((_NSTATES, 2), dtype=np.int32)
+    bm = np.zeros((_NSTATES, 2, 2), dtype=np.float32)
+    for s in range(_NSTATES):
+        for b in range(2):
+            r        = s | (b << (_K - 1))
+            o0, o1   = bin(r & G[0]).count('1') & 1, bin(r & G[1]).count('1') & 1
+            ns[s, b] = (s >> 1) | (b << (_K - 2))
+            bm[s, b] = [1.0 - 2.0 * o0, 1.0 - 2.0 * o1]
+    ps  = np.zeros((_NSTATES, 2), dtype=np.int32)
+    pb  = np.zeros((_NSTATES, 2), dtype=np.int32)
+    cnt = np.zeros(_NSTATES,      dtype=np.int32)
+    for s in range(_NSTATES):
+        for b in range(2):
+            n = ns[s, b]; ps[n, cnt[n]] = s; pb[n, cnt[n]] = b; cnt[n] += 1
+    return ns, bm, ps, pb
 
 
-class _ID3(ct.Structure):
-    # ctypes inserts 4 B of padding after `program` to align the first char*.
-    _fields_ = [
-        ('program',    ct.c_uint),
-        ('title',      ct.c_char_p),
-        ('artist',     ct.c_char_p),
-        ('album',      ct.c_char_p),
-        ('genre',      ct.c_char_p),
-        ('ufid_owner', ct.c_char_p),
-        ('ufid_id',    ct.c_char_p),
-        ('xhdr_mime',  ct.c_uint),
-        ('xhdr_param', ct.c_int),
-        ('xhdr_lot',   ct.c_int),
-    ]
+_TNS, _TBM, _TPS, _TPB = _build_trellis()
 
 
-class _EvtUnion(ct.Union):
-    _fields_ = [('mer', _Mer), ('id3', _ID3), ('sis', _Sis)]
+def _viterbi(llr: np.ndarray) -> np.ndarray:
+    """Soft-decision Viterbi.  llr[2i], llr[2i+1] = branch metrics at step i.
+
+    Yields the GIL every 64 steps so audio + curses threads stay responsive.
+    """
+    N   = len(llr) // 2
+    llr = llr[:2 * N].reshape(N, 2)
+    met = np.full(_NSTATES, -1e9, dtype=np.float32)
+    met[0] = 0.0
+    sur = np.empty((N, _NSTATES), dtype=np.int32)
+    for t in range(N):
+        if t & 63 == 0:
+            time.sleep(0)
+        l  = llr[t]
+        bm = _TBM[:, :, 0] * l[0] + _TBM[:, :, 1] * l[1]
+        c0 = met[_TPS[:, 0]] + bm[_TPS[:, 0], _TPB[:, 0]]
+        c1 = met[_TPS[:, 1]] + bm[_TPS[:, 1], _TPB[:, 1]]
+        ok  = c0 >= c1
+        met = np.where(ok, c0, c1)
+        sur[t] = np.where(ok, _TPS[:, 0], _TPS[:, 1])
+    out   = np.empty(N, dtype=np.uint8)
+    state = int(met.argmax())
+    for t in range(N - 1, -1, -1):
+        out[t] = (state >> (_K - 2)) & 1
+        state  = int(sur[t, state])
+    return out
 
 
-class _Event(ct.Structure):
-    # `type` is 4 B; the union has 8-B alignment (contains pointers),
-    # so ctypes adds 4 B of padding before `u`.  This matches the C ABI.
-    _fields_ = [('type', ct.c_uint), ('u', _EvtUnion)]
+# ── Stage 10: CRC-16/CCITT and SIS PDU scan ──────────────────────────────────
+_PDU_LABELS = {0x01: 'id', 0x04: 'name', 0x05: 'slogan', 0x07: 'psd'}
 
 
-_CB_T = ct.CFUNCTYPE(None, ct.POINTER(_Event), ct.c_void_p)
+def _crc16(data: bytes) -> int:
+    crc = 0xFFFF
+    for b in data:
+        crc ^= b << 8
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x1021) if (crc & 0x8000) else (crc << 1)
+    return crc & 0xFFFF
 
 
-def _find_libnrsc5():
-    """Return a ctypes CDLL handle for libnrsc5 or None."""
-    candidates = [
-        'nrsc5',
-        '/opt/homebrew/lib/libnrsc5.dylib',
-        '/usr/local/lib/libnrsc5.dylib',
-        '/usr/lib/libnrsc5.so',
-        '/usr/lib/x86_64-linux-gnu/libnrsc5.so.0',
-        '/usr/lib/aarch64-linux-gnu/libnrsc5.so.0',
-    ]
-    for name in candidates:
-        path = ct.util.find_library(name) or name
-        try:
-            lib = ct.CDLL(path)
-            # Verify required symbols exist and set signatures
-            lib.nrsc5_open_pipe.restype        = ct.c_int
-            lib.nrsc5_open_pipe.argtypes       = [ct.POINTER(ct.c_void_p)]
-            lib.nrsc5_close.argtypes           = [ct.c_void_p]
-            lib.nrsc5_start.argtypes           = [ct.c_void_p]
-            lib.nrsc5_stop.argtypes            = [ct.c_void_p]
-            lib.nrsc5_set_callback.argtypes    = [ct.c_void_p, _CB_T, ct.c_void_p]
-            lib.nrsc5_pipe_samples_cs16.argtypes = [ct.c_void_p,
-                                                     ct.POINTER(ct.c_int16),
-                                                     ct.c_uint]
-            return lib
-        except (OSError, AttributeError):
-            pass
-    return None
+def _scan_pdus(bits: np.ndarray) -> dict:
+    """Slide a window over decoded bits; collect CRC-valid SIS PDUs."""
+    n   = (len(bits) // 8) * 8
+    raw = bytes(np.packbits(bits[:n]))
+    out = {}
+    for plen in range(4, min(len(raw) + 1, 64)):
+        for start in range(len(raw) - plen + 1):
+            chunk = raw[start: start + plen]
+            if _crc16(chunk) == 0:
+                pdu_type = chunk[0] & 0x0F
+                label    = _PDU_LABELS.get(pdu_type)
+                if label:
+                    try:
+                        s = chunk[1:-2].split(b'\x00')[0].decode('ascii').strip()
+                        if s and any(c.isprintable() and not c.isspace() for c in s):
+                            out[label] = s
+                    except UnicodeDecodeError:
+                        pass
+            if len(out) >= 4:
+                return out
+    return out
 
 
-# ── signal-analysis helpers (fallback path, no libnrsc5) ─────────────────────
+# ── Stage 2: CP correlation (symbol timing) ───────────────────────────────────
 
 def _cp_metric(iq: np.ndarray) -> np.ndarray:
-    """CP correlation magnitude; peaks at OFDM symbol boundaries."""
+    """Windowed CP correlation.  Peak at symbol start because the CP is an
+    exact copy of the last _CP samples of the FFT window:
+      iq[n] == iq[n + _FFT]  for  n ∈ [sym_start, sym_start + _CP)
+    Sliding the sum of |iq[n]·conj(iq[n+_FFT])| over _CP samples gives a
+    sharp peak at every symbol boundary.
+    """
     n = len(iq) - _FFT - _CP
     if n <= 0:
         return np.zeros(1, dtype=np.float32)
@@ -134,11 +159,11 @@ def _cp_metric(iq: np.ndarray) -> np.ndarray:
     return np.abs(cs[_CP: n + 1] - cs[: n + 1 - _CP]).astype(np.float32)
 
 
-def _multi_peak_sync(iq: np.ndarray):
-    """Return (offset, quality) by averaging the two strongest CP peaks.
+def _find_timing(iq: np.ndarray):
+    """Return (offset, sync_quality) — quality = two-peak average / mean.
 
-    Pure noise gives avg quality ≈ 1.3; a real NRSC-5 signal gives ≥ 8.
-    Using two peaks (one symbol apart) filters incidental random peaks.
+    Using two peaks (one symbol apart) rejects incidental single-peak noise.
+    Pure noise → quality ≈ 1.3; real NRSC-5 OFDM → quality ≥ 8.
     """
     metric = _cp_metric(iq)
     if len(metric) < _SYM:
@@ -150,30 +175,188 @@ def _multi_peak_sync(iq: np.ndarray):
     return offset, (q1 + q2) / 2.0
 
 
-def _sideband_snr_db(iq: np.ndarray, offset: int, sc_outer: int) -> float:
-    """Compare power in digital sideband SC to adjacent noise-floor reference.
+# ── Stage 3: OFDM FFT (batched, GIL-free) ────────────────────────────────────
 
-    Reference band: SC 200..355 (above FM content, below inner NRSC-5 edge).
-    Positive values indicate energy above the noise floor at that location.
+def _ofdm_fft(iq: np.ndarray, offset: int, n_sym: int) -> np.ndarray:
+    """Remove CP and FFT-demodulate n_sym symbols.
+
+    Returns (n_sym, _FFT) complex64 matrix.  One 2-D FFT releases the GIL
+    for the entire computation — faster and more cooperative than a loop.
     """
-    avail = (len(iq) - offset) // _SYM
-    if avail < 2:
-        return -99.0
-    end      = offset + avail * _SYM
-    payloads = iq[offset:end].reshape(avail, _SYM)[:, _CP:]
-    ffts     = np.fft.fft(payloads, axis=1)
+    avail = min(n_sym, (len(iq) - offset) // _SYM)
+    if avail == 0:
+        return np.zeros((0, _FFT), dtype=np.complex64)
+    end   = offset + avail * _SYM
+    syms  = iq[offset:end].reshape(avail, _SYM)[:, _CP:]   # remove CP
+    return np.fft.fft(syms, axis=1).astype(np.complex64)
 
-    hi      = ffts[:, _HI_A: sc_outer + 1]
-    lo      = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1]
-    sb_pwr  = (float(np.mean(np.abs(hi) ** 2)) +
-               float(np.mean(np.abs(lo) ** 2))) * 0.5
 
-    ref_hi   = ffts[:, 200: _HI_A]
-    ref_lo   = ffts[:, _FFT - _HI_A: _FFT - 200]
-    ref_pwr  = (float(np.mean(np.abs(ref_hi) ** 2)) +
-                float(np.mean(np.abs(ref_lo) ** 2))) * 0.5 + 1e-20
+# ── Stage 4: Pilot phase tracking ────────────────────────────────────────────
 
-    return float(10.0 * np.log10(sb_pwr / ref_pwr))
+def _pilot_phase(ffts: np.ndarray) -> np.ndarray:
+    """Extract the unit-phasor of SC 0 (DC reference carrier) per symbol.
+
+    NRSC-5 transmits a continuous-wave reference at SC 0 with a fixed
+    known amplitude.  Its phase rotates only with residual frequency error
+    and channel phase drift — NOT with data.  Dividing every data subcarrier
+    by this phasor removes common-mode carrier phase drift, enabling coherent
+    (rather than differential) BPSK detection.
+
+    Note: the absolute polarity (+1 or -1) of the DC pilot changes with
+    the frame number according to a PN sequence defined in NRSC-5-C §11.3.
+    We don't know that sequence here, so the absolute sign of the LLRs
+    alternates; the Viterbi decoder sees the right magnitude but sometimes
+    the wrong polarity for whole frames.  Solving this requires frame sync
+    (Stage 5, below) combined with the pilot PN lookup table.
+    """
+    pilot = ffts[:, 0]                          # (n_sym,) complex
+    mag   = np.abs(pilot) + 1e-12
+    return (pilot / mag).astype(np.complex64)   # unit phasor per symbol
+
+
+# ── Stage 5: Frame sync ───────────────────────────────────────────────────────
+
+def _frame_sync(pilot_phasors: np.ndarray) -> int:
+    """Find the start of a 32-symbol frame using pilot-phase periodicity.
+
+    Within each frame, the DC pilot polarity follows a fixed PN pattern
+    (same for every frame).  Between frames the pattern repeats, so
+    computing the autocorrelation of the pilot phasor at lag=32 symbols
+    gives a peak at multiples of the frame boundary.
+
+    We search the first _FRAME_SYMS symbols for the offset that maximises
+    this autocorrelation: the symbol with the highest 'frame-phase coherence'
+    is symbol 0 of a frame.
+
+    Without the PN lookup table (NRSC-5-C §11.3 Table 11-x) we cannot
+    correct the per-symbol pilot polarity, so this gives us FRAME TIMING
+    but not absolute BIT PHASE within the frame.  That correction is applied
+    after the deinterleaver (Stage 7).
+    """
+    n = len(pilot_phasors)
+    if n < _FRAME_SYMS * 2:
+        return 0
+    # Autocorrelation at lag = one frame
+    corr = (pilot_phasors[:n - _FRAME_SYMS]
+            * np.conj(pilot_phasors[_FRAME_SYMS:]))
+    # Rolling sum over one frame window
+    window = np.ones(_FRAME_SYMS)
+    strength = np.abs(np.convolve(corr.real, window, mode='valid'))
+    return int(np.argmax(strength[:_FRAME_SYMS]))
+
+
+# ── Stage 5½: Sideband SNR from pilot-corrected constellation ────────────────
+
+def _mer_db(ffts: np.ndarray, phase: np.ndarray, sc_outer: int) -> float:
+    """Modulation Error Ratio from the BPSK constellation.
+
+    After phase correction the constellation should cluster at ±A on the
+    real axis with noise on the imaginary axis.
+    MER = 10 log10( mean(real²) / mean(imag²) )
+
+    This is a real signal-quality metric — distinct from the old SNR proxy
+    which compared sideband power to an adjacent noise band.
+    """
+    hi = ffts[:, _HI_A: sc_outer + 1]
+    lo = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1]
+    p  = phase[:, np.newaxis]
+    hi_d = hi * np.conj(p)
+    lo_d = lo * np.conj(p)
+    both = np.concatenate([hi_d, lo_d], axis=1)
+    sig  = float(np.mean(both.real ** 2))
+    nse  = float(np.mean(both.imag ** 2)) + 1e-20
+    return float(10.0 * np.log10(sig / nse))
+
+
+# ── Stage 6: Coherent BPSK → soft LLR ───────────────────────────────────────
+
+def _bpsk_llr(ffts: np.ndarray, phase: np.ndarray, sc_outer: int,
+               frame_off: int) -> np.ndarray:
+    """Coherent BPSK soft-decisions for both sidebands.
+
+    Returns float32 array of shape (n_usable_syms × n_sc,) where positive
+    values are 'likely +1' and negative values are 'likely −1'.
+
+    Layout: for each symbol (in frame order starting at frame_off), all
+    upper-sideband subcarriers SC 356..sc_outer followed by all lower-side-
+    band subcarriers SC (FFT-sc_outer)..(FFT-356), both in ascending FFT-bin
+    order.  The interleaver (Stage 7) permutes this flat array.
+
+    WHY coherent instead of differential:
+      Differential BPSK (angle of s[n]×conj(s[n-1])) only works when
+      consecutive symbols on the same subcarrier are INTENDED to encode the
+      difference.  NRSC-5 uses COHERENT BPSK: each symbol independently
+      encodes +1 or -1 relative to an absolute phase reference (the pilot).
+      Differential detection introduces error propagation and doubles the
+      noise variance compared to coherent.
+    """
+    n_sym    = ffts.shape[0]
+    # Align to frame boundary so the deinterleaver sees symbol 0 first.
+    start    = frame_off % n_sym
+    ordered  = np.roll(ffts, -start, axis=0)
+    ph_ord   = np.roll(phase, -start)
+    n_usable = (n_sym // _FRAME_SYMS) * _FRAME_SYMS   # keep whole frames only
+
+    hi = ordered[:n_usable, _HI_A: sc_outer + 1]
+    lo = ordered[:n_usable, _FFT - sc_outer: _FFT - _HI_A + 1]
+    p  = ph_ord[:n_usable, np.newaxis]
+
+    hi_d = (hi * np.conj(p)).real
+    lo_d = (lo * np.conj(p)).real
+    # (n_usable, n_hi + n_lo) → flatten in symbol-major order
+    both = np.concatenate([hi_d, lo_d], axis=1)
+    return both.astype(np.float32).ravel()
+
+
+# ── Stage 7: Block deinterleaver ─────────────────────────────────────────────
+
+def _deinterleave(llr: np.ndarray, n_sym: int, n_sc: int) -> np.ndarray:
+    """Reverse the NRSC-5 time-frequency block interleaver.
+
+    The NRSC-5-C interleaver (§11.4) spreads coded bits across all n_sym
+    symbols and n_sc subcarriers of a 'super-frame' (multiple L1 frames)
+    to maximise time AND frequency diversity against fading.
+
+    The permutation π(i) is defined by a formula in NRSC-5-C Table 11-x.
+    We don't have that table, so this function currently returns the input
+    unchanged (identity permutation).  This means the Viterbi decoder sees
+    the bits in the WRONG ORDER, making its output appear random even when
+    the signal is strong.
+
+    To complete this stage, replace the body with:
+        perm = _build_interleaver_table(n_sym, n_sc)   # from spec Table 11-x
+        return llr[perm]
+
+    Once implemented, the improvement in decoded BER is dramatic — typically
+    going from ~50 % (random) to <1 % on a good signal.
+    """
+    # *** NRSC-5-C TABLE 11-x PERMUTATION GOES HERE ***
+    return llr          # identity — placeholder
+
+
+# ── Stage 8: PN descrambler ───────────────────────────────────────────────────
+
+def _descramble(llr: np.ndarray, frame_idx: int) -> np.ndarray:
+    """XOR the coded bit stream with the NRSC-5 PN scrambler sequence.
+
+    The NRSC-5 scrambler is a 9-bit LFSR (polynomial and tap configuration
+    defined in NRSC-5-C §11.5).  The initial state is loaded at the start
+    of each super-frame from a value known to both transmitter and receiver.
+
+    We flip the sign of LLR values where the PN sequence is '1' (XOR in
+    the log-likelihood domain is a sign flip, not bit inversion after Viterbi).
+
+    Without the polynomial and initialisation sequence we cannot generate the
+    PN mask, so this function currently returns the input unchanged.
+
+    To complete this stage:
+        lfsr  = _lfsr_init(frame_idx)          # from NRSC-5-C §11.5
+        mask  = _lfsr_sequence(lfsr, len(llr)) # 0/1 per coded bit
+        signs = 1.0 - 2.0 * mask.astype(np.float32)
+        return llr * signs
+    """
+    # *** NRSC-5-C §11.5 SCRAMBLER GOES HERE ***
+    return llr          # identity — placeholder
 
 
 # ── Plugin ────────────────────────────────────────────────────────────────────
@@ -185,20 +368,16 @@ class NRSC5TextDecoder(Decoder):
     min_sample_rate = _MIN_SR
 
     def __init__(self):
-        self._lib      = None          # libnrsc5 CDLL or None
-        self._st       = ct.c_void_p() # nrsc5_t*
-        self._cb_ref   = None          # keep CFUNCTYPE alive
+        self._buf_lock   = threading.Lock()
+        self._iq_buf     = np.zeros(0, dtype=np.complex64)
+        self._sr_cached  = None
+        self._sc_outer   = _HI_B
 
-        self._buf_lock  = threading.Lock()
-        self._iq_buf    = np.zeros(0, dtype=np.complex64)
-        self._sr_cached = None
-        self._sc_outer  = _HI_B
-
-        self._info_lock = threading.Lock()
-        self._info      = {
+        self._info_lock  = threading.Lock()
+        self._info = {
             'status': 'searching…',
             'name': '', 'slogan': '', 'psd': '',
-            'snr': -99.0, 'sync_q': 0.0, 'lib': False,
+            'mer': -99.0, 'sync_q': 0.0, 'frame_off': 0,
         }
         self._active = False
         self._event  = threading.Event()
@@ -211,49 +390,20 @@ class NRSC5TextDecoder(Decoder):
         with self._buf_lock:
             self._iq_buf    = np.zeros(0, dtype=np.complex64)
             self._sr_cached = None
-
-        self._lib = _find_libnrsc5()
-        if self._lib:
-            ptr = ct.c_void_p()
-            if self._lib.nrsc5_open_pipe(ct.byref(ptr)) == 0:
-                self._st = ptr
-                self._cb_ref = _CB_T(self._nrsc5_callback)
-                self._lib.nrsc5_set_callback(self._st, self._cb_ref, None)
-                self._thread = threading.Thread(
-                    target=lambda: self._lib.nrsc5_start(self._st),
-                    name='nrsc5-decode', daemon=True)
-                self._thread.start()
-                with self._info_lock:
-                    self._info['lib']    = True
-                    self._info['status'] = 'searching…'
-                return
-            # open_pipe failed — fall through to analysis path
-            self._lib = None
-
-        with self._info_lock:
-            self._info['lib']    = False
-            self._info['status'] = 'searching…'
-        self._thread = threading.Thread(target=self._analysis_loop,
-                                        name='nrsc5-analysis', daemon=True)
+        self._thread = threading.Thread(
+            target=self._decode_loop, name='nrsc5', daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._active = False
-        if self._lib and self._st:
-            self._lib.nrsc5_stop(self._st)
         self._event.set()
         if self._thread:
             self._thread.join(timeout=3.0)
             self._thread = None
-        if self._lib and self._st:
-            self._lib.nrsc5_close(self._st)
-        self._st     = ct.c_void_p()
-        self._lib    = None
-        self._cb_ref = None
         with self._buf_lock:
             self._iq_buf = np.zeros(0, dtype=np.complex64)
 
-    # ── SDR callback (fast path) ──────────────────────────────────────────────
+    # ── process() — SDR callback, fast path ──────────────────────────────────
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
@@ -266,70 +416,27 @@ class NRSC5TextDecoder(Decoder):
 
         self._sc_outer = state.nrsc5_sc_outer
 
-        out_len = max(1, round(len(samples) * _SR / sr))
-        rs = _sp_resample(samples, out_len).astype(np.complex64)
+        # Stage 1: Resample to NRSC-5 native rate.
+        # FFT-based resample is O(N log N) with no FIR design cost.
+        # resample_poly would need a ~20M-tap FIR for the coprime 1024000/744187 ratio.
+        out_n = max(1, round(len(samples) * _SR / sr))
+        rs    = _sp_resample(samples, out_n).astype(np.complex64)
 
-        if self._lib and self._st:
-            # Feed directly to libnrsc5 as interleaved int16 I/Q at ~744 kHz
-            i16  = (np.clip(rs.real, -1.0, 1.0) * 32767).astype(np.int16)
-            q16  = (np.clip(rs.imag, -1.0, 1.0) * 32767).astype(np.int16)
-            cs16 = np.empty(len(rs) * 2, dtype=np.int16)
-            cs16[0::2] = i16
-            cs16[1::2] = q16
-            self._lib.nrsc5_pipe_samples_cs16(
-                self._st,
-                cs16.ctypes.data_as(ct.POINTER(ct.c_int16)),
-                ct.c_uint(len(cs16)))
-        else:
-            with self._buf_lock:
-                self._iq_buf = np.concatenate([self._iq_buf, rs])
-                _cap = (_DECODE_SYMS * _SYM + _CP) * 2
-                if len(self._iq_buf) > _cap:
-                    self._iq_buf = self._iq_buf[-_cap:]
-                if len(self._iq_buf) >= _DECODE_SYMS * _SYM + _CP:
-                    self._event.set()
+        with self._buf_lock:
+            self._iq_buf = np.concatenate([self._iq_buf, rs])
+            _cap = _DECODE_FRAMES * _FRAME_SYMS * _SYM + _CP
+            if len(self._iq_buf) > _cap * 2:
+                self._iq_buf = self._iq_buf[-_cap * 2:]
+            if len(self._iq_buf) >= _cap:
+                self._event.set()
 
         with self._info_lock:
             return dict(self._info)
 
-    # ── libnrsc5 event callback ───────────────────────────────────────────────
+    # ── decode loop — background thread ──────────────────────────────────────
 
-    def _nrsc5_callback(self, evt_p, _opaque):
-        if not self._active:
-            return
-        evt = evt_p.contents
-        t   = evt.type
-        upd = {}
-        if t == _EVT_SYNC:
-            upd['status'] = 'locked'
-        elif t == _EVT_LOST_SYNC:
-            upd['status'] = 'searching…'
-        elif t == _EVT_MER:
-            upd['snr'] = round(float(evt.u.mer.lower), 1)
-        elif t == _EVT_SIS:
-            raw_name   = evt.u.sis.name
-            raw_slogan = evt.u.sis.slogan
-            if raw_name:
-                upd['name']   = raw_name.decode('utf-8', errors='replace').strip()
-            if raw_slogan:
-                upd['slogan'] = raw_slogan.decode('utf-8', errors='replace').strip()
-        elif t == _EVT_ID3:
-            parts = []
-            for field in (evt.u.id3.title, evt.u.id3.artist):
-                if field:
-                    s = field.decode('utf-8', errors='replace').strip()
-                    if s:
-                        parts.append(s)
-            if parts:
-                upd['psd'] = ' — '.join(parts)
-        if upd:
-            with self._info_lock:
-                self._info.update(upd)
-
-    # ── signal-analysis fallback loop (no libnrsc5) ───────────────────────────
-
-    def _analysis_loop(self) -> None:
-        need     = _DECODE_SYMS * _SYM + _CP
+    def _decode_loop(self) -> None:
+        need     = _DECODE_FRAMES * _FRAME_SYMS * _SYM + _CP
         next_run = 0.0
         while self._active:
             self._event.wait(timeout=0.5)
@@ -344,24 +451,68 @@ class NRSC5TextDecoder(Decoder):
                 iq           = self._iq_buf[:need].copy()
                 self._iq_buf = self._iq_buf[need // 2:]
 
-            sc_outer        = self._sc_outer
-            offset, sync_q  = _multi_peak_sync(iq)
-            snr_db          = _sideband_snr_db(iq, offset, sc_outer)
-
-            if sync_q > 8.0 and snr_db > 2.0:
-                status = 'signal present'
-            elif sync_q > 4.0:
-                status = 'syncing'
-            else:
-                status = 'searching…'
-
+            info = self._run_pipeline(iq, self._sc_outer)
             with self._info_lock:
-                self._info.update({
-                    'status': status,
-                    'sync_q': round(sync_q, 1),
-                    'snr':    round(snr_db, 1),
-                })
+                self._info.update(info)
             next_run = time.monotonic() + _DECODE_INTERVAL
+
+    def _run_pipeline(self, iq: np.ndarray, sc_outer: int) -> dict:
+        info = {}
+
+        # Stage 2: CP correlation → symbol timing
+        offset, sync_q = _find_timing(iq)
+        info['sync_q'] = round(sync_q, 1)
+        n_sym = (len(iq) - offset) // _SYM
+        if n_sym < _FRAME_SYMS:
+            info['status'] = 'no sync'
+            return info
+
+        # Stage 3: OFDM FFT
+        ffts = _ofdm_fft(iq, offset, n_sym)   # (n_sym, 2048) complex64
+
+        # Stage 4: DC pilot phase tracking
+        phase = _pilot_phase(ffts)             # (n_sym,) unit phasor
+
+        # Stage 5: Frame sync from pilot autocorrelation
+        frame_off = _frame_sync(phase)
+        info['frame_off'] = frame_off
+
+        # Stage 5½: MER and status from phase-corrected constellation
+        mer = _mer_db(ffts, phase, sc_outer)
+        info['mer'] = round(mer, 1)
+
+        if sync_q > 8.0 and mer > 0.0:
+            info['status'] = 'locked'
+        elif sync_q > 4.0:
+            info['status'] = 'syncing'
+        else:
+            info['status'] = 'searching…'
+            return info
+
+        # Stage 6: Coherent BPSK → soft LLR
+        llr = _bpsk_llr(ffts, phase, sc_outer, frame_off)
+
+        n_sc  = (sc_outer - _HI_A + 1) * 2   # upper + lower SC count
+        n_sym_used = (n_sym // _FRAME_SYMS) * _FRAME_SYMS
+
+        # Stage 7: Deinterleave  *** PLACEHOLDER — needs NRSC-5-C table ***
+        llr = _deinterleave(llr, n_sym_used, n_sc)
+
+        # Stage 8: PN descramble  *** PLACEHOLDER — needs NRSC-5-C poly ***
+        llr = _descramble(llr, 0)
+
+        # Limit Viterbi length to keep background thread cooperative
+        max_bits = 2048
+        if len(llr) > max_bits * 2:
+            llr = llr[:max_bits * 2]
+
+        # Stage 9: Viterbi FEC
+        bits = _viterbi(llr)
+
+        # Stage 10: SIS PDU scan
+        text = _scan_pdus(bits)
+        info.update(text)
+        return info
 
     # ── UI hooks ──────────────────────────────────────────────────────────────
 
@@ -378,14 +529,13 @@ class NRSC5TextDecoder(Decoder):
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
-        sc_w    = _SR / _FFT
-        sh_khz  = (state.nrsc5_sc_outer - _HI_A) * sc_w / 1000
-        lib_tag = '' if result.get('lib') else '(no lib) '
-        return '[HD:{} {:+.0f}dB {:.0f}kHz] {}'.format(
+        sc_w   = _SR / _FFT
+        sh_khz = (state.nrsc5_sc_outer - _HI_A) * sc_w / 1000
+        return '[HD:{} MER:{:+.0f}dB {:.0f}kHz sync:{:.1f}] '.format(
             result.get('status', '?'),
-            result.get('snr', -99.0),
+            result.get('mer', -99.0),
             sh_khz,
-            lib_tag)
+            result.get('sync_q', 0.0))
 
     def draw_overlay(self, screen_obj, state: AppState, result: dict,
                      freq_min: float, freq_range: float,
@@ -393,11 +543,11 @@ class NRSC5TextDecoder(Decoder):
         if height < 6:
             return
 
-        # Cyan tint on digital sideband columns
+        # Cyan tint on the digital sideband columns
         if curses.has_colors():
             cf       = state.center_hz
             sc_w     = _SR / _FFT
-            inner_hz = _HI_A * sc_w          # ≈ 129 kHz (inner edge, fixed)
+            inner_hz = _HI_A * sc_w
             outer_hz = state.nrsc5_sc_outer * sc_w
             for sign in (-1, 1):
                 c_l = int(max(0, (cf + sign * inner_hz - freq_min)
@@ -408,24 +558,23 @@ class NRSC5TextDecoder(Decoder):
                     c_l, c_r = c_r, c_l
                 if c_r <= c_l:
                     continue
-                attr = curses.color_pair(1)
                 for r in range(height - 5):
                     try:
-                        screen_obj.chgat(r + 1, LABEL_W + c_l, c_r - c_l, attr)
+                        screen_obj.chgat(r + 1, LABEL_W + c_l,
+                                         c_r - c_l, curses.color_pair(1))
                     except curses.error:
                         pass
 
-        # Bottom 5 body rows: decoded / detected text
+        # Bottom 5 body rows
         status  = result.get('status',  'searching…')
-        snr     = result.get('snr',     -99.0)
+        mer     = result.get('mer',     -99.0)
         sync_q  = result.get('sync_q',  0.0)
-        lib_ok  = result.get('lib',     False)
-        station = result.get('name')   or result.get('id')     or '—'
-        hint    = '' if lib_ok else '  [brew install nrsc5 to decode]'
+        foff    = result.get('frame_off', 0)
+        station = result.get('name') or result.get('id') or '—'
 
         lines = [
-            'HD Radio  {}  {:+.0f} dB  sync {:.1f}{}'.format(
-                status, snr, sync_q, hint),
+            'HD Radio  {}  MER {:+.0f} dB  sync {:.1f}  frame@{}'.format(
+                status, mer, sync_q, foff),
             'Station: {}'.format(station),
             'Slogan:  {}'.format(result.get('slogan') or '—'),
             'Now:     {}'.format(result.get('psd')    or '—'),
