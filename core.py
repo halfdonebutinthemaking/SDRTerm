@@ -60,7 +60,7 @@ def correct_iq(samples):
 @dataclass
 class AppState:
     center_hz:       float         = CENTER_HZ
-    bw_idx:          int           = len(BW_STEPS) - 1
+    bw_hz:           int           = BW_STEPS[-1]  # clamped to device list after open()
     gain_db:         float         = GAIN_DEF
     gain_auto:       bool          = False
     iq_corr:         bool          = False
@@ -77,10 +77,6 @@ class AppState:
     pending_sr:        Optional[int]   = None  # sample-rate change queued by active plugin
     pending_freq:      Optional[float] = None  # frequency change queued by active plugin
     pending_gain:      Optional[float] = None  # gain change (≥0 = dB, <0 = auto)
-
-    @property
-    def bw_hz(self) -> int:
-        return BW_STEPS[self.bw_idx]
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
@@ -121,9 +117,9 @@ class Device:
       handle_key — called for unhandled keys on the core tab; return True to consume
       status_text — short status string shown in the core footer lhs after [IQ]
 
-    supported_bandwidths — ordered subset of BW_STEPS the device can use.
-      The BW up/down toggle skips any step not in this list.
-      Defaults to the full BW_STEPS list so existing devices need no change.
+    supported_bandwidths — bandwidths (Hz) the device can operate at, in
+      ascending order.  The BW up/down toggle steps through this list only.
+      Defaults to BW_STEPS so devices that don't override it keep working.
     """
     name:                str  = ''
     key_help:            str  = ''
@@ -140,15 +136,16 @@ class Device:
 # ── registry helpers ──────────────────────────────────────────────────────────
 def _required_bw(names: set, registry: dict) -> int:
     if not names:
-        return BW_STEPS[0]
+        return 0
     return max(registry[n].min_sample_rate for n in names)
 
 
-def _nearest_bw(rate: int) -> int:
-    for step in BW_STEPS:
+def _nearest_bw(rate: int, supported: list) -> int:
+    """Return the lowest value in supported that is >= rate, or the max."""
+    for step in sorted(supported):
         if step >= rate:
             return step
-    return BW_STEPS[-1]
+    return max(supported)
 
 
 def toggle_decoder(name: str, registry: dict, state: AppState, sdr) -> None:
@@ -157,9 +154,9 @@ def toggle_decoder(name: str, registry: dict, state: AppState, sdr) -> None:
         state.active_decoders.discard(name)
     else:
         needed = _required_bw(state.active_decoders | {name}, registry)
-        new_bw = _nearest_bw(needed)
+        new_bw = _nearest_bw(needed, sdr.supported_bandwidths)
         if new_bw > state.bw_hz:
-            state.bw_idx    = BW_STEPS.index(new_bw)
+            state.bw_hz     = new_bw
             sdr.sample_rate = new_bw
         registry[name].start(state)
         state.active_decoders.add(name)

@@ -9,7 +9,7 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 
 from core import (
     AppState, Device, fmt_freq, parse_freq,
-    BW_STEPS, FFT_BINS, N_AVG, DB_MAX, DB_MIN, DB_RANGE,
+    FFT_BINS, N_AVG, DB_MAX, DB_MIN, DB_RANGE,
     LABEL_W, REFRESH_S, GAIN_MIN, GAIN_MAX, GAIN_STEP, READ_MAX,
     _required_bw, _nearest_bw, toggle_decoder,
 )
@@ -327,19 +327,16 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.center_hz += state.bw_hz / FFT_BINS
             sdr.center_freq  = state.center_hz
         elif key == curses.KEY_UP:
-            supported = set(sdr.supported_bandwidths)
-            next_idx  = next((i for i in range(state.bw_idx + 1, len(BW_STEPS))
-                              if BW_STEPS[i] in supported), None)
-            if next_idx is not None:
-                state.bw_idx    = next_idx
+            higher = [b for b in sdr.supported_bandwidths if b > state.bw_hz]
+            if higher:
+                state.bw_hz     = min(higher)
                 sdr.sample_rate = state.bw_hz
         elif key == curses.KEY_DOWN:
-            supported = set(sdr.supported_bandwidths)
-            min_bw    = _required_bw(state.active_decoders, registry)
-            prev_idx  = next((i for i in range(state.bw_idx - 1, -1, -1)
-                              if BW_STEPS[i] in supported and BW_STEPS[i] >= min_bw), None)
-            if prev_idx is not None:
-                state.bw_idx    = prev_idx
+            min_bw = _required_bw(state.active_decoders, registry)
+            lower  = [b for b in sdr.supported_bandwidths
+                      if b < state.bw_hz and b >= min_bw]
+            if lower:
+                state.bw_hz     = max(lower)
                 sdr.sample_rate = state.bw_hz
         else:
             sdr.handle_key(key, state)
@@ -371,13 +368,11 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     # stable ordered list of all toggleable plugins (used for the menu)
     all_plugins = [p for p in registry.values() if p.key]
 
-    # Clamp bw_idx to a bandwidth the device actually supports.  Matters when
-    # --bw was given but the value isn't in the device's supported list.
-    supported = set(sdr.supported_bandwidths)
-    if BW_STEPS[state.bw_idx] not in supported:
-        valid = [i for i, b in enumerate(BW_STEPS) if b in supported]
-        if valid:
-            state.bw_idx = min(valid, key=lambda i: abs(BW_STEPS[i] - state.bw_hz))
+    # Clamp bw_hz to the nearest value the device actually supports.
+    # Matters when --bw was given but doesn't exactly match a supported step.
+    if state.bw_hz not in sdr.supported_bandwidths:
+        state.bw_hz = min(sdr.supported_bandwidths,
+                          key=lambda b: abs(b - state.bw_hz))
 
     sdr.sample_rate = state.bw_hz
     sdr.center_freq = state.center_hz
@@ -455,8 +450,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 state.pending_gain = None
 
             if state.pending_sr is not None:
-                new_bw = _nearest_bw(state.pending_sr)
-                state.bw_idx = BW_STEPS.index(new_bw)
+                state.bw_hz     = _nearest_bw(state.pending_sr, sdr.supported_bandwidths)
                 sdr.sample_rate = state.bw_hz
                 state.pending_sr = None
                 # bw_hz changed → the check below restarts the reader
@@ -533,7 +527,7 @@ def main() -> None:
         if bw_hz is None:
             parser.error('invalid --bw value: {}'.format(args.bw))
         bw_hz = int(bw_hz)
-        state.bw_idx = BW_STEPS.index(_nearest_bw(bw_hz))
+        state.bw_hz = bw_hz   # clamped to device's supported list in _curses_main
     if args.g:
         if args.g.lower() == 'auto':
             state.gain_auto = True
