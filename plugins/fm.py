@@ -55,6 +55,9 @@ class FMDecoder(Decoder):
 
     def _audio_callback(self, outdata: np.ndarray, frames: int,
                         time_info, status) -> None:
+        if not self._active:
+            outdata[:] = 0.0
+            return
         with self._buf_lock:
             have = len(self._audio_buf)
             take = min(have, frames)
@@ -132,9 +135,9 @@ class FMDecoder(Decoder):
         return {'rms': float(np.sqrt(np.mean(audio ** 2))), 'audio': audio}
 
     def stop(self) -> None:
-        self._active = False
+        self._active = False   # callback sees this and returns without the lock
         if self._stream:
-            self._stream.stop()
+            self._stream.abort()   # don't wait for buffer drain — avoids main-thread freeze
             self._stream.close()
             self._stream = None
         self._if_bw   = None

@@ -144,13 +144,11 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             except curses.error:
                 pass
 
-    # ── plugin overlays (applied over body, before footer) ───────────────────
-    for name in state.active_decoders:
-        plugin = registry.get(name)
-        if plugin is None:
-            continue
-        plugin.draw_overlay(screen_obj, state, results.get(name) or {},
-                            freq_min, freq_range, plot_w, height)
+    # ── plugin overlay (only for the currently selected plugin tab) ──────────
+    if 0 < state.tab_idx <= len(tab_plugins):
+        p = tab_plugins[state.tab_idx - 1]
+        p.draw_overlay(screen_obj, state, results.get(p.name) or {},
+                       freq_min, freq_range, plot_w, height)
 
     # ── footer (shared) ───────────────────────────────────────────────────────
     try:
