@@ -77,14 +77,12 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
     screen_obj.erase()
 
     # ── header (shared) ───────────────────────────────────────────────────────
-    g_str     = '[Gain: auto] ' if state.gain_auto \
-                else '[Gain: {:.1f} dB] '.format(state.gain_db)
     f_lo      = fmt_freq(freqs[0])
     f_ctr     = fmt_freq((freqs[0] + freqs[-1]) / 2)
     f_hi      = fmt_freq(freqs[-1])
     ctr_col   = LABEL_W + (plot_w - len(f_ctr)) // 2
     right_col = COLS - len(f_hi)
-    header    = (g_str + f_lo).ljust(ctr_col) + f_ctr
+    header    = f_lo.ljust(ctr_col) + f_ctr
     header    = header.ljust(right_col) + f_hi
     try:
         screen_obj.addstr(0, 0, header[:COLS],
