@@ -16,6 +16,9 @@ from core import (
 from devices import load_devices, open_first_device, open_device_by_name, open_file_device
 from plugins import load_plugins
 
+_WF_CHARS = ' ░▒▓█'
+_WF_N     = len(_WF_CHARS)
+
 
 # ── plugin menu overlay ───────────────────────────────────────────────────────
 def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
@@ -51,7 +54,7 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
 # ── renderer ──────────────────────────────────────────────────────────────────
 def draw(screen_obj: curses.window, state: AppState, results: dict,
          registry: dict, tab_plugins: list, all_plugins: list,
-         sdr: Device) -> None:
+         sdr: Device, wf_rows) -> None:
     sp = results.get('spectrum')
     if sp is None:
         return
@@ -64,21 +67,16 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
     freq_min   = float(freqs[0])
     freq_range = float(freqs[-1] - freqs[0]) or 1.0
     col_idx    = np.round((freqs - freq_min) / freq_range * (plot_w - 1)).astype(int)
-    col_db     = np.full(plot_w, DB_MIN)
-    for i, db in enumerate(mags_db):
-        c = int(col_idx[i])
-        if 0 <= c < plot_w:
-            col_db[c] = max(col_db[c], float(db))
+    valid_mask = (col_idx >= 0) & (col_idx < plot_w)
+    ci_v       = col_idx[valid_mask]
 
-    out = [['·'] * plot_w for _ in range(height)]
-    for col, db in enumerate(col_db):
-        bar = int((max(DB_MIN, min(DB_MAX, db)) - DB_MIN) / DB_RANGE * height)
-        for r in range(height - bar, height):
-            out[r][col] = '█'
+    # Current-frame column dBFS (used by spectrum mode and band highlight)
+    col_db = np.full(plot_w, DB_MIN)
+    np.maximum.at(col_db, ci_v, mags_db[valid_mask])
 
     screen_obj.erase()
 
-    # header
+    # ── header (shared) ───────────────────────────────────────────────────────
     g_str     = '[Gain: auto] ' if state.gain_auto \
                 else '[Gain: {:.1f} dB] '.format(state.gain_db)
     f_lo      = fmt_freq(freqs[0])
@@ -94,48 +92,67 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
     except curses.error:
         pass
 
-    # spectrum rows
-    db_ticks = {int((DB_MAX - m) / DB_RANGE * height)
-                for m in range(int(DB_MAX), int(DB_MIN) - 1, -10)}
-    arrow_row = None
-    if state.gain_mode and not state.gain_auto:
-        arrow_row = height - 1 - round(
-            (state.gain_db - GAIN_MIN) / (GAIN_MAX - GAIN_MIN) * (height - 1))
-        arrow_row = max(0, min(height - 1, arrow_row))
-
-    # ask active plugins for a band highlight (first match wins)
-    band_l = band_r = None
-    if curses.has_colors():
-        for name in state.active_decoders:
-            plugin = registry.get(name)
-            if plugin is None:
-                continue
-            cols = plugin.band_columns(state, freq_min, freq_range, plot_w)
-            if cols:
-                band_l, band_r = cols
-                break
-
-    for r in range(height):
-        db_at = DB_MAX - (r / height) * DB_RANGE
-        label = '{:4.0f} | '.format(db_at) if r in db_ticks else '     | '
-        if r == arrow_row:
-            label = label[:4] + '>| '
-        row_str = ''.join(out[r])
-        try:
-            screen_obj.addstr(r + 1, 0, label)
-            if band_l is not None and band_r > band_l:
-                if band_l > 0:
-                    screen_obj.addstr(r + 1, LABEL_W,          row_str[:band_l])
-                screen_obj.addstr(r + 1, LABEL_W + band_l,
-                                  row_str[band_l:band_r], curses.color_pair(1))
-                if band_r < plot_w:
-                    screen_obj.addstr(r + 1, LABEL_W + band_r, row_str[band_r:])
+    # ── body ─────────────────────────────────────────────────────────────────
+    if state.waterfall_active:
+        # Waterfall: newest row at top, scrolls down.  Each row is one FFT frame.
+        n_wf = len(wf_rows)
+        for r in range(height):
+            wf_r = n_wf - 1 - r   # index into deque; -1 = newest
+            if 0 <= wf_r < n_wf:
+                row_mags = wf_rows[wf_r]
+                if len(row_mags) == len(col_idx):
+                    row_col_db = np.full(plot_w, DB_MIN)
+                    np.maximum.at(row_col_db, ci_v, row_mags[valid_mask])
+                    row_str = ''.join(
+                        _WF_CHARS[max(0, min(_WF_N - 1,
+                            int((float(db) - DB_MIN) / DB_RANGE * _WF_N)))]
+                        for db in row_col_db)
+                else:
+                    row_str = ' ' * plot_w
             else:
+                row_str = ' ' * plot_w
+            try:
+                screen_obj.addstr(r + 1, 0, '     | ')
                 screen_obj.addstr(r + 1, LABEL_W, row_str)
-        except curses.error:
-            pass
+            except curses.error:
+                pass
 
-    # footer
+    else:
+        # Spectrum bar chart
+        out = [['·'] * plot_w for _ in range(height)]
+        for col, db in enumerate(col_db):
+            bar = int((max(DB_MIN, min(DB_MAX, db)) - DB_MIN) / DB_RANGE * height)
+            for r in range(height - bar, height):
+                out[r][col] = '█'
+
+        db_ticks = {int((DB_MAX - m) / DB_RANGE * height)
+                    for m in range(int(DB_MAX), int(DB_MIN) - 1, -10)}
+        arrow_row = None
+        if state.gain_mode and not state.gain_auto:
+            arrow_row = height - 1 - round(
+                (state.gain_db - GAIN_MIN) / (GAIN_MAX - GAIN_MIN) * (height - 1))
+            arrow_row = max(0, min(height - 1, arrow_row))
+
+        for r in range(height):
+            db_at = DB_MAX - (r / height) * DB_RANGE
+            label = '{:4.0f} | '.format(db_at) if r in db_ticks else '     | '
+            if r == arrow_row:
+                label = label[:4] + '>| '
+            try:
+                screen_obj.addstr(r + 1, 0, label)
+                screen_obj.addstr(r + 1, LABEL_W, ''.join(out[r]))
+            except curses.error:
+                pass
+
+    # ── plugin overlays (applied over body, before footer) ───────────────────
+    for name in state.active_decoders:
+        plugin = registry.get(name)
+        if plugin is None:
+            continue
+        plugin.draw_overlay(screen_obj, state, results.get(name) or {},
+                            freq_min, freq_range, plot_w, height)
+
+    # ── footer (shared) ───────────────────────────────────────────────────────
     try:
         if state.freq_input is not None:
             prompt = 'Freq: {}_'.format(state.freq_input)
@@ -163,6 +180,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins']
             if sdr.key_help:
                 rhs_parts.append(sdr.key_help)
+            rhs_parts.append('v=spectrum' if state.waterfall_active else 'v=waterfall')
             if tab_plugins:
                 rhs_parts.append('tab=plugin settings')
             rhs_parts += ['f=freq', 'q=quit']
@@ -203,13 +221,13 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
 # ── key handler ───────────────────────────────────────────────────────────────
 def handle_keys(key: int, stdscr, state: AppState, registry: dict,
                 tab_plugins: list, all_plugins: list,
-                sdr: Device, results: dict) -> None:
+                sdr: Device, results: dict, wf_rows) -> None:
 
     def redraw():
         if results:
             cur_tabs = [p for p in all_plugins if p.name in state.active_decoders]
             state.tab_idx = min(state.tab_idx, len(cur_tabs))
-            draw(stdscr, state, results, registry, cur_tabs, all_plugins, sdr)
+            draw(stdscr, state, results, registry, cur_tabs, all_plugins, sdr, wf_rows)
 
     # ── plugin menu modal ─────────────────────────────────────────────────────
     if state.menu_active is not None:
@@ -317,6 +335,8 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
                 sdr.gain = state.gain_db
         elif key in (ord('i'), ord('I')):
             state.iq_corr = not state.iq_corr
+        elif key in (ord('v'), ord('V')):
+            state.waterfall_active = not state.waterfall_active
         elif key in (ord('p'), ord('P')):
             state.menu_active = state.active_decoders - {'spectrum'}
             state.menu_cursor = 0
@@ -380,6 +400,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
 
     SPEC_NEED = FFT_BINS * N_AVG
     iq_deque  = deque(maxlen=64)
+    wf_rows   = deque(maxlen=256)   # one mags_db array per rendered spectrum frame
     results: dict = {}
     stop_evt  = threading.Event()
 
@@ -428,7 +449,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
 
             key = stdscr.getch()
             handle_keys(key, stdscr, state, registry,
-                        tab_plugins, all_plugins, sdr, results)
+                        tab_plugins, all_plugins, sdr, results, wf_rows)
 
             # Hardware changes queued by active RTL-TCP plugin.
             # Applied here (main loop) not in process() to avoid calling
@@ -459,6 +480,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 last_bw = state.bw_hz
                 spec_chunks.clear()
                 spec_count = 0
+                wf_rows.clear()
                 _start_reader()
 
             while iq_deque:
@@ -476,7 +498,8 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                     samples[:SPEC_NEED], state)
                 spec_chunks.clear()
                 spec_count = 0
-                draw(stdscr, state, results, registry, tab_plugins, all_plugins, sdr)
+                wf_rows.append(results['spectrum']['mags_db'].copy())
+                draw(stdscr, state, results, registry, tab_plugins, all_plugins, sdr, wf_rows)
                 last_draw = now
             elif key == -1:
                 time.sleep(0.002)

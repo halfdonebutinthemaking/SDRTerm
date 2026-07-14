@@ -77,6 +77,7 @@ class AppState:
     pending_sr:        Optional[int]   = None  # sample-rate change queued by active plugin
     pending_freq:      Optional[float] = None  # frequency change queued by active plugin
     pending_gain:      Optional[float] = None  # gain change (≥0 = dB, <0 = auto)
+    waterfall_active:  bool            = False
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
@@ -94,8 +95,9 @@ class Decoder:
     # optional hooks — return None / False to opt out
     def handle_key(self, key: int, state: AppState, sdr) -> bool: return False
     def status_text(self, state: AppState, result: dict): return None
-    def band_columns(self, state: AppState, freq_min: float,
-                     freq_range: float, plot_w: int):     return None
+    def draw_overlay(self, screen_obj, state: AppState, result: dict,
+                     freq_min: float, freq_range: float,
+                     plot_w: int, height: int) -> None:   pass
 
     # recording hooks — implement to make this plugin's output recordable by
     # the record plugin.  record_ext=None means "not recordable".

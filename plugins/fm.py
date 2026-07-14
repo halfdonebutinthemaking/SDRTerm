@@ -1,8 +1,9 @@
+import curses
 import wave
 import threading
 from math import gcd
 import numpy as np
-from core import Decoder, AppState, AUDIO_RATE
+from core import Decoder, AppState, AUDIO_RATE, LABEL_W
 
 
 class FMDecoder(Decoder):
@@ -159,13 +160,24 @@ class FMDecoder(Decoder):
         return '[FM {:.0f}kHz {:3d}%] '.format(
             state.fm_bw_hz / 1000, int(result['rms'] * 100))
 
-    def band_columns(self, state: AppState, freq_min: float,
-                     freq_range: float, plot_w: int):
-        l = int(max(0, (state.center_hz - state.fm_bw_hz - freq_min)
-                    / freq_range * plot_w))
-        r = int(min(plot_w, (state.center_hz + state.fm_bw_hz - freq_min)
-                    / freq_range * plot_w))
-        return (l, r) if r > l else None
+    def draw_overlay(self, screen_obj, state: AppState, result: dict,
+                     freq_min: float, freq_range: float,
+                     plot_w: int, height: int) -> None:
+        if not curses.has_colors():
+            return
+        col_l = int(max(0, (state.center_hz - state.fm_bw_hz - freq_min)
+                        / freq_range * plot_w))
+        col_r = int(min(plot_w, (state.center_hz + state.fm_bw_hz - freq_min)
+                        / freq_range * plot_w))
+        if col_r <= col_l:
+            return
+        attr = curses.color_pair(1)
+        n    = col_r - col_l
+        for r in range(height):
+            try:
+                screen_obj.chgat(r + 1, LABEL_W + col_l, n, attr)
+            except curses.error:
+                pass
 
     # ── recording hooks ───────────────────────────────────────────────────────
     record_ext = 'wav'

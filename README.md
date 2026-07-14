@@ -72,11 +72,14 @@ The core tab shows the full-bandwidth spectrum.
 The header displays the current gain setting and the low / center / high frequencies of the visible window.  
 The footer shows the active tab name, device status (bandwidth, bias-tee state), IQ correction state, and all available shortcuts.
 
+Press `v` to switch between **spectrum** (bar chart) and **waterfall** (scrolling time-frequency) views. The waterfall fills from the top with the newest frame; older frames scroll downward. Signal strength is encoded in block characters (`░▒▓█`). Plugin overlays (such as the FM channel highlight) apply in both views.
+
 ### FM plugin tab
 
 ![FM plugin tab with channel highlight](images/02_plugin_fm.png)
 
 Switching to the FM plugin tab with `tab` highlights the selected FM channel bandwidth in cyan.  
+The highlight is drawn as a post-body overlay and appears in both the spectrum and waterfall views.  
 The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain available on every tab.
 
 ---
@@ -100,6 +103,7 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 | `a` | Toggle hardware AGC on/off |
 | `g` | Enter gain mode — `↑`/`↓` adjust gain ±0.5 dB, `g` again to exit |
 | `i` | Toggle software IQ correction on/off |
+| `v` | Toggle between spectrum (bar chart) and waterfall (scrolling time-frequency) views |
 | `p` | Open plugin menu — `↑`/`↓` navigate, `space` stage toggle, `<`/`>` reorder pipeline, `ret` apply, `esc` cancel |
 | `b` | Toggle bias-tee on/off (RTL-SDR V3 only, when hardware supports it) |
 
@@ -142,9 +146,26 @@ plugins/
 
 ### Plugin pipeline
 
-Active plugins run in the order shown in the plugin menu (filename order by default, reorderable with `<`/`>` while the menu is open). Each plugin's `process()` receives the accumulated results of all plugins that ran before it — earlier plugins' output is visible to later ones via the `results` dict.
+Active plugins run in the order shown in the plugin menu (filename order by default). Each plugin's `process()` receives the accumulated results of all plugins that ran before it — earlier plugins' output is visible to later ones via the `results` dict.
 
-The `record` plugin uses this to capture the output of its **immediate predecessor**: if FM precedes record, audio is saved as WAV; if record is first in the pipeline, raw IQ is written.
+**Pipeline order matters.** The `record` plugin captures the output of its **immediate predecessor** in the pipeline: if FM precedes record, audio is saved as WAV; if record is first (or has no predecessor), raw IQ is written instead.
+
+#### Reordering the pipeline
+
+Open the plugin menu with `p`. While the menu is open:
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Move the cursor to a different plugin |
+| `space` | Stage or unstage the highlighted plugin (toggle without applying) |
+| `<` | Move the highlighted plugin one position earlier in the pipeline |
+| `>` | Move the highlighted plugin one position later in the pipeline |
+| `ret` | Apply all staged changes and close the menu |
+| `esc` | Cancel — discard staged changes and restore the previous order |
+
+The order shown in the menu is the execution order. Reordering is applied atomically when you press `ret`, so you can freely rearrange and toggle multiple plugins before committing.
+
+A practical example: to record FM audio, open the menu, enable FM and record, and ensure FM appears **above** (before) record. If record is above FM, it sees raw IQ instead of decoded audio.
 
 ### Writing a plugin
 
@@ -166,8 +187,37 @@ class MyDecoder(Decoder):
     # optional hooks
     def handle_key(self, key, state, sdr) -> bool: ...
     def status_text(self, state, result) -> str:   ...
-    def band_columns(self, state, freq_min, freq_range, plot_w): ...
+    def draw_overlay(self, screen_obj, state, result,
+                     freq_min, freq_range, plot_w, height): ...
 ```
+
+#### Drawing overlays on the core view
+
+`draw_overlay()` is called after every frame (spectrum or waterfall) with a reference to the live curses window. The plugin can paint anything on top of the body rows — without re-rendering row content — using `chgat()` to change the color attribute of already-drawn characters:
+
+```python
+import curses
+from core import LABEL_W
+
+class MyDecoder(Decoder):
+    def draw_overlay(self, screen_obj, state, result,
+                     freq_min, freq_range, plot_w, height):
+        # Compute column range for some frequency span
+        span_l = state.center_hz - 50_000
+        span_r = state.center_hz + 50_000
+        col_l  = int(max(0,      (span_l - freq_min) / freq_range * plot_w))
+        col_r  = int(min(plot_w, (span_r - freq_min) / freq_range * plot_w))
+        if col_r <= col_l or not curses.has_colors():
+            return
+        n = col_r - col_l
+        for r in range(height):
+            try:
+                screen_obj.chgat(r + 1, LABEL_W + col_l, n, curses.color_pair(1))
+            except curses.error:
+                pass
+```
+
+`chgat(y, x, n, attr)` recolors `n` characters at `(y, x)` in place without touching character content, so it works identically in both spectrum and waterfall modes. Color pair 1 is cyan (initialized by the framework at startup).
 
 ### Making a plugin recordable
 
