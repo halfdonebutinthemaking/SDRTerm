@@ -327,7 +327,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         redraw()
         return
 
-    # ── gain mode (sub-mode, only reachable from core tab) ───────────────────
+    # ── gain sub-mode: up/down step gain, g exits ─────────────────────────────
     if state.gain_mode:
         if key in (ord('g'), ord('G')):
             state.gain_mode = False
@@ -340,52 +340,58 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         redraw()
         return
 
-    # ── core tab ──────────────────────────────────────────────────────────────
-    if state.tab_idx == 0:
-        if key in (ord('a'), ord('A')):
-            state.gain_auto = not state.gain_auto
-            sdr.gain = 'auto' if state.gain_auto else state.gain_db
-        elif key in (ord('g'), ord('G')):
-            state.gain_mode = True
-            if state.gain_auto:
-                state.gain_auto = False
-                sdr.gain = state.gain_db
-        elif key in (ord('i'), ord('I')):
-            state.iq_corr = not state.iq_corr
-        elif key in (ord('v'), ord('V')):
+    # ── plugin-specific keys (plugin tab only, checked before global keys) ────
+    if state.tab_idx > 0:
+        plugin = tab_plugins[state.tab_idx - 1]
+        if plugin.key and key == ord(plugin.key):
+            toggle_decoder(plugin.name, registry, state, sdr)
+            redraw()
+            return
+        if plugin.handle_key(key, state, sdr):
+            redraw()
+            return
+
+    # ── global parameter keys — active on every tab ───────────────────────────
+    if key in (ord('a'), ord('A')):
+        state.gain_auto = not state.gain_auto
+        sdr.gain = 'auto' if state.gain_auto else state.gain_db
+    elif key in (ord('g'), ord('G')):
+        state.gain_mode = True
+        if state.gain_auto:
+            state.gain_auto = False
+            sdr.gain = state.gain_db
+    elif key in (ord('i'), ord('I')):
+        state.iq_corr = not state.iq_corr
+    elif key == curses.KEY_LEFT:
+        state.center_hz -= state.bw_hz / FFT_BINS
+        sdr.center_freq  = state.center_hz
+    elif key == curses.KEY_RIGHT:
+        state.center_hz += state.bw_hz / FFT_BINS
+        sdr.center_freq  = state.center_hz
+    elif key == curses.KEY_UP:
+        higher = [b for b in sdr.supported_bandwidths if b > state.bw_hz]
+        if higher:
+            state.bw_hz     = min(higher)
+            sdr.sample_rate = state.bw_hz
+    elif key == curses.KEY_DOWN:
+        min_bw = _required_bw(state.active_decoders, registry)
+        lower  = [b for b in sdr.supported_bandwidths
+                  if b < state.bw_hz and b >= min_bw]
+        if lower:
+            state.bw_hz     = max(lower)
+            sdr.sample_rate = state.bw_hz
+    # ── core-only keys ────────────────────────────────────────────────────────
+    elif state.tab_idx == 0:
+        if key in (ord('v'), ord('V')):
             state.waterfall_active = not state.waterfall_active
         elif key in (ord('p'), ord('P')):
             state.menu_active = state.active_decoders - {'spectrum'}
             state.menu_cursor = 0
-        elif key == curses.KEY_LEFT:
-            state.center_hz -= state.bw_hz / FFT_BINS
-            sdr.center_freq  = state.center_hz
-        elif key == curses.KEY_RIGHT:
-            state.center_hz += state.bw_hz / FFT_BINS
-            sdr.center_freq  = state.center_hz
-        elif key == curses.KEY_UP:
-            higher = [b for b in sdr.supported_bandwidths if b > state.bw_hz]
-            if higher:
-                state.bw_hz     = min(higher)
-                sdr.sample_rate = state.bw_hz
-        elif key == curses.KEY_DOWN:
-            min_bw = _required_bw(state.active_decoders, registry)
-            lower  = [b for b in sdr.supported_bandwidths
-                      if b < state.bw_hz and b >= min_bw]
-            if lower:
-                state.bw_hz     = max(lower)
-                sdr.sample_rate = state.bw_hz
         else:
             sdr.handle_key(key, state)
-        redraw()
-        return
-
-    # ── plugin tab ────────────────────────────────────────────────────────────
-    plugin = tab_plugins[state.tab_idx - 1]
-    if plugin.key and key == ord(plugin.key):     # toggle key → disable & back to core
-        toggle_decoder(plugin.name, registry, state, sdr)
     else:
-        plugin.handle_key(key, state, sdr)
+        # unknown key on plugin tab: let the device handle it (e.g. b=bias-tee)
+        sdr.handle_key(key, state)
     redraw()
 
 
