@@ -44,14 +44,20 @@ uv run python main.py
 | Flag | Argument | Description |
 |------|----------|-------------|
 | `--d` | `NAME` | Open a specific device by name (e.g. `RTL-SDR-V3`). Falls back to auto-detect if omitted. |
+| `--file` | `PATH` | Replay a raw complex64 `.iq` file instead of opening hardware. Selects the `localfile` device automatically. |
+| `--bw` | `BW` | Set the initial capture bandwidth / sample rate (e.g. `2.4M`, `1024k`, `250000`). For `--file`: must match the rate the file was recorded at. |
 | `--f` | `FREQ` | Set the initial center frequency. Accepts `105.8M`, `433.5k`, or a raw Hz value. |
 | `--g` | `GAIN` | Set the initial gain in dB (e.g. `32.8`). Ignored if `--i on` is also set. |
 | `--i` | `on\|off` | Enable (`on`) or disable (`off`) hardware AGC at startup. |
 
-Example:
+Examples:
 
 ```bash
+# Live hardware
 uv run python main.py --d RTL-SDR-V3 --f 105.8M --g 28.0
+
+# Replay a recorded IQ file
+uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
 ```
 
 ---
@@ -90,13 +96,12 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 | Key | Action |
 |-----|--------|
 | `←` / `→` | Shift center frequency left / right |
-| `↑` / `↓` | Increase / decrease bandwidth (cycles through preset sample rates) |
+| `↑` / `↓` | Increase / decrease bandwidth (steps through the current device's supported rates) |
 | `a` | Toggle hardware AGC on/off |
 | `g` | Enter gain mode — `↑`/`↓` adjust gain ±0.5 dB, `g` again to exit |
 | `i` | Toggle software IQ correction on/off |
-| `p` | Open plugin menu — `↑`/`↓` to navigate, `space` to stage, `ret` to apply, `esc` to cancel |
-| `m` | Toggle FM decoder on/off (shown only when FM is available) |
-| `b` | Toggle bias-tee on/off (RTL-SDR V3 only, shown only when hardware supports it) |
+| `p` | Open plugin menu — `↑`/`↓` navigate, `space` stage toggle, `<`/`>` reorder pipeline, `ret` apply, `esc` cancel |
+| `b` | Toggle bias-tee on/off (RTL-SDR V3 only, when hardware supports it) |
 
 ### FM plugin tab
 
@@ -108,12 +113,16 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 
 ---
 
-## Bandwidth presets
+## Bandwidth
 
-`250 000` · `1 024 000` · `1 400 000` · `1 800 000` · `2 048 000` · `2 400 000` Hz
+Bandwidth equals the IQ sample rate delivered by the device. Narrower bandwidth → lower noise floor (fewer noise watts per bin).
 
-Bandwidth = RTL-SDR sample rate. Narrower bandwidth → lower noise floor (fewer noise watts per bin).  
-Plugins declare their minimum required sample rate; enabling a plugin raises the bandwidth if necessary, but never lowers it below the current user setting.
+Each device declares the bandwidths it supports via `supported_bandwidths`. The `↑`/`↓` keys step through that list only — they never request a rate the device cannot handle.
+
+**RTL-SDR V3 supported rates:** `250 000` · `1 024 000` · `1 400 000` · `1 800 000` · `2 048 000` · `2 400 000` Hz  
+**localfile device:** all of the above (software device, accepts any step).
+
+Plugins declare `min_sample_rate`; enabling a plugin raises the bandwidth if necessary, but never lowers it below the current user setting.
 
 ---
 
@@ -123,10 +132,19 @@ Plugins live in `plugins/`. Each file that contains a `Decoder` subclass with a 
 
 ```
 plugins/
-  spectrum.py   — always-on FFT display (built-in, key-less)
-  fm.py         — FM broadcast audio decoder
-  __init__.py   — auto-discovery loader
+  spectrum.py        — always-on FFT display (built-in, key-less)
+  fm.py              — FM broadcast audio decoder
+  record.py          — write signal to file (WAV or raw IQ)
+  rtltcp_passive.py  — RTL-TCP server, streams IQ to clients (read-only)
+  rtltcp_active.py   — RTL-TCP server, applies client frequency/gain/rate commands to hardware
+  __init__.py        — auto-discovery loader
 ```
+
+### Plugin pipeline
+
+Active plugins run in the order shown in the plugin menu (filename order by default, reorderable with `<`/`>` while the menu is open). Each plugin's `process()` receives the accumulated results of all plugins that ran before it — earlier plugins' output is visible to later ones via the `results` dict.
+
+The `record` plugin uses this to capture the output of its **immediate predecessor**: if FM precedes record, audio is saved as WAV; if record is first in the pipeline, raw IQ is written.
 
 ### Writing a plugin
 
@@ -137,18 +155,38 @@ from core import Decoder, AppState
 
 class MyDecoder(Decoder):
     name            = 'mymode'          # unique ID
-    key             = 'y'               # toggle key on core tab
-    key_help        = 'y=mymode'        # shown in footer
+    key             = 'y'               # toggle key
+    key_help        = 'o=path'          # shown in footer
     min_sample_rate = 250_000           # minimum BW this decoder needs
 
     def start(self, state: AppState) -> None:   ...
-    def process(self, samples, state: AppState): return {}
+    def process(self, samples, state, results=None, sdr=None): return {}
     def stop(self) -> None:                     ...
 
     # optional hooks
     def handle_key(self, key, state, sdr) -> bool: ...
     def status_text(self, state, result) -> str:   ...
     def band_columns(self, state, freq_min, freq_range, plot_w): ...
+```
+
+### Making a plugin recordable
+
+Implement the recording hooks so the `record` plugin can capture this plugin's output:
+
+```python
+class MyDecoder(Decoder):
+    record_ext = 'myext'     # file extension; None = not recordable (default)
+
+    def record_open(self, path: str):
+        return open(path, 'wb')   # return a file handle
+
+    def record_write(self, handle, result: dict) -> int:
+        data = result.get('mydata')
+        handle.write(data)
+        return len(data)          # bytes written
+
+    def record_close(self, handle) -> None:
+        handle.close()
 ```
 
 The file is picked up on the next run with no other changes needed.
@@ -162,10 +200,21 @@ Hardware drivers live in `devices/`. Each file that contains a `Device` subclass
 ```
 devices/
   rtlsdr_v3.py   — RTL-SDR V3 dongle (pyrtlsdr)
+  localfile.py   — IQ file replay (raw complex64 .iq files)
   __init__.py    — auto-discovery loader
 ```
 
-The application tries each discovered device in filename order and opens the first one that succeeds. `--d NAME` selects a specific driver by name (case-insensitive).
+The application tries each discovered device in filename order and opens the first one that succeeds. `--d NAME` selects a specific driver by name (case-insensitive). `--file PATH` selects the `localfile` device directly.
+
+### localfile device
+
+Replays a raw complex64 `.iq` file as if it were live hardware. The file loops continuously.
+
+```bash
+uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
+```
+
+`--bw` must match the sample rate the file was recorded at so playback runs at the correct speed. Pacing uses a monotonic deadline so the replay rate stays accurate regardless of processing time. The file is memory-mapped (`np.memmap`) so large files do not load into RAM.
 
 ### Writing a device driver
 
@@ -175,8 +224,9 @@ Subclass `Device` from `core.py` and place the file in `devices/`:
 from core import Device, AppState
 
 class MyDevice(Device):
-    name     = 'MY-DEVICE'    # unique ID matched by --d
-    key_help = 'x=feature'    # device-specific shortcut hint in core footer
+    name                 = 'MY-DEVICE'              # unique ID matched by --d
+    key_help             = 'x=feature'              # shortcut hint in core footer
+    supported_bandwidths = [1_000_000, 2_000_000]   # Hz, ascending order
 
     def open(self) -> bool:   ...   # return False if hardware unavailable
     def close(self) -> None:  ...
@@ -204,6 +254,8 @@ class MyDevice(Device):
     def handle_key(self, key, state: AppState) -> bool: ...
     def status_text(self, state: AppState) -> str: ...
 ```
+
+`supported_bandwidths` is the only list the application consults for `↑`/`↓` BW stepping — it is not required to match the global `BW_STEPS` constant and can contain any values the hardware supports.
 
 ---
 
@@ -336,15 +388,19 @@ pyproject.toml    — project metadata and dependencies
 uv.lock           — locked dependency versions
 
 plugins/
-  __init__.py     — auto-discovery loader
-  spectrum.py     — always-on FFT spectrum decoder
-  fm.py           — FM broadcast audio decoder
+  __init__.py        — auto-discovery loader
+  spectrum.py        — always-on FFT spectrum decoder
+  fm.py              — FM broadcast audio decoder (with WAV recording hooks)
+  record.py          — write signal to file via predecessor plugin's recording hooks
+  rtltcp_passive.py  — RTL-TCP server: stream IQ to clients, ignore commands
+  rtltcp_active.py   — RTL-TCP server: stream IQ and apply client commands to hardware
 
 devices/
   __init__.py     — auto-discovery loader
   rtlsdr_v3.py    — RTL-SDR V3 driver (pyrtlsdr)
+  localfile.py    — IQ file replay device (raw complex64, memory-mapped)
 
 images/
-  01_main.png     — core tab screenshot
+  01_main.png      — core tab screenshot
   02_plugin_fm.png — FM plugin tab screenshot
 ```
