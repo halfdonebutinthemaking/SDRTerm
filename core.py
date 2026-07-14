@@ -27,7 +27,7 @@ FM_BW_MAX  = 200_000
 FM_BW_STEP = 10_000
 # NRSC-5 sideband width: outer subcarrier index (inner edge is fixed at SC 356)
 NRSC5_SC_MIN  = 376   # 20 subcarriers minimum per side
-NRSC5_SC_MAX  = 546   # full primary sideband per spec
+NRSC5_SC_MAX  = 682   # primary + secondary sideband outer edge
 NRSC5_SC_STEP = 20    # ≈ 7.3 kHz per step
 
 

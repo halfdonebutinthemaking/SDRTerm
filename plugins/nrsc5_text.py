@@ -1,135 +1,131 @@
-"""NRSC-5 HD Radio text decoder — pure numpy/scipy.
+"""NRSC-5 HD Radio text decoder.
 
-Demodulates the IBOC digital sidebands flanking an FM carrier,
-runs soft-Viterbi FEC, and extracts SIS / PSD text (station name,
-slogan, title/artist).  No audio, no external library.
+Uses libnrsc5 (https://github.com/theori-io/nrsc5) via ctypes when the
+library is installed ('brew install nrsc5' on macOS).  Falls back to a
+signal-presence / SNR display when the library is absent.
 
-OFDM parameters (FM Hybrid mode, NRSC-5-C):
-  Native sample rate : 744 187.5 Hz  (we resample from device rate)
-  FFT size           : 2048 subcarriers
+OFDM parameters (FM Hybrid mode, NRSC-5-C §11):
+  Native sample rate : 744 187.5 Hz
+  FFT size           : 2048
   Cyclic prefix      : 112 samples
-  Symbol period      : 2160 samples  ≈ 2.90 ms → ~345 symbols/s
+  Symbol period      : 2160 samples
   Subcarrier spacing : 363.4 Hz
-
-Primary Main sidebands occupy subcarrier indices −546…−356 (lower)
-and +356…+546 (upper), placing digital energy at ±129…±198 kHz.
-
-The decode pipeline (OFDM → differential BPSK → Viterbi → PDU parse)
-runs in a background thread so it does not stall the SDR pipeline.
+  Primary sidebands  : SC ±356…±546  (191 subcarriers each)
+  Secondary sidebands: SC ±547…±682  (136 subcarriers each)
 """
+import ctypes as ct
+import ctypes.util
 import curses
 import threading
 import time
 import numpy as np
 from core import Decoder, AppState, LABEL_W
 
-# ── NRSC-5 OFDM constants ─────────────────────────────────────────────────────
-_SR   = 744_187         # processing sample rate (true: 744 187.5 Hz)
+# ── OFDM constants ────────────────────────────────────────────────────────────
+_SR   = 744_187          # processing rate (native: 744 187.5 Hz)
 _FFT  = 2048
 _CP   = 112
-_SYM  = _FFT + _CP      # 2160 samples per symbol
+_SYM  = _FFT + _CP       # 2160 samples / symbol
 
-# Primary Main (PM) sideband subcarrier index ranges, relative to DC
-_LO_A, _LO_B = -546, -356   # lower sideband  191 subcarriers
-_HI_A, _HI_B =  356,  546   # upper sideband  191 subcarriers
-_N_SC = _HI_B - _HI_A + 1   # 191
-
-# NRSC-5 Layer-1 frame: 32 OFDM symbols
-_SYMS_PER_FRAME = 32
-
-# Bandwidth requirement: ±546 SC × 363.4 Hz ≈ ±198 kHz → need at least 400 kHz
-_MIN_SR = 1_024_000
-
-# Accumulate this many symbols before running a decode pass.
-# 64 symbols ≈ 2 frames ≈ 186 ms of signal at 345 sym/s.
-_DECODE_SYMS = 64
-
-# Minimum wall-clock seconds between decode passes.  Viterbi runs a Python
-# loop and holds the GIL between numpy calls; rate-limiting keeps GIL
-# occupation low enough that audio callbacks and the curses redraw are
-# unaffected.  Text updates slowly (station name rarely changes), so 3 s is fine.
+_HI_A, _HI_B =  356,  546   # primary upper sideband SC range
+_MIN_SR       = 1_024_000
+_DECODE_SYMS  = 64
 _DECODE_INTERVAL = 3.0
 
-# Maximum bit-pairs fed to Viterbi per decode.
-# 512 pairs → ~75 ms Python loop → with GIL yields every 64 steps,
-# other threads get ~1 ms windows regularly throughout.
-_MAX_VITERBI_PAIRS = 512
-
-# ── Convolutional trellis (rate-1/2, K=7, poly 0o133 / 0o171) ─────────────────
-_K       = 7
-_NSTATES = 1 << (_K - 1)   # 64 states
+# ── libnrsc5 ctypes interface ─────────────────────────────────────────────────
+_EVT_SYNC      = 2
+_EVT_LOST_SYNC = 3
+_EVT_MER       = 4
+_EVT_ID3       = 8
+_EVT_SIS       = 11
 
 
-def _build_trellis():
-    G  = (0b1011011, 0b1111001)
-    ns = np.zeros((_NSTATES, 2), dtype=np.int32)
-    bm = np.zeros((_NSTATES, 2, 2), dtype=np.float32)  # (1 − 2·oi)
-    for s in range(_NSTATES):
-        for b in range(2):
-            r        = s | (b << (_K - 1))
-            o0, o1   = bin(r & G[0]).count('1') & 1, bin(r & G[1]).count('1') & 1
-            ns[s, b] = (s >> 1) | (b << (_K - 2))
-            bm[s, b] = [1.0 - 2.0 * o0, 1.0 - 2.0 * o1]
-    ps  = np.zeros((_NSTATES, 2), dtype=np.int32)
-    pb  = np.zeros((_NSTATES, 2), dtype=np.int32)
-    cnt = np.zeros(_NSTATES,      dtype=np.int32)
-    for s in range(_NSTATES):
-        for b in range(2):
-            n = ns[s, b]; ps[n, cnt[n]] = s; pb[n, cnt[n]] = b; cnt[n] += 1
-    return ns, bm, ps, pb
+class _Mer(ct.Structure):
+    _fields_ = [('lower', ct.c_float), ('upper', ct.c_float)]
 
 
-_TNS, _TBM, _TPS, _TPB = _build_trellis()
+class _Sis(ct.Structure):
+    # Matches nrsc5.h on 64-bit little-endian (ARM64 / x86_64).
+    # ctypes inserts 4 B of padding after fcc_facility_id to align the
+    # following char* to an 8-byte boundary — matching the C ABI.
+    _fields_ = [
+        ('country_code',    ct.c_char_p),
+        ('fcc_facility_id', ct.c_int),
+        ('name',            ct.c_char_p),
+        ('slogan',          ct.c_char_p),
+        ('message',         ct.c_char_p),
+        ('alert',           ct.c_char_p),
+        ('latitude',        ct.c_float),
+        ('longitude',       ct.c_float),
+        ('altitude',        ct.c_int),
+        ('num_services',    ct.c_uint),
+        ('services',        ct.c_void_p),
+    ]
 
 
-def _viterbi(llr: np.ndarray) -> np.ndarray:
-    """Soft-decision Viterbi.  llr: float32 length 2N (positive = likely-1).
-
-    Yields the GIL via time.sleep(0) every 64 steps so that audio callbacks
-    and the main thread can run during the forward pass.
-    """
-    N   = len(llr) // 2
-    llr = llr[:2 * N].reshape(N, 2)
-    met = np.full(_NSTATES, -1e9, dtype=np.float32)
-    met[0] = 0.0
-    sur = np.empty((N, _NSTATES), dtype=np.int32)
-    for t in range(N):
-        if t & 63 == 0:          # every 64 steps: yield so other threads can run
-            time.sleep(0)
-        l  = llr[t]
-        bm = _TBM[:, :, 0] * l[0] + _TBM[:, :, 1] * l[1]   # (S, 2)
-        c0 = met[_TPS[:, 0]] + bm[_TPS[:, 0], _TPB[:, 0]]
-        c1 = met[_TPS[:, 1]] + bm[_TPS[:, 1], _TPB[:, 1]]
-        ok  = c0 >= c1
-        met = np.where(ok, c0, c1)
-        sur[t] = np.where(ok, _TPS[:, 0], _TPS[:, 1])
-    out   = np.empty(N, dtype=np.uint8)
-    state = int(met.argmax())
-    for t in range(N - 1, -1, -1):
-        out[t] = (state >> (_K - 2)) & 1
-        state  = int(sur[t, state])
-    return out
+class _ID3(ct.Structure):
+    # ctypes inserts 4 B of padding after `program` to align the first char*.
+    _fields_ = [
+        ('program',    ct.c_uint),
+        ('title',      ct.c_char_p),
+        ('artist',     ct.c_char_p),
+        ('album',      ct.c_char_p),
+        ('genre',      ct.c_char_p),
+        ('ufid_owner', ct.c_char_p),
+        ('ufid_id',    ct.c_char_p),
+        ('xhdr_mime',  ct.c_uint),
+        ('xhdr_param', ct.c_int),
+        ('xhdr_lot',   ct.c_int),
+    ]
 
 
-# ── CRC-16/CCITT (used by NRSC-5 SIS PDUs) ───────────────────────────────────
-def _crc16(data: bytes) -> int:
-    crc = 0xFFFF
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) if (crc & 0x8000) else (crc << 1)
-    return crc & 0xFFFF
+class _EvtUnion(ct.Union):
+    _fields_ = [('mer', _Mer), ('id3', _ID3), ('sis', _Sis)]
 
 
-# ── OFDM helpers ──────────────────────────────────────────────────────────────
+class _Event(ct.Structure):
+    # `type` is 4 B; the union has 8-B alignment (contains pointers),
+    # so ctypes adds 4 B of padding before `u`.  This matches the C ABI.
+    _fields_ = [('type', ct.c_uint), ('u', _EvtUnion)]
+
+
+_CB_T = ct.CFUNCTYPE(None, ct.POINTER(_Event), ct.c_void_p)
+
+
+def _find_libnrsc5():
+    """Return a ctypes CDLL handle for libnrsc5 or None."""
+    candidates = [
+        'nrsc5',
+        '/opt/homebrew/lib/libnrsc5.dylib',
+        '/usr/local/lib/libnrsc5.dylib',
+        '/usr/lib/libnrsc5.so',
+        '/usr/lib/x86_64-linux-gnu/libnrsc5.so.0',
+        '/usr/lib/aarch64-linux-gnu/libnrsc5.so.0',
+    ]
+    for name in candidates:
+        path = ct.util.find_library(name) or name
+        try:
+            lib = ct.CDLL(path)
+            # Verify required symbols exist and set signatures
+            lib.nrsc5_open_pipe.restype        = ct.c_int
+            lib.nrsc5_open_pipe.argtypes       = [ct.POINTER(ct.c_void_p)]
+            lib.nrsc5_close.argtypes           = [ct.c_void_p]
+            lib.nrsc5_start.argtypes           = [ct.c_void_p]
+            lib.nrsc5_stop.argtypes            = [ct.c_void_p]
+            lib.nrsc5_set_callback.argtypes    = [ct.c_void_p, _CB_T, ct.c_void_p]
+            lib.nrsc5_pipe_samples_cs16.argtypes = [ct.c_void_p,
+                                                     ct.POINTER(ct.c_int16),
+                                                     ct.c_uint]
+            return lib
+        except (OSError, AttributeError):
+            pass
+    return None
+
+
+# ── signal-analysis helpers (fallback path, no libnrsc5) ─────────────────────
 
 def _cp_metric(iq: np.ndarray) -> np.ndarray:
-    """CP correlation magnitude; peaks at OFDM symbol boundaries.
-
-    iq[n] and iq[n + FFT] are identical within the CP, so their conjugate
-    product has near-constant phase over the guard interval.  Rolling the
-    sum gives the peak at each symbol start.
-    """
+    """CP correlation magnitude; peaks at OFDM symbol boundaries."""
     n = len(iq) - _FFT - _CP
     if n <= 0:
         return np.zeros(1, dtype=np.float32)
@@ -138,95 +134,46 @@ def _cp_metric(iq: np.ndarray) -> np.ndarray:
     return np.abs(cs[_CP: n + 1] - cs[: n + 1 - _CP]).astype(np.float32)
 
 
-def _find_offset(metric: np.ndarray) -> int:
-    """Largest CP-correlation peak within the first symbol period."""
-    if len(metric) == 0:
-        return 0
-    return int(np.argmax(metric[:_SYM]))
+def _multi_peak_sync(iq: np.ndarray):
+    """Return (offset, quality) by averaging the two strongest CP peaks.
 
-
-def _extract_subcarriers(iq: np.ndarray, offset: int, n_sym: int, sc_outer: int = _HI_B):
-    """OFDM FFT-demodulate n_sym symbols → (lo, hi) each (n_sym, N) complex64.
-
-    sc_outer sets the outermost subcarrier index used (max _HI_B=546).
-    The inner edge is always _HI_A=356 (start of primary sideband per spec).
-    Uses a single 2-D batch FFT so the GIL is released for the entire computation.
+    Pure noise gives avg quality ≈ 1.3; a real NRSC-5 signal gives ≥ 8.
+    Using two peaks (one symbol apart) filters incidental random peaks.
     """
-    avail = min(n_sym, (len(iq) - offset) // _SYM)
-    if avail <= 0:
-        empty = np.zeros((0, max(1, sc_outer - _HI_A + 1)), dtype=np.complex64)
-        return empty, empty.copy()
+    metric = _cp_metric(iq)
+    if len(metric) < _SYM:
+        return 0, 0.0
+    offset = int(np.argmax(metric[:_SYM]))
+    mean   = float(metric.mean()) + 1e-9
+    q1     = float(metric[offset]) / mean
+    q2     = float(metric[min(offset + _SYM, len(metric) - 1)]) / mean
+    return offset, (q1 + q2) / 2.0
+
+
+def _sideband_snr_db(iq: np.ndarray, offset: int, sc_outer: int) -> float:
+    """Compare power in digital sideband SC to adjacent noise-floor reference.
+
+    Reference band: SC 200..355 (above FM content, below inner NRSC-5 edge).
+    Positive values indicate energy above the noise floor at that location.
+    """
+    avail = (len(iq) - offset) // _SYM
+    if avail < 2:
+        return -99.0
     end      = offset + avail * _SYM
-    payloads = iq[offset:end].reshape(avail, _SYM)[:, _CP:]   # (avail, _FFT)
-    ffts     = np.fft.fft(payloads, axis=1)                    # single GIL-free op
-    hi = ffts[:, _HI_A: sc_outer + 1].astype(np.complex64)
-    # lower sideband mirrors upper: SC -sc_outer..-356 → bins _FFT-sc_outer.._FFT-356
-    lo = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1].astype(np.complex64)
-    return lo, hi
+    payloads = iq[offset:end].reshape(avail, _SYM)[:, _CP:]
+    ffts     = np.fft.fft(payloads, axis=1)
 
+    hi      = ffts[:, _HI_A: sc_outer + 1]
+    lo      = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1]
+    sb_pwr  = (float(np.mean(np.abs(hi) ** 2)) +
+               float(np.mean(np.abs(lo) ** 2))) * 0.5
 
-def _differential_llr(syms: np.ndarray) -> np.ndarray:
-    """Differential BPSK LLR across symbol time.  syms: (N, M) complex.
-    Positive output = likely-1; negative = likely-0.
-    Removes carrier frequency offset up to ±182 Hz without a frequency lock.
-    """
-    diff = syms[1:] * np.conj(syms[:-1])
-    return diff.real.astype(np.float32).ravel()
+    ref_hi   = ffts[:, 200: _HI_A]
+    ref_lo   = ffts[:, _FFT - _HI_A: _FFT - 200]
+    ref_pwr  = (float(np.mean(np.abs(ref_hi) ** 2)) +
+                float(np.mean(np.abs(ref_lo) ** 2))) * 0.5 + 1e-20
 
-
-def _sideband_snr_db(syms: np.ndarray) -> float:
-    """Rough SNR from magnitude statistics of demodulated symbols."""
-    if syms.size == 0:
-        return -99.0
-    r = np.abs(syms).ravel()
-    mu = float(r.mean())
-    if mu < 1e-10:
-        return -99.0
-    noise = float(np.var(r))
-    if noise < 1e-20:
-        return 40.0
-    return float(10.0 * np.log10(mu ** 2 / noise))
-
-
-# ── SIS / PSD text extraction ─────────────────────────────────────────────────
-# NRSC-5-C SIS PDU (§4.8, simplified):
-#   byte 0      : type (lower nibble) | seq (upper nibble)
-#   bytes 1..N  : ASCII payload, null-terminated
-#   last 2 bytes: CRC-16
-_PDU_ID    = 0x01   # short station name (4 chars, RBDS call sign style)
-_PDU_NAME  = 0x04   # long station name
-_PDU_SLOGAN = 0x05
-_PDU_PSD   = 0x07   # program service data (artist / title via ID3 frames)
-_PDU_LABELS = {_PDU_ID: 'id', _PDU_NAME: 'name', _PDU_SLOGAN: 'slogan', _PDU_PSD: 'psd'}
-
-
-def _parse_pdu(raw: bytes) -> dict:
-    """Validate CRC and extract text from a candidate SIS PDU."""
-    if len(raw) < 4 or _crc16(raw) != 0:
-        return {}
-    pdu_type = raw[0] & 0x0F
-    text     = raw[1:-2].split(b'\x00')[0]
-    try:
-        s = text.decode('ascii').strip()
-    except UnicodeDecodeError:
-        return {}
-    if len(s) < 1 or not any(c.isprintable() and not c.isspace() for c in s):
-        return {}
-    label = _PDU_LABELS.get(pdu_type)
-    return {label: s} if label else {}
-
-
-def _scan_bits(bits: np.ndarray) -> dict:
-    """Slide across decoded bits; collect CRC-valid SIS PDUs."""
-    result = {}
-    n      = (len(bits) // 8) * 8
-    raw    = bytes(np.packbits(bits[:n]))
-    for plen in range(4, min(len(raw) + 1, 64)):
-        for start in range(len(raw) - plen + 1):
-            result.update(_parse_pdu(raw[start: start + plen]))
-            if len(result) >= 4:
-                return result
-    return result
+    return float(10.0 * np.log10(sb_pwr / ref_pwr))
 
 
 # ── Plugin ────────────────────────────────────────────────────────────────────
@@ -238,158 +185,207 @@ class NRSC5TextDecoder(Decoder):
     min_sample_rate = _MIN_SR
 
     def __init__(self):
-        self._buf_lock   = threading.Lock()
-        self._iq_buf     = np.zeros(0, dtype=np.complex64)
-        self._sr_cached  = None
-        self._sc_outer   = _HI_B   # updated from state.nrsc5_sc_outer in process()
+        self._lib      = None          # libnrsc5 CDLL or None
+        self._st       = ct.c_void_p() # nrsc5_t*
+        self._cb_ref   = None          # keep CFUNCTYPE alive
 
-        self._info_lock  = threading.Lock()
-        self._info       = {
+        self._buf_lock  = threading.Lock()
+        self._iq_buf    = np.zeros(0, dtype=np.complex64)
+        self._sr_cached = None
+        self._sc_outer  = _HI_B
+
+        self._info_lock = threading.Lock()
+        self._info      = {
             'status': 'searching…',
-            'id':     '', 'name':   '',
-            'slogan': '', 'psd':    '',
-            'snr':    -99.0, 'sync_q': 0.0,
+            'name': '', 'slogan': '', 'psd': '',
+            'snr': -99.0, 'sync_q': 0.0, 'lib': False,
         }
-        self._active     = False
-        self._event      = threading.Event()
-        self._thread     = None
+        self._active = False
+        self._event  = threading.Event()
+        self._thread = None
 
-    # ── process() — fast path (SDR callback thread) ───────────────────────────
+    # ── lifecycle ─────────────────────────────────────────────────────────────
 
     def start(self, state: AppState) -> None:
         self._active = True
         with self._buf_lock:
             self._iq_buf    = np.zeros(0, dtype=np.complex64)
             self._sr_cached = None
-        self._thread = threading.Thread(target=self._decode_loop, daemon=True)
+
+        self._lib = _find_libnrsc5()
+        if self._lib:
+            ptr = ct.c_void_p()
+            if self._lib.nrsc5_open_pipe(ct.byref(ptr)) == 0:
+                self._st = ptr
+                self._cb_ref = _CB_T(self._nrsc5_callback)
+                self._lib.nrsc5_set_callback(self._st, self._cb_ref, None)
+                self._thread = threading.Thread(
+                    target=lambda: self._lib.nrsc5_start(self._st),
+                    name='nrsc5-decode', daemon=True)
+                self._thread.start()
+                with self._info_lock:
+                    self._info['lib']    = True
+                    self._info['status'] = 'searching…'
+                return
+            # open_pipe failed — fall through to analysis path
+            self._lib = None
+
+        with self._info_lock:
+            self._info['lib']    = False
+            self._info['status'] = 'searching…'
+        self._thread = threading.Thread(target=self._analysis_loop,
+                                        name='nrsc5-analysis', daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
         self._active = False
+        if self._lib and self._st:
+            self._lib.nrsc5_stop(self._st)
         self._event.set()
         if self._thread:
             self._thread.join(timeout=3.0)
             self._thread = None
+        if self._lib and self._st:
+            self._lib.nrsc5_close(self._st)
+        self._st     = ct.c_void_p()
+        self._lib    = None
+        self._cb_ref = None
         with self._buf_lock:
             self._iq_buf = np.zeros(0, dtype=np.complex64)
+
+    # ── SDR callback (fast path) ──────────────────────────────────────────────
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
         from scipy.signal import resample as _sp_resample
-
         sr = int(state.bw_hz)
         if sr != self._sr_cached:
             self._sr_cached = sr
             with self._buf_lock:
                 self._iq_buf = np.zeros(0, dtype=np.complex64)
 
-        self._sc_outer = state.nrsc5_sc_outer   # snapshot for decode thread
+        self._sc_outer = state.nrsc5_sc_outer
 
-        # FFT-based resample: O(N log N), works for any ratio with no FIR design cost.
-        # resample_poly would compute a ~20M-tap FIR for the 1024000→744187 ratio.
         out_len = max(1, round(len(samples) * _SR / sr))
         rs = _sp_resample(samples, out_len).astype(np.complex64)
 
-        with self._buf_lock:
-            self._iq_buf = np.concatenate([self._iq_buf, rs])
-            # Keep at most 2× one decode window.  Without this cap the buffer
-            # grows indefinitely (process() adds ~12k samples every 150 ms but
-            # the decode thread only drains every 3 s), and each concatenate
-            # copies the whole accumulated array — cost grows linearly with uptime.
-            _cap = (_DECODE_SYMS * _SYM + _CP) * 2
-            if len(self._iq_buf) > _cap:
-                self._iq_buf = self._iq_buf[-_cap:]
-            if len(self._iq_buf) >= _DECODE_SYMS * _SYM + _CP:
-                self._event.set()
+        if self._lib and self._st:
+            # Feed directly to libnrsc5 as interleaved int16 I/Q at ~744 kHz
+            i16  = (np.clip(rs.real, -1.0, 1.0) * 32767).astype(np.int16)
+            q16  = (np.clip(rs.imag, -1.0, 1.0) * 32767).astype(np.int16)
+            cs16 = np.empty(len(rs) * 2, dtype=np.int16)
+            cs16[0::2] = i16
+            cs16[1::2] = q16
+            self._lib.nrsc5_pipe_samples_cs16(
+                self._st,
+                cs16.ctypes.data_as(ct.POINTER(ct.c_int16)),
+                ct.c_uint(len(cs16)))
+        else:
+            with self._buf_lock:
+                self._iq_buf = np.concatenate([self._iq_buf, rs])
+                _cap = (_DECODE_SYMS * _SYM + _CP) * 2
+                if len(self._iq_buf) > _cap:
+                    self._iq_buf = self._iq_buf[-_cap:]
+                if len(self._iq_buf) >= _DECODE_SYMS * _SYM + _CP:
+                    self._event.set()
 
         with self._info_lock:
             return dict(self._info)
 
-    # ── decode loop — background thread ───────────────────────────────────────
+    # ── libnrsc5 event callback ───────────────────────────────────────────────
 
-    def _decode_loop(self) -> None:
-        need       = _DECODE_SYMS * _SYM + _CP
-        next_decode = 0.0          # wall-clock time of next allowed decode pass
+    def _nrsc5_callback(self, evt_p, _opaque):
+        if not self._active:
+            return
+        evt = evt_p.contents
+        t   = evt.type
+        upd = {}
+        if t == _EVT_SYNC:
+            upd['status'] = 'locked'
+        elif t == _EVT_LOST_SYNC:
+            upd['status'] = 'searching…'
+        elif t == _EVT_MER:
+            upd['snr'] = round(float(evt.u.mer.lower), 1)
+        elif t == _EVT_SIS:
+            raw_name   = evt.u.sis.name
+            raw_slogan = evt.u.sis.slogan
+            if raw_name:
+                upd['name']   = raw_name.decode('utf-8', errors='replace').strip()
+            if raw_slogan:
+                upd['slogan'] = raw_slogan.decode('utf-8', errors='replace').strip()
+        elif t == _EVT_ID3:
+            parts = []
+            for field in (evt.u.id3.title, evt.u.id3.artist):
+                if field:
+                    s = field.decode('utf-8', errors='replace').strip()
+                    if s:
+                        parts.append(s)
+            if parts:
+                upd['psd'] = ' — '.join(parts)
+        if upd:
+            with self._info_lock:
+                self._info.update(upd)
+
+    # ── signal-analysis fallback loop (no libnrsc5) ───────────────────────────
+
+    def _analysis_loop(self) -> None:
+        need     = _DECODE_SYMS * _SYM + _CP
+        next_run = 0.0
         while self._active:
             self._event.wait(timeout=0.5)
             self._event.clear()
             if not self._active:
                 break
-
-            now = time.monotonic()
-            if now < next_decode:
-                continue           # rate-limit: don't decode yet
-
+            if time.monotonic() < next_run:
+                continue
             with self._buf_lock:
                 if len(self._iq_buf) < need:
                     continue
                 iq           = self._iq_buf[:need].copy()
-                self._iq_buf = self._iq_buf[need // 2:]   # 50 % overlap
+                self._iq_buf = self._iq_buf[need // 2:]
 
-            new_info = self._decode_block(iq, self._sc_outer)
+            sc_outer        = self._sc_outer
+            offset, sync_q  = _multi_peak_sync(iq)
+            snr_db          = _sideband_snr_db(iq, offset, sc_outer)
+
+            if sync_q > 8.0 and snr_db > 2.0:
+                status = 'signal present'
+            elif sync_q > 4.0:
+                status = 'syncing'
+            else:
+                status = 'searching…'
+
             with self._info_lock:
-                self._info.update(new_info)
-            next_decode = time.monotonic() + _DECODE_INTERVAL
+                self._info.update({
+                    'status': status,
+                    'sync_q': round(sync_q, 1),
+                    'snr':    round(snr_db, 1),
+                })
+            next_run = time.monotonic() + _DECODE_INTERVAL
 
-    def _decode_block(self, iq: np.ndarray, sc_outer: int) -> dict:
-        info = {}
-
-        # 1. Symbol timing via CP correlation
-        metric  = _cp_metric(iq)
-        offset  = _find_offset(metric)
-        peak    = float(metric[offset])
-        mean    = float(metric.mean()) + 1e-9
-        sync_q  = peak / mean
-        info['sync_q'] = sync_q
-
-        n_sym = (len(iq) - offset) // _SYM
-        if n_sym < 4:
-            info['status'] = 'no sync'
-            return info
-
-        # 2. OFDM demodulation — extract PM sideband subcarriers
-        lo, hi = _extract_subcarriers(iq, offset, n_sym, sc_outer)
-        both   = np.concatenate([lo, hi], axis=1)   # (n_sym, 382)
-
-        # 3. Signal quality check
-        snr = _sideband_snr_db(both)
-        info['snr']    = snr
-        info['status'] = 'locked' if sync_q > 3.0 else 'syncing'
-
-        if snr < -10.0:
-            info['status'] = 'weak signal'
-            return info
-
-        # 4. Differential BPSK → soft LLR values (one per bit-pair)
-        llr = _differential_llr(both)
-        if len(llr) > _MAX_VITERBI_PAIRS * 2:
-            llr = llr[:_MAX_VITERBI_PAIRS * 2]
-
-        # 5. Viterbi FEC
-        bits = _viterbi(llr)
-
-        # 6. Scan decoded bits for CRC-valid SIS PDUs
-        text = _scan_bits(bits)
-        info.update(text)
-        return info
+    # ── UI hooks ──────────────────────────────────────────────────────────────
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
         from core import NRSC5_SC_MIN, NRSC5_SC_MAX, NRSC5_SC_STEP
         if key == ord('['):
-            state.nrsc5_sc_outer = max(NRSC5_SC_MIN, state.nrsc5_sc_outer - NRSC5_SC_STEP)
+            state.nrsc5_sc_outer = max(NRSC5_SC_MIN,
+                                       state.nrsc5_sc_outer - NRSC5_SC_STEP)
             return True
         if key == ord(']'):
-            state.nrsc5_sc_outer = min(NRSC5_SC_MAX, state.nrsc5_sc_outer + NRSC5_SC_STEP)
+            state.nrsc5_sc_outer = min(NRSC5_SC_MAX,
+                                       state.nrsc5_sc_outer + NRSC5_SC_STEP)
             return True
         return False
 
-    # ── display hooks ─────────────────────────────────────────────────────────
-
     def status_text(self, state: AppState, result: dict) -> str:
-        sc_w = _SR / _FFT
-        shoulder_khz = (state.nrsc5_sc_outer - _HI_A) * sc_w / 1000
-        return '[HD:{} {:.0f}dB {:.0f}kHz] '.format(
-            result.get('status', '?'), result.get('snr', -99.0), shoulder_khz)
+        sc_w    = _SR / _FFT
+        sh_khz  = (state.nrsc5_sc_outer - _HI_A) * sc_w / 1000
+        lib_tag = '' if result.get('lib') else '(no lib) '
+        return '[HD:{} {:+.0f}dB {:.0f}kHz] {}'.format(
+            result.get('status', '?'),
+            result.get('snr', -99.0),
+            sh_khz,
+            lib_tag)
 
     def draw_overlay(self, screen_obj, state: AppState, result: dict,
                      freq_min: float, freq_range: float,
@@ -397,50 +393,54 @@ class NRSC5TextDecoder(Decoder):
         if height < 6:
             return
 
-        # Tint the digital sideband columns using current sc_outer
+        # Cyan tint on digital sideband columns
         if curses.has_colors():
             cf       = state.center_hz
-            sc_w     = _SR / _FFT          # Hz per subcarrier ≈ 363.4 Hz
-            inner_hz = _HI_A * sc_w        # fixed inner edge ≈ 129 kHz
-            outer_hz = state.nrsc5_sc_outer * sc_w   # variable outer edge
+            sc_w     = _SR / _FFT
+            inner_hz = _HI_A * sc_w          # ≈ 129 kHz (inner edge, fixed)
+            outer_hz = state.nrsc5_sc_outer * sc_w
             for sign in (-1, 1):
-                col_l = int(max(0, (cf + sign * inner_hz - freq_min) / freq_range * plot_w))
-                col_r = int(min(plot_w, (cf + sign * outer_hz - freq_min) / freq_range * plot_w))
+                c_l = int(max(0, (cf + sign * inner_hz - freq_min)
+                              / freq_range * plot_w))
+                c_r = int(min(plot_w, (cf + sign * outer_hz - freq_min)
+                              / freq_range * plot_w))
                 if sign == -1:
-                    col_l, col_r = col_r, col_l   # negative side: swap to get l < r
-                if col_r <= col_l:
+                    c_l, c_r = c_r, c_l
+                if c_r <= c_l:
                     continue
                 attr = curses.color_pair(1)
                 for r in range(height - 5):
                     try:
-                        screen_obj.chgat(r + 1, LABEL_W + col_l,
-                                         col_r - col_l, attr)
+                        screen_obj.chgat(r + 1, LABEL_W + c_l, c_r - c_l, attr)
                     except curses.error:
                         pass
 
-        # Bottom 5 body rows: decoded text
-        status = result.get('status', 'searching…')
-        snr    = result.get('snr',    -99.0)
-        sync_q = result.get('sync_q', 0.0)
+        # Bottom 5 body rows: decoded / detected text
+        status  = result.get('status',  'searching…')
+        snr     = result.get('snr',     -99.0)
+        sync_q  = result.get('sync_q',  0.0)
+        lib_ok  = result.get('lib',     False)
+        station = result.get('name')   or result.get('id')     or '—'
+        hint    = '' if lib_ok else '  [brew install nrsc5 to decode]'
 
-        station = result.get('name') or result.get('id') or '—'
         lines = [
-            'HD Radio  {}  SNR {:+.0f} dB  sync {:.1f}'.format(
-                status, snr, sync_q),
+            'HD Radio  {}  {:+.0f} dB  sync {:.1f}{}'.format(
+                status, snr, sync_q, hint),
             'Station: {}'.format(station),
             'Slogan:  {}'.format(result.get('slogan') or '—'),
             'Now:     {}'.format(result.get('psd')    or '—'),
             '─' * min(plot_w, 60),
         ]
 
-        base = height - 5   # first overlay row (0-indexed body)
+        base = height - 5
         for i, line in enumerate(lines):
             row = base + i
             if row < 0 or row >= height:
                 continue
             try:
-                screen_obj.addstr(row + 1, LABEL_W,
-                                  line[:plot_w].ljust(plot_w)[:plot_w],
-                                  curses.A_BOLD if i < 4 else curses.A_DIM)
+                screen_obj.addstr(
+                    row + 1, LABEL_W,
+                    line[:plot_w].ljust(plot_w)[:plot_w],
+                    curses.A_BOLD if i < 4 else curses.A_DIM)
             except curses.error:
                 pass
