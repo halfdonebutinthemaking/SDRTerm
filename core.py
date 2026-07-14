@@ -83,6 +83,11 @@ class AppState:
     pending_freq:      Optional[float] = None  # frequency change queued by active plugin
     pending_gain:      Optional[float] = None  # gain change (≥0 = dB, <0 = auto)
     waterfall_active:  bool            = False
+    flash_msg:         str             = ''
+    flash_until:       float           = 0.0
+    preset_menu:       Optional[list]  = None  # None=closed; list of paths
+    preset_cursor:     int             = 0
+    save_input:        Optional[str]   = None  # None=closed; str=filename being edited
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────

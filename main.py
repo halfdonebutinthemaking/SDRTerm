@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, curses, threading
+import os, time, curses, threading, json, glob, datetime
 from collections import deque
 import numpy as np
 
@@ -47,6 +47,97 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
             screen_obj.addstr(y0 + 2 + i, x0 + 2, label[:w - 4].ljust(w - 4), attr)
         screen_obj.addstr(y0 + h - 2, x0 + 2, hint1[:w - 4], curses.A_DIM)
         screen_obj.addstr(y0 + h - 1, x0 + 2, hint2[:w - 4], curses.A_DIM)
+    except curses.error:
+        pass
+
+
+# ── preset helpers ────────────────────────────────────────────────────────────
+_PRESET_FIELDS = (
+    'center_hz', 'bw_hz', 'gain_db', 'gain_auto', 'iq_corr',
+    'fm_bw_hz', 'nrsc5_sc_outer', 'waterfall_active', 'active_decoders',
+)
+
+
+def _preset_default_name() -> str:
+    return 'preset_{}.sdrterm'.format(
+        datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+
+
+def _save_preset_to(path: str, state: AppState) -> None:
+    data = {}
+    for f in _PRESET_FIELDS:
+        v = getattr(state, f)
+        data[f] = list(v) if isinstance(v, set) else v
+    with open(path, 'w') as fh:
+        json.dump(data, fh, indent=2)
+
+
+def _load_preset(path: str, state: AppState) -> bool:
+    try:
+        with open(path) as fh:
+            data = json.load(fh)
+        for f in _PRESET_FIELDS:
+            if f not in data:
+                continue
+            v = data[f]
+            if f == 'active_decoders':
+                v = set(v) | {'spectrum'}
+            setattr(state, f, v)
+        return True
+    except Exception:
+        return False
+
+
+def _find_presets() -> list:
+    return sorted(glob.glob('*.sdrterm'))
+
+
+def _apply_preset(path: str, state: AppState, registry: dict, sdr) -> bool:
+    """Load a preset at runtime: start/stop decoders and apply hardware settings."""
+    old_active = set(state.active_decoders)
+    if not _load_preset(path, state):
+        return False
+    new_active = state.active_decoders
+    for name in old_active - new_active:
+        if name in registry:
+            registry[name].stop()
+    needed = _required_bw(new_active, registry)
+    clamped = _nearest_bw(needed, sdr.supported_bandwidths)
+    if state.bw_hz not in sdr.supported_bandwidths:
+        state.bw_hz = min(sdr.supported_bandwidths,
+                          key=lambda b: abs(b - state.bw_hz))
+    if state.bw_hz < clamped:
+        state.bw_hz = clamped
+    sdr.sample_rate = state.bw_hz
+    sdr.center_freq = state.center_hz
+    sdr.gain        = 'auto' if state.gain_auto else state.gain_db
+    for name in new_active - old_active:
+        if name in registry:
+            registry[name].start(state)
+    return True
+
+
+def _draw_preset_menu(screen_obj: curses.window, state: AppState,
+                      ROWS: int, COLS: int) -> None:
+    paths = state.preset_menu
+    if not paths:
+        return
+    hint  = ' ret=load  esc=cancel '
+    min_w = max(len(hint) + 4, max(len(os.path.basename(p)) for p in paths) + 6, 36)
+    w  = min(COLS - 4, min_w)
+    h  = len(paths) + 4
+    y0 = max(0, (ROWS - h) // 2)
+    x0 = max(0, (COLS - w) // 2)
+    try:
+        for r in range(h):
+            screen_obj.addstr(y0 + r, x0, ' ' * w)
+        screen_obj.addstr(y0,     x0 + 2, ' Load Preset ', curses.A_BOLD)
+        screen_obj.addstr(y0 + 1, x0 + 2, '─' * (w - 4))
+        for i, p in enumerate(paths):
+            attr  = curses.A_REVERSE if i == state.preset_cursor else curses.A_NORMAL
+            label = os.path.basename(p)[:w - 4].ljust(w - 4)
+            screen_obj.addstr(y0 + 2 + i, x0 + 2, label, attr)
+        screen_obj.addstr(y0 + h - 1, x0 + 2, hint[:w - 4], curses.A_DIM)
     except curses.error:
         pass
 
@@ -160,6 +251,11 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
             screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
+        elif state.save_input is not None:
+            prompt = 'Save as: {}_'.format(state.save_input)
+            screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+            screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
+
         elif state.tab_idx == 0:
             # core tab — left side
             # When gain has focus every item except [gain] is dimmed so the
@@ -194,7 +290,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 col += len(dev_status) + 1
 
             # core tab — right side
-            rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins']
+            rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins', 's=save', 'l=load']
             if sdr.key_help:
                 rhs_parts.append(sdr.key_help)
             rhs_parts.append('v=spectrum' if state.waterfall_active else 'v=waterfall')
@@ -231,6 +327,18 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
     # plugin menu drawn last so it overlays everything
     if state.menu_active is not None:
         _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS)
+
+    if state.preset_menu is not None:
+        _draw_preset_menu(screen_obj, state, ROWS, COLS)
+
+    if time.monotonic() < state.flash_until and state.flash_msg:
+        msg = '  {}  '.format(state.flash_msg)
+        x   = max(0, (COLS - len(msg)) // 2)
+        try:
+            screen_obj.addstr(ROWS - 1, x, msg[:COLS - x],
+                              curses.A_REVERSE | curses.A_BOLD)
+        except curses.error:
+            pass
 
     screen_obj.refresh()
 
@@ -278,6 +386,26 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         redraw()
         return
 
+    # ── preset menu modal ─────────────────────────────────────────────────────
+    if state.preset_menu is not None:
+        if key == 27:
+            state.preset_menu = None
+        elif key in (10, 13, curses.KEY_ENTER):
+            if 0 <= state.preset_cursor < len(state.preset_menu):
+                path = state.preset_menu[state.preset_cursor]
+                ok   = _apply_preset(path, state, registry, sdr)
+                state.flash_msg   = ('loaded: ' + os.path.basename(path)) if ok \
+                                     else 'error loading preset'
+                state.flash_until = time.monotonic() + 2.0
+            state.preset_menu = None
+        elif key == curses.KEY_UP:
+            state.preset_cursor = max(0, state.preset_cursor - 1)
+        elif key == curses.KEY_DOWN:
+            state.preset_cursor = min(len(state.preset_menu) - 1,
+                                      state.preset_cursor + 1)
+        redraw()
+        return
+
     # ── freq input modal ──────────────────────────────────────────────────────
     if state.freq_input is not None:
         if key == 27:
@@ -300,14 +428,41 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         if key == 27:
             state.path_input = state.path_input_target = None
         elif key in (10, 13, curses.KEY_ENTER):
-            target = registry.get(state.path_input_target)
-            if target and hasattr(target, 'set_path'):
-                target.set_path(state.path_input or None)
+            if state.path_input_target == '__preset__':
+                if state.path_input:
+                    ok = _apply_preset(state.path_input, state, registry, sdr)
+                    state.flash_msg   = ('loaded: ' + os.path.basename(state.path_input)) \
+                                         if ok else 'cannot load: ' + state.path_input
+                    state.flash_until = time.monotonic() + 2.0
+            else:
+                target = registry.get(state.path_input_target)
+                if target and hasattr(target, 'set_path'):
+                    target.set_path(state.path_input or None)
             state.path_input = state.path_input_target = None
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             state.path_input = state.path_input[:-1]
         elif 32 <= key <= 126:
             state.path_input += chr(key)
+        redraw()
+        return
+
+    # ── save-as input modal ───────────────────────────────────────────────────
+    if state.save_input is not None:
+        if key == 27:
+            state.save_input = None
+        elif key in (10, 13, curses.KEY_ENTER):
+            if state.save_input:
+                try:
+                    _save_preset_to(state.save_input, state)
+                    state.flash_msg = 'saved: ' + state.save_input
+                except Exception as e:
+                    state.flash_msg = 'save error: ' + str(e)
+                state.flash_until = time.monotonic() + 2.0
+            state.save_input = None
+        elif key in (curses.KEY_BACKSPACE, 127, 8):
+            state.save_input = state.save_input[:-1]
+        elif 32 <= key <= 126 and chr(key) not in '\'"\\':
+            state.save_input += chr(key)
         redraw()
         return
 
@@ -387,6 +542,21 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         elif key in (ord('p'), ord('P')):
             state.menu_active = state.active_decoders - {'spectrum'}
             state.menu_cursor = 0
+        elif key in (ord('s'), ord('S')):
+            state.save_input = _preset_default_name()
+        elif key in (ord('l'), ord('L')):
+            paths = _find_presets()
+            if not paths:
+                state.path_input        = ''
+                state.path_input_target = '__preset__'
+            elif len(paths) == 1:
+                ok = _apply_preset(paths[0], state, registry, sdr)
+                state.flash_msg   = ('loaded: ' + paths[0]) if ok \
+                                     else 'error loading preset'
+                state.flash_until = time.monotonic() + 2.0
+            else:
+                state.preset_menu   = paths
+                state.preset_cursor = 0
         else:
             sdr.handle_key(key, state)
     else:
@@ -406,16 +576,26 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         curses.init_pair(1, curses.COLOR_CYAN, -1)
 
     registry = load_plugins()
+    # Discard any preset-loaded decoder names that don't exist in this registry
+    state.active_decoders = (state.active_decoders & set(registry.keys())) | {'spectrum'}
     registry['spectrum'].start(state)
+    # Start any additional decoders loaded from a preset
+    for _name in list(state.active_decoders):
+        if _name != 'spectrum' and _name in registry:
+            registry[_name].start(state)
 
     # stable ordered list of all toggleable plugins (used for the menu)
     all_plugins = [p for p in registry.values() if p.key]
 
     # Clamp bw_hz to the nearest value the device actually supports.
-    # Matters when --bw was given but doesn't exactly match a supported step.
+    # Matters when --bw was given or a preset had a different BW.
     if state.bw_hz not in sdr.supported_bandwidths:
         state.bw_hz = min(sdr.supported_bandwidths,
                           key=lambda b: abs(b - state.bw_hz))
+    # Ensure BW is sufficient for all active decoders
+    _min_needed = _required_bw(state.active_decoders, registry)
+    if state.bw_hz < _min_needed:
+        state.bw_hz = _nearest_bw(_min_needed, sdr.supported_bandwidths)
 
     sdr.sample_rate = state.bw_hz
     sdr.center_freq = state.center_hz
@@ -558,6 +738,8 @@ def main() -> None:
                         help='gain in dB (e.g. 30.0) or "auto"')
     parser.add_argument('--i', metavar='on|off', choices=['on', 'off'],
                         help='enable IQ correction at startup')
+    parser.add_argument('--preset', metavar='FILE',
+                        help='load a .sdrterm preset file (overrides all other settings)')
     args = parser.parse_args()
 
     # build initial AppState from CLI overrides
@@ -584,6 +766,10 @@ def main() -> None:
                 parser.error('invalid gain value: {}'.format(args.g))
     if args.i:
         state.iq_corr = (args.i == 'on')
+    # --preset overrides everything set above
+    if args.preset:
+        if not _load_preset(args.preset, state):
+            parser.error('cannot load preset: {}'.format(args.preset))
 
     # suppress librtlsdr/libusb noise on stderr for the entire session
     devnull  = os.open(os.devnull, os.O_WRONLY)
