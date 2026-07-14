@@ -25,6 +25,10 @@ WINDOW     = np.hanning(FFT_BINS)
 FM_BW_MIN  = 30_000
 FM_BW_MAX  = 200_000
 FM_BW_STEP = 10_000
+# NRSC-5 sideband width: outer subcarrier index (inner edge is fixed at SC 356)
+NRSC5_SC_MIN  = 376   # 20 subcarriers minimum per side
+NRSC5_SC_MAX  = 546   # full primary sideband per spec
+NRSC5_SC_STEP = 20    # ≈ 7.3 kHz per step
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -69,6 +73,7 @@ class AppState:
     quit:            bool          = False
     active_decoders: set           = field(default_factory=lambda: {'spectrum'})
     fm_bw_hz:          int           = 100_000
+    nrsc5_sc_outer:    int           = 546     # NRSC-5 outer subcarrier index (356..546)
     tab_idx:           int           = 0     # 0=core, N=Nth enabled plugin
     menu_cursor:       int           = 0
     menu_active:       Optional[set] = None  # None=closed; set=pending enabled set

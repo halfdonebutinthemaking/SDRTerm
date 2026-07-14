@@ -145,22 +145,23 @@ def _find_offset(metric: np.ndarray) -> int:
     return int(np.argmax(metric[:_SYM]))
 
 
-def _extract_subcarriers(iq: np.ndarray, offset: int, n_sym: int):
-    """OFDM FFT-demodulate n_sym symbols → (lo, hi) each (n_sym, 191) complex64.
+def _extract_subcarriers(iq: np.ndarray, offset: int, n_sym: int, sc_outer: int = _HI_B):
+    """OFDM FFT-demodulate n_sym symbols → (lo, hi) each (n_sym, N) complex64.
 
-    Uses a single 2-D batch FFT so the GIL is released for the entire
-    computation — no per-symbol Python loop.
+    sc_outer sets the outermost subcarrier index used (max _HI_B=546).
+    The inner edge is always _HI_A=356 (start of primary sideband per spec).
+    Uses a single 2-D batch FFT so the GIL is released for the entire computation.
     """
-    end   = offset + n_sym * _SYM
     avail = min(n_sym, (len(iq) - offset) // _SYM)
     if avail <= 0:
-        empty = np.zeros((0, _N_SC), dtype=np.complex64)
+        empty = np.zeros((0, max(1, sc_outer - _HI_A + 1)), dtype=np.complex64)
         return empty, empty.copy()
     end      = offset + avail * _SYM
     payloads = iq[offset:end].reshape(avail, _SYM)[:, _CP:]   # (avail, _FFT)
     ffts     = np.fft.fft(payloads, axis=1)                    # single GIL-free op
-    hi = ffts[:, _HI_A: _HI_B + 1].astype(np.complex64)
-    lo = ffts[:, _FFT + _LO_A: _FFT + _LO_B + 1].astype(np.complex64)
+    hi = ffts[:, _HI_A: sc_outer + 1].astype(np.complex64)
+    # lower sideband mirrors upper: SC -sc_outer..-356 → bins _FFT-sc_outer.._FFT-356
+    lo = ffts[:, _FFT - sc_outer: _FFT - _HI_A + 1].astype(np.complex64)
     return lo, hi
 
 
@@ -233,13 +234,14 @@ def _scan_bits(bits: np.ndarray) -> dict:
 class NRSC5TextDecoder(Decoder):
     name            = 'nrsc5_text'
     key             = 'n'
-    key_help        = 'n=HD'
+    key_help        = '[/]=shoulder'
     min_sample_rate = _MIN_SR
 
     def __init__(self):
         self._buf_lock   = threading.Lock()
         self._iq_buf     = np.zeros(0, dtype=np.complex64)
         self._sr_cached  = None
+        self._sc_outer   = _HI_B   # updated from state.nrsc5_sc_outer in process()
 
         self._info_lock  = threading.Lock()
         self._info       = {
@@ -280,6 +282,8 @@ class NRSC5TextDecoder(Decoder):
             self._sr_cached = sr
             with self._buf_lock:
                 self._iq_buf = np.zeros(0, dtype=np.complex64)
+
+        self._sc_outer = state.nrsc5_sc_outer   # snapshot for decode thread
 
         # FFT-based resample: O(N log N), works for any ratio with no FIR design cost.
         # resample_poly would compute a ~20M-tap FIR for the 1024000→744187 ratio.
@@ -322,12 +326,12 @@ class NRSC5TextDecoder(Decoder):
                 iq           = self._iq_buf[:need].copy()
                 self._iq_buf = self._iq_buf[need // 2:]   # 50 % overlap
 
-            new_info = self._decode_block(iq)
+            new_info = self._decode_block(iq, self._sc_outer)
             with self._info_lock:
                 self._info.update(new_info)
             next_decode = time.monotonic() + _DECODE_INTERVAL
 
-    def _decode_block(self, iq: np.ndarray) -> dict:
+    def _decode_block(self, iq: np.ndarray, sc_outer: int) -> dict:
         info = {}
 
         # 1. Symbol timing via CP correlation
@@ -344,7 +348,7 @@ class NRSC5TextDecoder(Decoder):
             return info
 
         # 2. OFDM demodulation — extract PM sideband subcarriers
-        lo, hi = _extract_subcarriers(iq, offset, n_sym)
+        lo, hi = _extract_subcarriers(iq, offset, n_sym, sc_outer)
         both   = np.concatenate([lo, hi], axis=1)   # (n_sym, 382)
 
         # 3. Signal quality check
@@ -369,11 +373,23 @@ class NRSC5TextDecoder(Decoder):
         info.update(text)
         return info
 
+    def handle_key(self, key: int, state: AppState, sdr) -> bool:
+        from core import NRSC5_SC_MIN, NRSC5_SC_MAX, NRSC5_SC_STEP
+        if key == ord('['):
+            state.nrsc5_sc_outer = max(NRSC5_SC_MIN, state.nrsc5_sc_outer - NRSC5_SC_STEP)
+            return True
+        if key == ord(']'):
+            state.nrsc5_sc_outer = min(NRSC5_SC_MAX, state.nrsc5_sc_outer + NRSC5_SC_STEP)
+            return True
+        return False
+
     # ── display hooks ─────────────────────────────────────────────────────────
 
     def status_text(self, state: AppState, result: dict) -> str:
-        return '[HD:{} {:.0f}dB] '.format(
-            result.get('status', '?'), result.get('snr', -99.0))
+        sc_w = _SR / _FFT
+        shoulder_khz = (state.nrsc5_sc_outer - _HI_A) * sc_w / 1000
+        return '[HD:{} {:.0f}dB {:.0f}kHz] '.format(
+            result.get('status', '?'), result.get('snr', -99.0), shoulder_khz)
 
     def draw_overlay(self, screen_obj, state: AppState, result: dict,
                      freq_min: float, freq_range: float,
@@ -381,13 +397,17 @@ class NRSC5TextDecoder(Decoder):
         if height < 6:
             return
 
-        # Tint the digital sideband columns
+        # Tint the digital sideband columns using current sc_outer
         if curses.has_colors():
-            cf   = state.center_hz
-            sc_w = _SR / _FFT   # Hz per subcarrier ≈ 363.4 Hz
-            for a, b in ((_LO_A, _LO_B), (_HI_A, _HI_B)):
-                col_l = int(max(0, (cf + a * sc_w - freq_min) / freq_range * plot_w))
-                col_r = int(min(plot_w, (cf + b * sc_w - freq_min) / freq_range * plot_w))
+            cf       = state.center_hz
+            sc_w     = _SR / _FFT          # Hz per subcarrier ≈ 363.4 Hz
+            inner_hz = _HI_A * sc_w        # fixed inner edge ≈ 129 kHz
+            outer_hz = state.nrsc5_sc_outer * sc_w   # variable outer edge
+            for sign in (-1, 1):
+                col_l = int(max(0, (cf + sign * inner_hz - freq_min) / freq_range * plot_w))
+                col_r = int(min(plot_w, (cf + sign * outer_hz - freq_min) / freq_range * plot_w))
+                if sign == -1:
+                    col_l, col_r = col_r, col_l   # negative side: swap to get l < r
                 if col_r <= col_l:
                     continue
                 attr = curses.color_pair(1)
