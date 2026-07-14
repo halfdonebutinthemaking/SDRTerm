@@ -164,16 +164,37 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
 
         elif state.tab_idx == 0:
             # core tab — left side
-            screen_obj.addstr(ROWS - 1, 0, '[core]', curses.A_BOLD)
+            # When gain has focus every item except [gain] is dimmed so the
+            # user can see at a glance which parameter is being edited.
+            gm  = state.gain_mode
+            dim = curses.A_DIM
+
+            screen_obj.addstr(ROWS - 1, 0, '[core]',
+                              dim if gm else curses.A_BOLD)
             col = 7
+
             iq_tag = '[IQ:ON]' if state.iq_corr else '[IQ:off]'
             screen_obj.addstr(ROWS - 1, col, iq_tag,
-                              curses.A_BOLD if state.iq_corr else curses.A_DIM)
+                              dim if gm else (curses.A_BOLD if state.iq_corr else dim))
             col += len(iq_tag) + 1
+
+            gain_tag = '[gain:auto]' if state.gain_auto \
+                       else '[gain:{:.1f}dB]'.format(state.gain_db)
+            screen_obj.addstr(ROWS - 1, col, gain_tag,
+                              curses.A_BOLD if gm else curses.A_NORMAL)
+            col += len(gain_tag) + 1
+
+            bw_tag = '[bw:{}]'.format(fmt_freq(state.bw_hz))
+            screen_obj.addstr(ROWS - 1, col, bw_tag,
+                              dim if gm else curses.A_NORMAL)
+            col += len(bw_tag) + 1
+
             dev_status = sdr.status_text(state)
             if dev_status:
-                screen_obj.addstr(ROWS - 1, col, dev_status)
+                screen_obj.addstr(ROWS - 1, col, dev_status,
+                                  dim if gm else curses.A_NORMAL)
                 col += len(dev_status) + 1
+
             # core tab — right side
             rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins']
             if sdr.key_help:

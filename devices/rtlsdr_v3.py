@@ -1,4 +1,4 @@
-from core import Device, fmt_freq
+from core import Device
 
 # RTL-SDR V3 reliable sample rates (Hz).  Values outside this set cause
 # librtlsdr to silently round or produce spurious tones on some hardware.
@@ -70,7 +70,6 @@ class RtlSdrDevice(Device):
         return False
 
     def status_text(self, state) -> str:
-        parts = ['BW {}'.format(fmt_freq(state.bw_hz))]
         if self._has_bias_tee:
-            parts.append('[bias-tee:on]' if self._bias_tee else '[bias-tee:off]')
-        return '  '.join(parts) + ' '
+            return ('[bias-tee:on]' if self._bias_tee else '[bias-tee:off]') + ' '
+        return ''

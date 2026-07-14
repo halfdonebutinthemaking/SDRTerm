@@ -288,7 +288,13 @@ class NRSC5TextDecoder(Decoder):
 
         with self._buf_lock:
             self._iq_buf = np.concatenate([self._iq_buf, rs])
-            # Signal decode thread when we have enough symbols
+            # Keep at most 2× one decode window.  Without this cap the buffer
+            # grows indefinitely (process() adds ~12k samples every 150 ms but
+            # the decode thread only drains every 3 s), and each concatenate
+            # copies the whole accumulated array — cost grows linearly with uptime.
+            _cap = (_DECODE_SYMS * _SYM + _CP) * 2
+            if len(self._iq_buf) > _cap:
+                self._iq_buf = self._iq_buf[-_cap:]
             if len(self._iq_buf) >= _DECODE_SYMS * _SYM + _CP:
                 self._event.set()
 
