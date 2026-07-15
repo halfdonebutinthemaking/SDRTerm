@@ -11,11 +11,10 @@ _SNAP_DB      = 6.0    # immediately snap to a peak this much stronger than held
 
 
 class PeakMarker(Decoder):
-    name                = 'peak_marker'
-    key                 = 'k'
-    key_help            = '-/+=hold'
-    min_sample_rate     = 250_000
-    always_draw_overlay = True
+    name            = 'peak_marker'
+    key             = 'k'
+    key_help        = '-/+=hold'
+    min_sample_rate = 250_000
 
     def __init__(self):
         self._held_hz     = None

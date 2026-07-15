@@ -149,10 +149,57 @@ def _draw_preset_menu(screen_obj: curses.window, state: AppState,
         pass
 
 
+# ── debug console overlay ─────────────────────────────────────────────────────
+def _draw_debug_console(screen_obj: curses.window,
+                        state: AppState, plugin) -> None:
+    ROWS, COLS = screen_obj.getmaxyx()
+    screen_obj.erase()
+
+    title = '[{} debug]  ↑↓=line  PgUp/PgDn=page  esc=close'.format(plugin.name)
+    try:
+        screen_obj.addstr(0, 0, title[:COLS - 1], curses.A_BOLD)
+    except curses.error:
+        pass
+
+    body_h  = ROWS - 2
+    lines   = list(plugin._debug_lines) if plugin._debug_lines else []
+    n       = len(lines)
+
+    max_scroll         = max(0, n - body_h)
+    state.debug_scroll = min(state.debug_scroll, max_scroll)
+    scroll             = state.debug_scroll
+
+    start   = max(0, n - body_h - scroll)
+    end     = n - scroll
+    visible = lines[start:end]
+
+    for i, line in enumerate(visible):
+        try:
+            screen_obj.addstr(i + 1, 0, str(line)[:COLS - 1])
+        except curses.error:
+            pass
+
+    if n:
+        info = ('↑{}  {}/{}'.format(scroll, end, n)
+                if scroll else 'tail  {}'.format(n))
+    else:
+        info = 'no output yet'
+    try:
+        screen_obj.addstr(ROWS - 1, 0, info[:COLS - 1], curses.A_DIM)
+    except curses.error:
+        pass
+
+    screen_obj.refresh()
+
+
 # ── renderer ──────────────────────────────────────────────────────────────────
 def draw(screen_obj: curses.window, state: AppState, results: dict,
          registry: dict, tab_plugins: list, all_plugins: list,
          sdr: Device, wf_rows) -> None:
+    if state.debug_console is not None and state.debug_console in registry:
+        _draw_debug_console(screen_obj, state, registry[state.debug_console])
+        return
+
     sp = results.get('spectrum')
     if sp is None:
         return
@@ -241,16 +288,12 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 pass
 
     # ── plugin overlays ───────────────────────────────────────────────────────
-    # Always-on overlays (e.g. peak marker) drawn first so selected-tab
-    # overlays (e.g. FM band, NRSC-5 sidebands) appear on top.
+    # Draw every active plugin's overlay. Skip the one whose tab is currently
+    # selected — its status is already visible in the footer.
+    _selected = (tab_plugins[state.tab_idx - 1]
+                 if 0 < state.tab_idx <= len(tab_plugins) else None)
     for _p in tab_plugins:
-        if _p.always_draw_overlay:
-            _p.draw_overlay(screen_obj, state, results.get(_p.name) or {},
-                            freq_min, freq_range, plot_w, height)
-    # Selected-tab overlay (skip if it is also always-on — already drawn).
-    if 0 < state.tab_idx <= len(tab_plugins):
-        _p = tab_plugins[state.tab_idx - 1]
-        if not _p.always_draw_overlay:
+        if _p is not _selected:
             _p.draw_overlay(screen_obj, state, results.get(_p.name) or {},
                             freq_min, freq_range, plot_w, height)
 
@@ -332,7 +375,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 if text:
                     screen_obj.addstr(ROWS - 1, col, text, curses.A_BOLD)
                     col += len(text)
-            parts = ['x=discard']
+            parts = ['x=discard', 'd=debug']
             if plugin.key_help:
                 parts.append(plugin.key_help)
             parts += ['f=freq', 'q=quit']
@@ -507,6 +550,27 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         redraw()
         return
 
+    # ── debug console modal ───────────────────────────────────────────────────
+    if state.debug_console is not None:
+        ROWS, _ = stdscr.getmaxyx()
+        page = max(1, ROWS - 4)
+        if key == 27:
+            state.debug_console = None
+            state.debug_scroll  = 0
+        elif key == curses.KEY_UP:
+            state.debug_scroll += 1
+        elif key == curses.KEY_DOWN:
+            state.debug_scroll = max(0, state.debug_scroll - 1)
+        elif key == curses.KEY_PPAGE:
+            state.debug_scroll += page
+        elif key == curses.KEY_NPAGE:
+            state.debug_scroll = max(0, state.debug_scroll - page)
+        elif key in (ord('q'), ord('Q')):
+            state.quit = True
+            return
+        redraw()
+        return
+
     # ── always-reserved ───────────────────────────────────────────────────────
     if key in (ord('q'), ord('Q')):
         state.quit = True
@@ -542,6 +606,11 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         if key == ord('x'):
             toggle_decoder(plugin.name, registry, state, sdr)
             state.tab_idx = 0
+            redraw()
+            return
+        if key == ord('d'):
+            state.debug_console = plugin.name
+            state.debug_scroll  = 0
             redraw()
             return
         if plugin.handle_key(key, state, sdr):
