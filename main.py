@@ -63,11 +63,12 @@ def _preset_default_name() -> str:
         datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
 
-def _save_preset_to(path: str, state: AppState) -> None:
+def _save_preset_to(path: str, state: AppState, all_plugins: list) -> None:
     data = {}
     for f in _PRESET_FIELDS:
         v = getattr(state, f)
         data[f] = list(v) if isinstance(v, set) else v
+    data['plugin_order'] = [p.name for p in all_plugins]
     with open(path, 'w') as fh:
         json.dump(data, fh, indent=2)
 
@@ -83,6 +84,8 @@ def _load_preset(path: str, state: AppState) -> bool:
             if f == 'active_decoders':
                 v = set(v) | {'spectrum'}
             setattr(state, f, v)
+        if 'plugin_order' in data:
+            state.plugin_order = data['plugin_order']
         return True
     except Exception:
         return False
@@ -92,11 +95,15 @@ def _find_presets() -> list:
     return sorted(glob.glob('*.sdrterm'))
 
 
-def _apply_preset(path: str, state: AppState, registry: dict, sdr) -> bool:
+def _apply_preset(path: str, state: AppState, registry: dict, sdr,
+                  all_plugins: list = None) -> bool:
     """Load a preset at runtime: start/stop decoders and apply hardware settings."""
     old_active = set(state.active_decoders)
     if not _load_preset(path, state):
         return False
+    if all_plugins is not None and state.plugin_order:
+        _om = {name: i for i, name in enumerate(state.plugin_order)}
+        all_plugins.sort(key=lambda p: _om.get(p.name, len(state.plugin_order)))
     new_active = state.active_decoders
     for name in old_active - new_active:
         if name in registry:
@@ -252,9 +259,14 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
         elif state.save_input is not None:
-            prompt = 'Save as: {}_'.format(state.save_input)
-            screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
-            screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
+            if state.save_input.startswith('?:'):
+                fname  = os.path.basename(state.save_input[2:])
+                prompt = ' {} exists — overwrite? [y/n]  esc=cancel '.format(fname)
+                screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD | curses.A_REVERSE)
+            else:
+                prompt = 'Save as: {}_'.format(state.save_input)
+                screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+                screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
         elif state.tab_idx == 0:
             # core tab — left side
@@ -393,7 +405,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         elif key in (10, 13, curses.KEY_ENTER):
             if 0 <= state.preset_cursor < len(state.preset_menu):
                 path = state.preset_menu[state.preset_cursor]
-                ok   = _apply_preset(path, state, registry, sdr)
+                ok   = _apply_preset(path, state, registry, sdr, all_plugins)
                 state.flash_msg   = ('loaded: ' + os.path.basename(path)) if ok \
                                      else 'error loading preset'
                 state.flash_until = time.monotonic() + 2.0
@@ -430,7 +442,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         elif key in (10, 13, curses.KEY_ENTER):
             if state.path_input_target == '__preset__':
                 if state.path_input:
-                    ok = _apply_preset(state.path_input, state, registry, sdr)
+                    ok = _apply_preset(state.path_input, state, registry, sdr, all_plugins)
                     state.flash_msg   = ('loaded: ' + os.path.basename(state.path_input)) \
                                          if ok else 'cannot load: ' + state.path_input
                     state.flash_until = time.monotonic() + 2.0
@@ -448,21 +460,44 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
 
     # ── save-as input modal ───────────────────────────────────────────────────
     if state.save_input is not None:
-        if key == 27:
-            state.save_input = None
-        elif key in (10, 13, curses.KEY_ENTER):
-            if state.save_input:
+        if state.save_input.startswith('?:'):
+            # Overwrite-confirm phase: waiting for y / n / esc
+            full_path = state.save_input[2:]
+            if key in (27, ord('n'), ord('N')):
+                state.save_input = None
+            elif key in (ord('y'), ord('Y')):
                 try:
-                    _save_preset_to(state.save_input, state)
-                    state.flash_msg = 'saved: ' + state.save_input
+                    _save_preset_to(full_path, state, all_plugins)
+                    state.flash_msg = 'saved: ' + os.path.basename(full_path)
                 except Exception as e:
                     state.flash_msg = 'save error: ' + str(e)
                 state.flash_until = time.monotonic() + 2.0
-            state.save_input = None
-        elif key in (curses.KEY_BACKSPACE, 127, 8):
-            state.save_input = state.save_input[:-1]
-        elif 32 <= key <= 126 and chr(key) not in '\'"\\':
-            state.save_input += chr(key)
+                state.save_input  = None
+        else:
+            # Filename-editing phase
+            if key == 27:
+                state.save_input = None
+            elif key in (10, 13, curses.KEY_ENTER):
+                name = state.save_input
+                if name:
+                    if not name.endswith('.sdrterm'):
+                        name += '.sdrterm'
+                    if os.path.exists(name):
+                        state.save_input = '?:' + name   # → overwrite confirm
+                    else:
+                        try:
+                            _save_preset_to(name, state, all_plugins)
+                            state.flash_msg = 'saved: ' + name
+                        except Exception as e:
+                            state.flash_msg = 'save error: ' + str(e)
+                        state.flash_until = time.monotonic() + 2.0
+                        state.save_input  = None
+                else:
+                    state.save_input = None
+            elif key in (curses.KEY_BACKSPACE, 127, 8):
+                state.save_input = state.save_input[:-1]
+            elif 32 <= key <= 126 and chr(key) not in '\'"\\':
+                state.save_input += chr(key)
         redraw()
         return
 
@@ -550,7 +585,7 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
                 state.path_input        = ''
                 state.path_input_target = '__preset__'
             elif len(paths) == 1:
-                ok = _apply_preset(paths[0], state, registry, sdr)
+                ok = _apply_preset(paths[0], state, registry, sdr, all_plugins)
                 state.flash_msg   = ('loaded: ' + paths[0]) if ok \
                                      else 'error loading preset'
                 state.flash_until = time.monotonic() + 2.0
@@ -586,6 +621,9 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
 
     # stable ordered list of all toggleable plugins (used for the menu)
     all_plugins = [p for p in registry.values() if p.key]
+    if state.plugin_order:
+        _om = {name: i for i, name in enumerate(state.plugin_order)}
+        all_plugins.sort(key=lambda p: _om.get(p.name, len(state.plugin_order)))
 
     # Clamp bw_hz to the nearest value the device actually supports.
     # Matters when --bw was given or a preset had a different BW.

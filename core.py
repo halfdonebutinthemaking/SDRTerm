@@ -87,7 +87,8 @@ class AppState:
     flash_until:       float           = 0.0
     preset_menu:       Optional[list]  = None  # None=closed; list of paths
     preset_cursor:     int             = 0
-    save_input:        Optional[str]   = None  # None=closed; str=filename being edited
+    save_input:        Optional[str]   = None  # None=closed; str=filename (or "?:"+path for overwrite confirm)
+    plugin_order:      list            = field(default_factory=list)  # plugin name order from last preset
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
