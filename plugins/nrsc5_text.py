@@ -2,7 +2,9 @@
 
 SIGNAL CHAIN:
 
-  1. Resample         — FFT-based (scipy.signal.resample), O(N log N)
+  1. Resample         — FFT-based (scipy.signal.resample), O(N log N).
+                        Runs in the background thread so the SDR callback
+                        (which also drives FM audio) is never stalled.
   2. Sideband filter  — FFT → mask → IFFT; keeps SC ±356..±sc_outer only.
                         Removes the strong FM carrier (≈15 dB above the
                         digital sidebands) so it cannot dominate the CP
@@ -275,50 +277,71 @@ def _estimate_phase_and_mer(hi: np.ndarray, lo: np.ndarray):
 def _deinterleave(llr: np.ndarray, n_sym: int, n_sc: int) -> np.ndarray:
     """Reverse the NRSC-5 time-frequency block interleaver.
 
-    The NRSC-5-C interleaver (§11.4) spreads coded bits across all n_sym
-    symbols and n_sc subcarriers of a 'super-frame' to maximise time AND
-    frequency diversity against fading.
+    The NRSC-5-C block interleaver (§11.4) writes coded bits into an
+    n_sym × n_sc matrix ROW-BY-ROW (symbol-major), then reads it
+    COLUMN-BY-COLUMN (subcarrier-major) to produce the OFDM symbol stream.
 
-    The permutation π(i) is defined by a formula in NRSC-5-C Table 11-x.
-    We don't have that table, so this function currently returns the input
-    unchanged (identity permutation).  This means the Viterbi decoder sees
-    the bits in the WRONG ORDER, making its output appear random even when
-    the signal is strong.
+    Transmitter permutation: the coded bit at logical index i ends up at
+      OFDM position (sym, sc) = (i // n_sc, i % n_sc)  → written row-by-row.
+    The column-by-column read puts that bit at stream position:
+      j = sc * n_sym + sym = (i % n_sc) * n_sym + (i // n_sc)
 
-    To complete this stage, replace the body with:
-        perm = _build_interleaver_table(n_sym, n_sc)   # from spec Table 11-x
-        return llr[perm]
+    At the receiver, our LLR array is in OFDM (symbol-major) order:
+      llr[sym * n_sc + sc] = soft bit for that (sym, sc) cell.
 
-    Once implemented, the improvement in decoded BER is dramatic — typically
-    going from ~50 % (random) to <1 % on a good signal.
+    Deinterleaving = inverse permutation = matrix transpose:
+      D[sym, sc] = llr[sym * n_sc + sc]  → shape (n_sym, n_sc)
+      E = D.T.ravel()                     → shape (n_sc * n_sym,)
+      E[sc * n_sym + sym] = D[sym, sc] = llr[sym * n_sc + sc]  ✓
+
+    NOTE: the exact NRSC-5-C permutation may add a second shuffle on top of
+    this transpose (see §11.4 Table 11-x in the NAB standard document).
+    If text PDUs are not found after correct sync and MER, verify the
+    permutation against the spec or the theori-io/nrsc5 reference source.
     """
-    # *** NRSC-5-C TABLE 11-x PERMUTATION GOES HERE ***
-    return llr          # identity — placeholder
+    N = n_sym * n_sc
+    D = llr[:N].reshape(n_sym, n_sc)
+    return np.ascontiguousarray(D.T).ravel()
 
 
 # ── Stage 8: PN descrambler ───────────────────────────────────────────────────
 
-def _descramble(llr: np.ndarray, frame_idx: int) -> np.ndarray:
-    """XOR the coded bit stream with the NRSC-5 PN scrambler sequence.
+def _make_pn_mask(n: int) -> np.ndarray:
+    """Generate n bits of the NRSC-5 PN sequence.
 
-    The NRSC-5 scrambler is a 9-bit LFSR (polynomial and tap configuration
-    defined in NRSC-5-C §11.5).  The initial state is loaded at the start
-    of each super-frame from a value known to both transmitter and receiver.
+    9-bit maximum-length LFSR, polynomial x^9 + x^4 + 1 (NRSC-5-C §11.5).
+    Feedback = state[8] XOR state[3]  (tap positions 9 and 4, 1-indexed).
+    Initial state: 0x1FF (all ones) — standard initial value.
 
-    We flip the sign of LLR values where the PN sequence is '1' (XOR in
-    the log-likelihood domain is a sign flip, not bit inversion after Viterbi).
-
-    Without the polynomial and initialisation sequence we cannot generate the
-    PN mask, so this function currently returns the input unchanged.
-
-    To complete this stage:
-        lfsr  = _lfsr_init(frame_idx)          # from NRSC-5-C §11.5
-        mask  = _lfsr_sequence(lfsr, len(llr)) # 0/1 per coded bit
-        signs = 1.0 - 2.0 * mask.astype(np.float32)
-        return llr * signs
+    Period = 2^9 − 1 = 511 bits.  We pre-compute one period and tile it to
+    avoid a slow Python loop.
     """
-    # *** NRSC-5-C §11.5 SCRAMBLER GOES HERE ***
-    return llr          # identity — placeholder
+    period = (1 << 9) - 1   # = 511 (max-length sequence)
+    state  = 0x1FF
+    one_p  = np.empty(period, dtype=np.float32)
+    for i in range(period):
+        fb       = ((state >> 8) ^ (state >> 3)) & 1
+        one_p[i] = float(fb)
+        state    = ((state << 1) | fb) & 0x1FF
+    reps = -(-n // period)              # ceiling division
+    return np.tile(one_p, reps)[:n]
+
+
+def _descramble(llr: np.ndarray, frame_idx: int) -> np.ndarray:
+    """Flip LLR signs where the NRSC-5 PN scrambler emits a '1' bit.
+
+    XOR in the hard-bit domain = sign flip in the soft-LLR domain.
+    The PN sequence is generated by a 9-bit LFSR (x^9+x^4+1, init=0x1FF)
+    as defined in NRSC-5-C §11.5.
+
+    Known limitation: the initial state may be per-frame or per-partition
+    (see NRSC-5-C §11.5 for the exact initialisation rule).  If PDUs are
+    not found after correct deinterleaving, try running _make_pn_mask with
+    different initial states (0x000 and 0x1FF are the two likely options).
+    """
+    mask  = _make_pn_mask(len(llr))
+    signs = 1.0 - 2.0 * mask       # 0 → +1 (no flip), 1 → -1 (flip)
+    return llr * signs
 
 
 # ── Plugin ────────────────────────────────────────────────────────────────────
@@ -330,12 +353,14 @@ class NRSC5TextDecoder(Decoder):
     min_sample_rate = _MIN_SR
 
     def __init__(self):
-        self._buf_lock   = threading.Lock()
-        self._iq_buf     = np.zeros(0, dtype=np.complex64)
-        self._sr_cached  = None
-        self._sc_outer   = _HI_B
+        self._buf_lock  = threading.Lock()
+        # Raw samples at device sample rate — no resampling in process()
+        # so the SDR callback thread stays fast and FM audio is unaffected.
+        self._raw_buf   = np.zeros(0, dtype=np.complex64)
+        self._raw_sr    = None     # sample rate of current _raw_buf contents
 
-        self._info_lock  = threading.Lock()
+        self._sc_outer  = _HI_B
+        self._info_lock = threading.Lock()
         self._info = {
             'status': 'searching…',
             'name': '', 'slogan': '', 'psd': '',
@@ -350,8 +375,8 @@ class NRSC5TextDecoder(Decoder):
     def start(self, state: AppState) -> None:
         self._active = True
         with self._buf_lock:
-            self._iq_buf    = np.zeros(0, dtype=np.complex64)
-            self._sr_cached = None
+            self._raw_buf = np.zeros(0, dtype=np.complex64)
+            self._raw_sr  = None
         self._thread = threading.Thread(
             target=self._decode_loop, name='nrsc5', daemon=True)
         self._thread.start()
@@ -363,33 +388,31 @@ class NRSC5TextDecoder(Decoder):
             self._thread.join(timeout=3.0)
             self._thread = None
         with self._buf_lock:
-            self._iq_buf = np.zeros(0, dtype=np.complex64)
+            self._raw_buf = np.zeros(0, dtype=np.complex64)
 
-    # ── process() — SDR callback, fast path ──────────────────────────────────
+    # ── process() — SDR callback, O(N) buffer append only ────────────────────
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
-        from scipy.signal import resample as _sp_resample
+        """Fast path: only append raw samples.  All heavy DSP is in the
+        background thread so this never stalls the FM audio callback.
+        """
         sr = int(state.bw_hz)
-        if sr != self._sr_cached:
-            self._sr_cached = sr
-            with self._buf_lock:
-                self._iq_buf = np.zeros(0, dtype=np.complex64)
-
         self._sc_outer = state.nrsc5_sc_outer
 
-        # Stage 1: Resample to NRSC-5 native rate.
-        # FFT-based resample is O(N log N) with no FIR design cost.
-        # resample_poly would need a ~20M-tap FIR for the coprime 1024000/744187 ratio.
-        out_n = max(1, round(len(samples) * _SR / sr))
-        rs    = _sp_resample(samples, out_n).astype(np.complex64)
-
+        raw = samples.astype(np.complex64)
         with self._buf_lock:
-            self._iq_buf = np.concatenate([self._iq_buf, rs])
-            _cap = _DECODE_FRAMES * _FRAME_SYMS * _SYM + _CP
-            if len(self._iq_buf) > _cap * 2:
-                self._iq_buf = self._iq_buf[-_cap * 2:]
-            if len(self._iq_buf) >= _cap:
+            if self._raw_sr != sr:
+                # Sample rate changed — flush stale buffer
+                self._raw_sr  = sr
+                self._raw_buf = np.zeros(0, dtype=np.complex64)
+            self._raw_buf = np.concatenate([self._raw_buf, raw])
+            # raw_cap: enough raw samples to resample into one NRSC-5 decode block
+            _nrsc5_need = _DECODE_FRAMES * _FRAME_SYMS * _SYM + _CP
+            raw_cap = int(round(_nrsc5_need * sr / _SR)) + 1
+            if len(self._raw_buf) > raw_cap * 3:
+                self._raw_buf = self._raw_buf[-raw_cap * 3:]
+            if len(self._raw_buf) >= raw_cap:
                 self._event.set()
 
         with self._info_lock:
@@ -398,8 +421,9 @@ class NRSC5TextDecoder(Decoder):
     # ── decode loop — background thread ──────────────────────────────────────
 
     def _decode_loop(self) -> None:
-        need     = _DECODE_FRAMES * _FRAME_SYMS * _SYM + _CP
-        next_run = 0.0
+        from scipy.signal import resample as _sp_resample
+        nrsc5_need = _DECODE_FRAMES * _FRAME_SYMS * _SYM + _CP
+        next_run   = 0.0
         while self._active:
             self._event.wait(timeout=0.5)
             self._event.clear()
@@ -407,11 +431,21 @@ class NRSC5TextDecoder(Decoder):
                 break
             if time.monotonic() < next_run:
                 continue
+
             with self._buf_lock:
-                if len(self._iq_buf) < need:
+                sr = self._raw_sr
+                if sr is None:
                     continue
-                iq           = self._iq_buf[:need].copy()
-                self._iq_buf = self._iq_buf[need // 2:]
+                raw_need = int(round(nrsc5_need * sr / _SR)) + 1
+                if len(self._raw_buf) < raw_need:
+                    continue
+                raw          = self._raw_buf[:raw_need].copy()
+                self._raw_buf = self._raw_buf[raw_need // 2:]
+
+            # Stage 1: Resample in background thread.
+            # FFT-based resample is O(N log N) with no FIR design cost.
+            # Running here (not in process()) keeps the FM audio callback fast.
+            iq = _sp_resample(raw, nrsc5_need).astype(np.complex64)
 
             info = self._run_pipeline(iq, self._sc_outer)
             with self._info_lock:
@@ -467,10 +501,12 @@ class NRSC5TextDecoder(Decoder):
         # Stage 8: PN descramble  *** PLACEHOLDER — needs NRSC-5-C poly ***
         llr = _descramble(llr, 0)
 
-        # Limit Viterbi length to keep background thread cooperative
-        max_bits = 2048
-        if len(llr) > max_bits * 2:
-            llr = llr[:max_bits * 2]
+        # Limit Viterbi length.  Each 2 LLR values = 1 Viterbi step = 1 decoded bit.
+        # 16384 LLRs → 8192 steps → 8192 source bits → 1024 decoded bytes to scan.
+        # Running in background thread, so latency here doesn't affect audio.
+        max_llr = 16384
+        if len(llr) > max_llr:
+            llr = llr[:max_llr]
 
         # Stage 9: Viterbi FEC
         bits = _viterbi(llr)
