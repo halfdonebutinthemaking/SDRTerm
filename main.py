@@ -288,14 +288,16 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 pass
 
     # ── plugin overlays ───────────────────────────────────────────────────────
-    # Draw every active plugin's overlay. Skip the one whose tab is currently
-    # selected — its status is already visible in the footer.
-    _selected = (tab_plugins[state.tab_idx - 1]
-                 if 0 < state.tab_idx <= len(tab_plugins) else None)
-    for _p in tab_plugins:
-        if _p is not _selected:
+    if state.tab_idx == 0:
+        # Core tab: show all active plugin overlays at once
+        for _p in tab_plugins:
             _p.draw_overlay(screen_obj, state, results.get(_p.name) or {},
                             freq_min, freq_range, plot_w, height)
+    elif 0 < state.tab_idx <= len(tab_plugins):
+        # Plugin tab: only that plugin's own overlay
+        _p = tab_plugins[state.tab_idx - 1]
+        _p.draw_overlay(screen_obj, state, results.get(_p.name) or {},
+                        freq_min, freq_range, plot_w, height)
 
     # ── footer (shared) ───────────────────────────────────────────────────────
     try:
