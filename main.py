@@ -324,9 +324,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 if text:
                     screen_obj.addstr(ROWS - 1, col, text, curses.A_BOLD)
                     col += len(text)
-            parts = []
-            if plugin.key:
-                parts.append('{}=toggle'.format(plugin.key))
+            parts = ['x=discard']
             if plugin.key_help:
                 parts.append(plugin.key_help)
             parts += ['f=freq', 'q=quit']
@@ -533,8 +531,9 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
     # ── plugin-specific keys (plugin tab only, checked before global keys) ────
     if state.tab_idx > 0:
         plugin = tab_plugins[state.tab_idx - 1]
-        if plugin.key and key == ord(plugin.key):
+        if key == ord('x'):
             toggle_decoder(plugin.name, registry, state, sdr)
+            state.tab_idx = 0
             redraw()
             return
         if plugin.handle_key(key, state, sdr):
