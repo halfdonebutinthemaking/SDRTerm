@@ -39,7 +39,8 @@ _SR    = 744_187
 _FFT   = 2048
 _CP    = 112
 _SYM   = _FFT + _CP          # 2160 samples / symbol
-_HI_A  = 356                 # inner edge of primary sideband (for overlay/sync)
+_HI_A  = 356                 # inner SC of primary sideband (SC ±356, partition ref)
+_HI_B  = 545                 # outer SC of primary sideband (SC ±545, last data SC)
 
 # Partition structure (FM Hybrid, primary sidebands, psmi=1 default)
 _PART_WIDTH   = 19    # total SCs per partition (1 ref + 18 data)
@@ -362,7 +363,7 @@ def _mer_from_ffts(ffts: np.ndarray, sc_outer: int) -> float:
 class NRSC5TextDecoder(Decoder):
     name            = 'nrsc5_text'
     key             = 'n'
-    key_help        = '[/]=shoulder'
+    key_help        = ''
     min_sample_rate = _MIN_SR
 
     def __init__(self):
@@ -469,8 +470,13 @@ class NRSC5TextDecoder(Decoder):
     def _run_pipeline(self, iq: np.ndarray, sc_outer: int) -> dict:
         info = {}
 
+        # Cap timing filter at the primary sideband outer edge (SC 545).
+        # Extending beyond 545 (secondary band territory) adds only noise and
+        # dilutes the CP correlation peak, reducing sync_q.
+        sc_clip = min(sc_outer, _HI_B)
+
         # Stage 2: sideband filter → Stage 3: timing
-        iq_filt        = _sideband_only(iq, sc_outer)
+        iq_filt        = _sideband_only(iq, sc_clip)
         offset, sync_q = _find_timing(iq_filt)
         info['sync_q'] = round(sync_q, 1)
 
@@ -483,8 +489,8 @@ class NRSC5TextDecoder(Decoder):
         #          filtered was only needed for timing)
         ffts = _ofdm_fft(iq, offset, n_sym)   # (n_sym, 2048) complex64
 
-        # MER display (uses broader hi/lo range including ref SCs — just for UI)
-        info['mer'] = round(_mer_from_ffts(ffts, sc_outer), 1)
+        # MER display: primary sideband only (SC 356..545)
+        info['mer'] = round(_mer_from_ffts(ffts, sc_clip), 1)
 
         sync_ok = sync_q > 6.0
         mer_ok  = info['mer'] > 0.0
@@ -546,24 +552,12 @@ class NRSC5TextDecoder(Decoder):
     # ── UI hooks ──────────────────────────────────────────────────────────────
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
-        from core import NRSC5_SC_MIN, NRSC5_SC_MAX, NRSC5_SC_STEP
-        if key == ord('['):
-            state.nrsc5_sc_outer = max(NRSC5_SC_MIN,
-                                       state.nrsc5_sc_outer - NRSC5_SC_STEP)
-            return True
-        if key == ord(']'):
-            state.nrsc5_sc_outer = min(NRSC5_SC_MAX,
-                                       state.nrsc5_sc_outer + NRSC5_SC_STEP)
-            return True
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
-        sc_w   = _SR / _FFT
-        sh_khz = (state.nrsc5_sc_outer - _HI_A) * sc_w / 1000
-        return '[HD:{} MER:{:+.0f}dB {:.0f}kHz sync:{:.1f} bc:{}] '.format(
+        return '[HD:{} MER:{:+.0f}dB sync:{:.1f} bc:{}] '.format(
             result.get('status', '?'),
             result.get('mer', -99.0),
-            sh_khz,
             result.get('sync_q', 0.0),
             self._bc_offset)
 
@@ -576,8 +570,10 @@ class NRSC5TextDecoder(Decoder):
         if curses.has_colors():
             cf       = state.center_hz
             sc_w     = _SR / _FFT
-            inner_hz = _HI_A * sc_w
-            outer_hz = state.nrsc5_sc_outer * sc_w
+            # Highlight exactly the primary sideband SC range we capture:
+            # SC ±356 (inner ref) to SC ±545 (last data SC = 545×363 Hz ≈ 198 kHz)
+            inner_hz = _HI_A * sc_w   # 356 × 363.4 Hz ≈ 129 kHz
+            outer_hz = _HI_B * sc_w   # 545 × 363.4 Hz ≈ 198 kHz
             for sign in (-1, 1):
                 c_l = int(max(0, (cf + sign * inner_hz - freq_min)
                               / freq_range * plot_w))
