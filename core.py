@@ -110,6 +110,10 @@ class Decoder:
                      freq_min: float, freq_range: float,
                      plot_w: int, height: int) -> None:   pass
 
+    # If True, draw_overlay is called on every tab (not only when this plugin
+    # is the active tab).  Use for persistent on-screen markers.
+    always_draw_overlay: bool = False
+
     # recording hooks — implement to make this plugin's output recordable by
     # the record plugin.  record_ext=None means "not recordable".
     record_ext: Optional[str] = None

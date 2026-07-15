@@ -240,11 +240,19 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             except curses.error:
                 pass
 
-    # ── plugin overlay (only for the currently selected plugin tab) ──────────
+    # ── plugin overlays ───────────────────────────────────────────────────────
+    # Always-on overlays (e.g. peak marker) drawn first so selected-tab
+    # overlays (e.g. FM band, NRSC-5 sidebands) appear on top.
+    for _p in tab_plugins:
+        if _p.always_draw_overlay:
+            _p.draw_overlay(screen_obj, state, results.get(_p.name) or {},
+                            freq_min, freq_range, plot_w, height)
+    # Selected-tab overlay (skip if it is also always-on — already drawn).
     if 0 < state.tab_idx <= len(tab_plugins):
-        p = tab_plugins[state.tab_idx - 1]
-        p.draw_overlay(screen_obj, state, results.get(p.name) or {},
-                       freq_min, freq_range, plot_w, height)
+        _p = tab_plugins[state.tab_idx - 1]
+        if not _p.always_draw_overlay:
+            _p.draw_overlay(screen_obj, state, results.get(_p.name) or {},
+                            freq_min, freq_range, plot_w, height)
 
     # ── footer (shared) ───────────────────────────────────────────────────────
     try:
