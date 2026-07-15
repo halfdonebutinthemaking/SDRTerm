@@ -114,38 +114,63 @@ def _viterbi(llr: np.ndarray) -> np.ndarray:
 
 
 # ── Stage 10: CRC-16/CCITT and SIS PDU scan ──────────────────────────────────
-_PDU_LABELS = {0x01: 'id', 0x04: 'name', 0x05: 'slogan', 0x07: 'psd'}
+_PDU_LABELS   = {0x01: 'id', 0x04: 'name', 0x05: 'slogan', 0x07: 'psd'}
+_PDU_TYPE_SET = frozenset(_PDU_LABELS)   # {0x01, 0x04, 0x05, 0x07}
+
+# CRC-16/CCITT lookup table — one table entry replaces 8 inner loop iterations.
+# Precomputed at module load so _crc16 never pays the build cost.
+def _build_crc16_table():
+    t = [0] * 256
+    for i in range(256):
+        c = i << 8
+        for _ in range(8):
+            c = ((c << 1) ^ 0x1021) if (c & 0x8000) else (c << 1)
+        t[i] = c & 0xFFFF
+    return t
+
+_CRC16_TBL = _build_crc16_table()
 
 
 def _crc16(data: bytes) -> int:
+    """Table-driven CRC-16/CCITT — 8× fewer iterations than the bit-by-bit form."""
     crc = 0xFFFF
+    tbl = _CRC16_TBL
     for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) if (crc & 0x8000) else (crc << 1)
-    return crc & 0xFFFF
+        crc = ((crc << 8) ^ tbl[(crc >> 8) ^ b]) & 0xFFFF
+    return crc
 
 
 def _scan_pdus(bits: np.ndarray) -> dict:
-    """Slide a window over decoded bits; collect CRC-valid SIS PDUs."""
+    """Slide a window over decoded bytes; collect CRC-valid SIS PDUs.
+
+    Speed path: the low nibble of a valid SIS PDU's first byte must be a
+    known type (0x01/0x04/0x05/0x07 = 4 out of 16 possible values).
+    Checking this before the CRC eliminates ~75% of start positions with
+    a single integer AND-mask — no CRC computation needed for those.
+    For the remaining positions we try PDU lengths 6..32 bytes with the
+    table-driven CRC (8× faster than bit-by-bit per byte).
+    """
     n   = (len(bits) // 8) * 8
     raw = bytes(np.packbits(bits[:n]))
     out = {}
-    for plen in range(4, min(len(raw) + 1, 64)):
-        for start in range(len(raw) - plen + 1):
-            chunk = raw[start: start + plen]
-            if _crc16(chunk) == 0:
-                pdu_type = chunk[0] & 0x0F
-                label    = _PDU_LABELS.get(pdu_type)
-                if label:
-                    try:
-                        s = chunk[1:-2].split(b'\x00')[0].decode('ascii').strip()
-                        if s and any(c.isprintable() and not c.isspace() for c in s):
-                            out[label] = s
-                    except UnicodeDecodeError:
-                        pass
-            if len(out) >= 4:
-                return out
+    rlen = len(raw)
+    for start in range(rlen - 5):
+        if (raw[start] & 0x0F) not in _PDU_TYPE_SET:
+            continue                                 # ~75% of positions skip here
+        pdu_type = raw[start] & 0x0F
+        for plen in range(6, min(33, rlen - start + 1)):
+            if _crc16(raw[start: start + plen]) == 0:
+                label = _PDU_LABELS[pdu_type]
+                try:
+                    s = raw[start+1: start+plen-2].split(b'\x00')[0].decode('ascii').strip()
+                    if s and any(c.isprintable() and not c.isspace() for c in s):
+                        out[label] = s
+                except UnicodeDecodeError:
+                    pass
+                break       # found the right length — no need to try longer ones
+        if len(out) >= 4:
+            break
+    return out
     return out
 
 
