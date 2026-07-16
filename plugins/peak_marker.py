@@ -13,7 +13,7 @@ _SNAP_DB      = 6.0    # immediately snap to a peak this much stronger than held
 class PeakMarker(Decoder):
     name            = 'peak_marker'
     key             = 'k'
-    key_help        = '-/+=hold  c=center'
+    key_help        = '-/+=hold  c=center  t=follow'
     min_sample_rate = 250_000
 
     def __init__(self):
@@ -21,6 +21,7 @@ class PeakMarker(Decoder):
         self._held_db     = -999.0
         self._hold_until  = 0.0
         self._hold_s      = _HOLD_DEFAULT
+        self._follow      = False
         self._color_ready = False
 
     def start(self, state: AppState) -> None:
@@ -37,7 +38,7 @@ class PeakMarker(Decoder):
         n = FFT_BINS
         if len(samples) < n:
             return {'peak_hz': self._held_hz, 'peak_db': self._held_db,
-                    'hold_s': self._hold_s}
+                    'hold_s': self._hold_s, 'follow': self._follow}
 
         # FFT on the most recent FFT_BINS IQ samples.
         # Working from IQ (not from the pre-computed spectrum) keeps the
@@ -70,9 +71,11 @@ class PeakMarker(Decoder):
             self._held_hz    = new_hz
             self._held_db    = max_db
             self._hold_until = now + self._hold_s
+            if self._follow:
+                state.pending_freq = new_hz
 
         return {'peak_hz': self._held_hz, 'peak_db': self._held_db,
-                'hold_s':  self._hold_s}
+                'hold_s':  self._hold_s, 'follow': self._follow}
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
         if key == ord('-'):
@@ -84,16 +87,21 @@ class PeakMarker(Decoder):
         if key == ord('c') and self._held_hz is not None:
             state.pending_freq = self._held_hz
             return True
+        if key == ord('t'):
+            self._follow = not self._follow
+            return True
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
-        hz = result.get('peak_hz')
-        db = result.get('peak_db', -999.0)
-        hs = result.get('hold_s', self._hold_s)
+        hz     = result.get('peak_hz')
+        db     = result.get('peak_db', -999.0)
+        hs     = result.get('hold_s', self._hold_s)
+        follow = result.get('follow', False)
+        suffix = '  FOLLOW' if follow else ''
         if hz is None:
-            return '[peak:—  hold:{:.1f}s] '.format(hs)
-        return '[peak:{}  {:.0f}dBFS  hold:{:.1f}s] '.format(
-            fmt_freq(hz), db, hs)
+            return '[peak:—  hold:{:.1f}s{}] '.format(hs, suffix)
+        return '[peak:{}  {:.0f}dBFS  hold:{:.1f}s{}] '.format(
+            fmt_freq(hz), db, hs, suffix)
 
     def draw_overlay(self, screen_obj, state: AppState, result: dict,
                      freq_min: float, freq_range: float,
