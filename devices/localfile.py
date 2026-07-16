@@ -40,8 +40,11 @@ class LocalFileDevice(Device):
         if not self._path:
             return False
         try:
-            if self._path.lower().endswith('.wav'):
+            p = self._path.lower()
+            if p.endswith('.wav'):
                 return self._open_wav()
+            if p.endswith('.sigmf-data') or p.endswith('.sigmf'):
+                return self._open_sigmf()
             return self._open_iq()
         except (OSError, ValueError, Exception):
             return False
@@ -52,6 +55,41 @@ class LocalFileDevice(Device):
             return False
         self._data = data
         self._pos  = 0
+        return True
+
+    def _open_sigmf(self) -> bool:
+        import json
+        # Accept either the .sigmf-data file or the bare stem
+        base = self._path
+        for suffix in ('.sigmf-data', '.sigmf'):
+            if base.lower().endswith(suffix):
+                base = base[: -len(suffix)]
+                break
+        data_path = base + '.sigmf-data'
+        meta_path = base + '.sigmf-meta'
+
+        data = np.memmap(data_path, dtype=np.complex64, mode='r')
+        if len(data) == 0:
+            return False
+        self._data = data
+        self._pos  = 0
+
+        # Read sample rate and center frequency from companion meta file
+        if not self._file_sr_explicit and os.path.exists(meta_path):
+            try:
+                with open(meta_path) as mf:
+                    meta = json.load(mf)
+                sr = meta.get('global', {}).get('core:sample_rate')
+                if sr:
+                    self._file_sr = int(sr)
+                    self._sr      = int(sr)
+                captures = meta.get('captures', [])
+                if captures:
+                    freq = captures[0].get('core:frequency')
+                    if freq:
+                        self._center_hz = float(freq)
+            except (OSError, json.JSONDecodeError, KeyError):
+                pass
         return True
 
     def _open_wav(self) -> bool:

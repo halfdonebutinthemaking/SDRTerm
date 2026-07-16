@@ -62,7 +62,7 @@ def _syndrome(bits: np.ndarray) -> int:
 
 class RDS(Decoder):
     name            = 'rds'
-    key             = 'r'
+    key             = 'd'
     key_help        = ''
     min_sample_rate = 250_000
 
