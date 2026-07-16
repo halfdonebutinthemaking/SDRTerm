@@ -47,7 +47,7 @@ DOPPLER_START   =  20_000.0        # Hz offset at t = 0  (approaching)
 DOPPLER_END     = -20_000.0        # Hz offset at t = 10 s  (receding)
 
 FM_TONE_HZ      =   1_000.0        # audio tone frequency
-FM_DEVIATION    =   3_000.0        # ± Hz deviation (narrowband FM)
+FM_DEVIATION    =     500.0        # ± Hz deviation; β=0.5 keeps carrier the dominant peak
 
 SIGNAL_AMP      = 0.5              # −6 dBFS
 NOISE_AMP       = 0.025            # noise floor ≈ −26 dBFS relative to signal

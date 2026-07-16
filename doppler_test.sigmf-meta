@@ -1,0 +1,23 @@
+{
+  "global": {
+    "core:datatype": "cf32_le",
+    "core:sample_rate": 250000,
+    "core:version": "1.0.0",
+    "core:recorder": "SDRTerm gen_doppler_test.py",
+    "core:description": "Synthetic LEO Doppler test signal at 1 GHz.  FM tone 1000 Hz / \u00b1500 Hz dev.  Doppler +20 kHz \u2192 -20 kHz over 10 s."
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 1000000000.0,
+      "core:datetime": "2026-07-16T14:04:05.957497Z"
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 2500000,
+      "core:description": "Doppler sweep +20000 \u2192 -20000 Hz  /  FM \u00b1500 Hz"
+    }
+  ]
+}

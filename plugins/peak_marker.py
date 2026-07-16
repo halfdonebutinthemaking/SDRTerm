@@ -72,7 +72,9 @@ class PeakMarker(Decoder):
             self._held_db    = max_db
             self._hold_until = now + self._hold_s
             if self._follow:
-                state.pending_freq = new_hz
+                dead_hz = max(1_000.0, state.bw_hz * 0.025)
+                if abs(new_hz - state.center_hz) > dead_hz:
+                    state.pending_freq = new_hz
 
         return {'peak_hz': self._held_hz, 'peak_db': self._held_db,
                 'hold_s':  self._hold_s, 'follow': self._follow}
