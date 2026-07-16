@@ -10,6 +10,10 @@ class LocalFileDevice(Device):
     The file loops continuously.  Playback is paced at the current sample rate
     (set by main.py via device.sample_rate = ...) so the spectrum updates at
     roughly the same cadence as real hardware.
+
+    When center_freq is changed after open() (e.g. by the peak_marker follow
+    feature), a complex mixer is applied in the reader thread so the signal
+    shifts to the correct position in the FFT — matching live SDR behaviour.
     """
 
     name                 = 'localfile'
@@ -24,6 +28,7 @@ class LocalFileDevice(Device):
         self._file_sr_explicit = False      # True if set_file_rate() was called
         self._sr               = 2_400_000  # reported to the app
         self._center_hz        = 0.0
+        self._file_center_hz   = 0.0        # frequency the file was recorded at
         self._gain             = 0.0
         self._stop_evt         = threading.Event()
         self._thread           = None
@@ -53,8 +58,9 @@ class LocalFileDevice(Device):
         data = np.memmap(self._path, dtype=np.complex64, mode='r')
         if len(data) == 0:
             return False
-        self._data = data
-        self._pos  = 0
+        self._data           = data
+        self._pos            = 0
+        self._file_center_hz = self._center_hz   # assume file matches current display center
         return True
 
     def _open_sigmf(self) -> bool:
@@ -87,9 +93,12 @@ class LocalFileDevice(Device):
                 if captures:
                     freq = captures[0].get('core:frequency')
                     if freq:
-                        self._center_hz = float(freq)
+                        self._center_hz      = float(freq)
+                        self._file_center_hz = float(freq)
             except (OSError, json.JSONDecodeError, KeyError):
                 pass
+        else:
+            self._file_center_hz = self._center_hz
         return True
 
     def _open_wav(self) -> bool:
@@ -116,8 +125,9 @@ class LocalFileDevice(Device):
         if len(iq) == 0:
             return False
 
-        self._data = iq
-        self._pos  = 0
+        self._data           = iq
+        self._pos            = 0
+        self._file_center_hz = self._center_hz   # assume file matches display center
         # Auto-use the WAV header's sample rate unless the caller set one explicitly
         if not self._file_sr_explicit:
             self._file_sr = int(rate)
@@ -131,7 +141,7 @@ class LocalFileDevice(Device):
             self._thread = None
         self._data = None
 
-    # ── hardware-property shims (file device ignores writes) ──────────────────
+    # ── hardware-property shims ───────────────────────────────────────────────
     @property
     def sample_rate(self):   return self._sr
     @sample_rate.setter
@@ -156,29 +166,39 @@ class LocalFileDevice(Device):
         interval = num_samples / pace_sr
 
         def _run():
-            data     = self._data
-            n        = len(data)
-            # Sleep-first: wait until the scheduled deadline, then read and
-            # deliver.  Callback/processing time never eats into the interval,
-            # so chunks arrive at uniform t0 + k*interval regardless of how
-            # long the downstream pipeline takes.
-            deadline = time.monotonic()
+            data         = self._data
+            n            = len(data)
+            sample_count = 0   # absolute sample index; drives the mixer phase
+            deadline     = time.monotonic()
             while not self._stop_evt.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
                     time.sleep(remaining)
                 if self._stop_evt.is_set():
                     break
+
                 end = self._pos + num_samples
                 if end <= n:
                     chunk     = np.array(data[self._pos:end])
-                    self._pos = end % n   # 0 when end == n exactly
+                    self._pos = end % n
                 else:
-                    # straddles EOF: tail of file + head
                     tail      = np.array(data[self._pos:])
                     head      = np.array(data[:end - n])
                     chunk     = np.concatenate([tail, head])
                     self._pos = end - n
+
+                # Frequency-shift the chunk when center_freq has moved away
+                # from the file's recorded center.  This makes the signal
+                # appear at the correct FFT bin, mirroring what real hardware
+                # would deliver after retuning.
+                mix_hz = self._file_center_hz - self._center_hz
+                if abs(mix_hz) > 0.5:
+                    idx   = np.arange(sample_count, sample_count + num_samples,
+                                      dtype=np.float64)
+                    phi   = (2.0 * np.pi * mix_hz / pace_sr) * idx
+                    chunk = (chunk * np.exp(1j * phi)).astype(np.complex64)
+
+                sample_count += num_samples
                 callback(chunk, None)
                 deadline += interval
 
@@ -195,7 +215,6 @@ class LocalFileDevice(Device):
         name = os.path.basename(self._path or '')
         if len(name) > 20:
             name = name[:9] + '…' + name[-10:]
-        pct      = self._pos / len(self._data) * 100 if len(self._data) else 0
-        dur_s    = len(self._data) / self._file_sr
-        pos_s    = self._pos / self._file_sr
+        dur_s = len(self._data) / self._file_sr
+        pos_s = self._pos / self._file_sr
         return '[FILE {} {:.0f}s/{:.0f}s] '.format(name, pos_s, dur_s)

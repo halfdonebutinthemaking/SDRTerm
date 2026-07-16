@@ -44,7 +44,8 @@ def parse_freq(s):
     if not s:
         return None
     try:
-        if   s[-1] in ('M', 'm'): return float(s[:-1]) * 1e6
+        if   s[-1] in ('G', 'g'): return float(s[:-1]) * 1e9
+        elif s[-1] in ('M', 'm'): return float(s[:-1]) * 1e6
         elif s[-1] in ('K', 'k'): return float(s[:-1]) * 1e3
         else:                     return float(s)
     except ValueError:
