@@ -17,34 +17,74 @@ class LocalFileDevice(Device):
     supported_bandwidths = BW_STEPS
 
     def __init__(self):
-        self._path      = None
-        self._data      = None   # np.memmap, complex64, set in open()
-        self._pos       = 0
-        self._file_sr   = 2_400_000  # recording's actual sample rate — set via set_file_rate()
-        self._sr        = 2_400_000  # reported to the app; may differ from _file_sr
-        self._center_hz = 0.0
-        self._gain      = 0.0
-        self._stop_evt  = threading.Event()
-        self._thread    = None
+        self._path             = None
+        self._data             = None   # ndarray complex64, set in open()
+        self._pos              = 0
+        self._file_sr          = 2_400_000  # recording's actual sample rate
+        self._file_sr_explicit = False      # True if set_file_rate() was called
+        self._sr               = 2_400_000  # reported to the app
+        self._center_hz        = 0.0
+        self._gain             = 0.0
+        self._stop_evt         = threading.Event()
+        self._thread           = None
 
     def set_path(self, path: str) -> None:
-        self._path = path
+        self._path             = path
+        self._file_sr_explicit = False   # reset on each new path
 
     def set_file_rate(self, rate: int) -> None:
-        self._file_sr = rate
+        self._file_sr          = rate
+        self._file_sr_explicit = True
 
     def open(self) -> bool:
         if not self._path:
             return False
         try:
-            data = np.memmap(self._path, dtype=np.complex64, mode='r')
-            if len(data) == 0:
-                return False
-            self._data = data
-            self._pos  = 0
-            return True
-        except (OSError, ValueError):
+            if self._path.lower().endswith('.wav'):
+                return self._open_wav()
+            return self._open_iq()
+        except (OSError, ValueError, Exception):
             return False
+
+    def _open_iq(self) -> bool:
+        data = np.memmap(self._path, dtype=np.complex64, mode='r')
+        if len(data) == 0:
+            return False
+        self._data = data
+        self._pos  = 0
+        return True
+
+    def _open_wav(self) -> bool:
+        from scipy.io import wavfile
+        rate, raw = wavfile.read(self._path)
+
+        # Normalise every supported dtype to float32 in [-1, 1]
+        if raw.dtype == np.uint8:
+            raw = (raw.astype(np.float32) - 128.0) / 128.0
+        elif raw.dtype == np.int16:
+            raw = raw.astype(np.float32) / 32768.0
+        elif raw.dtype == np.int32:
+            raw = raw.astype(np.float32) / 2147483648.0
+        else:
+            raw = raw.astype(np.float32)
+
+        if raw.ndim == 2:
+            # Stereo: channel 0 = I, channel 1 = Q
+            iq = (raw[:, 0] + 1j * raw[:, 1]).astype(np.complex64)
+        else:
+            # Mono: treat as real-only signal
+            iq = raw.astype(np.complex64)
+
+        if len(iq) == 0:
+            return False
+
+        self._data = iq
+        self._pos  = 0
+        # Auto-use the WAV header's sample rate unless the caller set one explicitly
+        if not self._file_sr_explicit:
+            self._file_sr = int(rate)
+            self._sr      = int(rate)
+        return True
 
     def close(self) -> None:
         self._stop_evt.set()

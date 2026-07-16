@@ -44,8 +44,8 @@ uv run python main.py
 | Flag | Argument | Description |
 |------|----------|-------------|
 | `--d` | `NAME` | Open a specific device by name (e.g. `RTL-SDR-V3`). Falls back to auto-detect if omitted. |
-| `--file` | `PATH` | Replay a raw complex64 `.iq` file instead of opening hardware. Selects the `localfile` device automatically. |
-| `--bw` | `BW` | Set the initial capture bandwidth / sample rate (e.g. `2.4M`, `1024k`, `250000`). For `--file`: must match the rate the file was recorded at. |
+| `--file` | `PATH` | Replay a `.iq` (raw complex64) or stereo `.wav` IQ file instead of opening hardware. Selects the `localfile` device automatically. WAV sample rate is read from the file header. |
+| `--bw` | `BW` | Set the initial capture bandwidth / sample rate (e.g. `2.4M`, `1024k`, `250000`). For `.iq` files: must match the rate the file was recorded at. For `.wav` files: overrides the rate from the file header. |
 | `--f` | `FREQ` | Set the initial center frequency. Accepts `105.8M`, `433.5k`, or a raw Hz value. |
 | `--g` | `GAIN` | Set the initial gain in dB (e.g. `32.8`). Ignored if `--i on` is also set. |
 | `--i` | `on\|off` | Enable (`on`) or disable (`off`) hardware AGC at startup. |
@@ -275,7 +275,7 @@ Hardware drivers live in `devices/`. Each file that contains a `Device` subclass
 ```
 devices/
   rtlsdr_v3.py   — RTL-SDR V3 dongle (pyrtlsdr)
-  localfile.py   — IQ file replay (raw complex64 .iq files)
+  localfile.py   — IQ file replay (raw complex64 .iq or stereo .wav)
   __init__.py    — auto-discovery loader
 ```
 
@@ -283,13 +283,22 @@ The application tries each discovered device in filename order and opens the fir
 
 ### localfile device
 
-Replays a raw complex64 `.iq` file as if it were live hardware. The file loops continuously.
+Replays an IQ file as if it were live hardware. The file loops continuously. Two formats are supported:
+
+| Format | Extension | Layout | Sample rate |
+|--------|-----------|--------|-------------|
+| Raw IQ | `.iq` | Raw `complex64` binary | Must be supplied via `--bw` |
+| WAV IQ | `.wav` | Stereo PCM (int16 / int32 / float32); left = I, right = Q | Read from WAV header automatically |
 
 ```bash
+# Raw IQ file — supply the sample rate explicitly
 uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
+
+# WAV IQ file — sample rate comes from the file header
+uv run python main.py --file recording.wav --f 105.8M
 ```
 
-`--bw` must match the sample rate the file was recorded at so playback runs at the correct speed. Pacing uses a monotonic deadline so the replay rate stays accurate regardless of processing time. The file is memory-mapped (`np.memmap`) so large files do not load into RAM.
+Pacing uses a monotonic deadline so the replay rate stays accurate regardless of processing time. Raw `.iq` files are memory-mapped (`np.memmap`) so large files do not load into RAM; WAV files are loaded fully into memory on open.
 
 ### Writing a device driver
 

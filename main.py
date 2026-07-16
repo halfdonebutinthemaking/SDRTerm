@@ -843,11 +843,13 @@ def main() -> None:
                         help='device to open, e.g. RTL-SDR-V3\n'
                              'omit to use the first available device')
     parser.add_argument('--file', metavar='PATH',
-                        help='replay a raw complex64 .iq file (selects the localfile device)')
+                        help='replay a .iq (raw complex64) or stereo .wav IQ file '
+                             '(selects the localfile device; WAV sample rate is read from the file header)')
     parser.add_argument('--bw', metavar='BW',
                         help='capture bandwidth / sample rate, e.g. 2.4M, 1024k, 250000\n'
                              'for real hardware: sets the initial sample rate\n'
-                             'for --file: must match the rate used when recording')
+                             'for --file .iq: must match the rate used when recording\n'
+                             'for --file .wav: overrides the rate from the file header')
     parser.add_argument('--f', metavar='FREQ',
                         help='centre frequency, e.g. 105.8M, 1420000000')
     parser.add_argument('--g', metavar='GAIN',
@@ -897,7 +899,7 @@ def main() -> None:
         if args.file:
             sdr = open_file_device(args.file, bw_hz)
             if sdr is None:
-                error_msg = 'cannot open IQ file: {}'.format(args.file)
+                error_msg = 'cannot open file: {}'.format(args.file)
         elif args.d:
             sdr = open_device_by_name(args.d)
             if sdr is None:
