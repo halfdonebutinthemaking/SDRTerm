@@ -778,6 +778,9 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 state.center_hz   = state.pending_freq
                 sdr.center_freq   = state.pending_freq
                 state.pending_freq = None
+                iq_deque.clear()       # discard chunks mixed at the old centre
+                spec_chunks.clear()
+                spec_count = 0
 
             if state.pending_gain is not None:
                 if state.pending_gain < 0:
