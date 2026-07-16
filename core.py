@@ -1,4 +1,5 @@
 import numpy as np
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -25,6 +26,10 @@ WINDOW     = np.hanning(FFT_BINS)
 FM_BW_MIN  = 30_000
 FM_BW_MAX  = 200_000
 FM_BW_STEP = 10_000
+# NRSC-5 sideband width: outer subcarrier index (inner edge is fixed at SC 356)
+NRSC5_SC_MIN  = 376   # 20 subcarriers minimum per side
+NRSC5_SC_MAX  = 682   # primary + secondary sideband outer edge
+NRSC5_SC_STEP = 20    # ≈ 7.3 kHz per step
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -69,15 +74,24 @@ class AppState:
     quit:            bool          = False
     active_decoders: set           = field(default_factory=lambda: {'spectrum'})
     fm_bw_hz:          int           = 100_000
+    nrsc5_sc_outer:    int           = 546     # NRSC-5 outer subcarrier index (356..546)
     tab_idx:           int           = 0     # 0=core, N=Nth enabled plugin
     menu_cursor:       int           = 0
     menu_active:       Optional[set] = None  # None=closed; set=pending enabled set
     path_input:        Optional[str] = None  # None=closed; str=collecting input
     path_input_target: Optional[str] = None  # plugin name that opened the input
+    debug_console:     Optional[str] = None  # plugin name of open console, or None
+    debug_scroll:      int           = 0     # lines scrolled from tail (0 = tail)
     pending_sr:        Optional[int]   = None  # sample-rate change queued by active plugin
     pending_freq:      Optional[float] = None  # frequency change queued by active plugin
     pending_gain:      Optional[float] = None  # gain change (≥0 = dB, <0 = auto)
     waterfall_active:  bool            = False
+    flash_msg:         str             = ''
+    flash_until:       float           = 0.0
+    preset_menu:       Optional[list]  = None  # None=closed; list of paths
+    preset_cursor:     int             = 0
+    save_input:        Optional[str]   = None  # None=closed; str=filename (or "?:"+path for overwrite confirm)
+    plugin_order:      list            = field(default_factory=list)  # plugin name order from last preset
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
@@ -98,6 +112,14 @@ class Decoder:
     def draw_overlay(self, screen_obj, state: AppState, result: dict,
                      freq_min: float, freq_range: float,
                      plot_w: int, height: int) -> None:   pass
+
+    # per-instance debug ring buffer — write with self._dbg(msg)
+    _debug_lines: object = None  # deque, lazily initialised on first _dbg() call
+
+    def _dbg(self, msg: str) -> None:
+        if self._debug_lines is None:
+            self._debug_lines = deque(maxlen=1000)
+        self._debug_lines.append(msg)
 
     # recording hooks — implement to make this plugin's output recordable by
     # the record plugin.  record_ext=None means "not recordable".

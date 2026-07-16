@@ -15,3 +15,6 @@ wheels/
 # SDRTerm recordings
 sdrterm_*.iq
 sdrterm_*.wav
+
+# SDRTerm user presets
+*.sdrterm

@@ -115,6 +115,28 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 | `]` | Widen FM channel bandwidth (+10 kHz, max 200 kHz) |
 | `m` | Toggle FM decoder off |
 
+### RDS plugin tab (key `r`)
+
+Decodes RDS (Radio Data System) data embedded in the 57 kHz subcarrier of FM broadcasts. Displays PI code, PS name (station name), RadioText (song/artist), PTY (programme type), TP (traffic programme) and TA (traffic announcement) flags. Data accumulates incrementally — the display fills in as groups are received.
+
+No tab-specific keys.
+
+### NRSC-5 plugin tab (key `n`)
+
+Decodes NRSC-5 HD Radio digital sidebands (IBOC) in pure Python/NumPy. Performs automatic carrier frequency offset (CFO) correction and two-pass per-symbol phase correction. The overlay highlights the primary digital sideband region (±129–198 kHz) on the spectrum or waterfall.
+
+No tab-specific keys.
+
+### Peak marker plugin tab (key `k`)
+
+Tracks and displays the strongest signal peak in the visible spectrum. The marker holds its position for a configurable dwell time before following a new peak; it snaps immediately if a signal 6 dB stronger appears.
+
+| Key | Action |
+|-----|--------|
+| `-` | Decrease hold time (−0.5 s, min 0.5 s) |
+| `+` / `=` | Increase hold time (+0.5 s, max 10 s) |
+| `c` | Set center frequency to the current peak frequency |
+
 ---
 
 ## Bandwidth
@@ -138,6 +160,9 @@ Plugins live in `plugins/`. Each file that contains a `Decoder` subclass with a 
 plugins/
   spectrum.py        — always-on FFT display (built-in, key-less)
   fm.py              — FM broadcast audio decoder
+  rds.py             — RDS (Radio Data System) decoder — PS name, RadioText, PTY, PI, TP/TA
+  nrsc5_text.py      — NRSC-5 HD Radio decoder (digital sideband, pure Python)
+  peak_marker.py     — peak-frequency marker with hold-off and center-frequency snap
   record.py          — write signal to file (WAV or raw IQ)
   rtltcp_passive.py  — RTL-TCP server, streams IQ to clients (read-only)
   rtltcp_active.py   — RTL-TCP server, applies client frequency/gain/rate commands to hardware
@@ -434,6 +459,7 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 main.py           — UI loop, keyboard dispatch, curses rendering
 core.py           — shared constants, AppState, Decoder/Device base classes
 fix_venv.py       — re-applies venv compatibility patches after uv sync --reinstall
+diag_nrsc5.py     — standalone NRSC-5 diagnostic script (CFO, sync, Viterbi pipeline)
 pyproject.toml    — project metadata and dependencies
 uv.lock           — locked dependency versions
 
@@ -441,6 +467,9 @@ plugins/
   __init__.py        — auto-discovery loader
   spectrum.py        — always-on FFT spectrum decoder
   fm.py              — FM broadcast audio decoder (with WAV recording hooks)
+  rds.py             — RDS decoder: PS name, RadioText, PTY, PI code, TP/TA flags
+  nrsc5_text.py      — NRSC-5 HD Radio decoder (pure Python, CFO correction, Viterbi)
+  peak_marker.py     — peak-frequency marker with configurable hold and center-snap
   record.py          — write signal to file via predecessor plugin's recording hooks
   rtltcp_passive.py  — RTL-TCP server: stream IQ to clients, ignore commands
   rtltcp_active.py   — RTL-TCP server: stream IQ and apply client commands to hardware
