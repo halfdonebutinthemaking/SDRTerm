@@ -351,6 +351,29 @@ def _scan_hdlc_frames(data: bytes) -> dict:
     return result
 
 
+# ── CFO estimation + correction ───────────────────────────────────────────────
+
+def _estimate_cfo(iq: np.ndarray) -> float:
+    """Find FM carrier offset from DC by peak-search in ±75 kHz window.
+
+    The FM carrier should be near DC (within ±75 kHz of tuned frequency).
+    We exclude ±500 Hz to skip the DC bin itself.
+    """
+    n = min(len(iq), 32768)
+    w = np.blackman(n).astype(np.float32)
+    spec  = np.abs(np.fft.fft(iq[:n] * w)) ** 2
+    freqs = np.fft.fftfreq(n, 1.0 / _SR)
+    mask  = (np.abs(freqs) > 500.0) & (np.abs(freqs) < 75e3)
+    idx   = int(np.argmax(spec * mask))
+    return float(freqs[idx])
+
+
+def _apply_cfo(iq: np.ndarray, cfo_hz: float) -> np.ndarray:
+    """Frequency-shift iq by −cfo_hz so the FM carrier lands at DC."""
+    t = np.arange(len(iq), dtype=np.float64) / _SR
+    return (iq * np.exp(-1j * 2.0 * np.pi * cfo_hz * t).astype(np.complex64)).astype(np.complex64)
+
+
 # ── Sideband filter (for timing only) ────────────────────────────────────────
 
 def _sideband_only(iq: np.ndarray, sc_outer: int) -> np.ndarray:
@@ -425,10 +448,14 @@ def _fill_buffer_pm(ffts: np.ndarray) -> np.ndarray:
     lb = ffts[:n_sym, _LB_DATA_BINS]   # (n_sym, 180) complex
     ub = ffts[:n_sym, _UB_DATA_BINS]   # (n_sym, 180) complex
 
-    # Per-subcarrier BPSK phase correction: E[s²]=A²e^(j2θ) → θ=angle/2
+    # Two-pass phase correction:
+    # Pass 1: per-symbol CPE (handles residual CFO / slow phase drift)
+    # Pass 2: per-subcarrier static channel phase
     def _correct(sc):
-        theta = np.angle(np.mean(sc ** 2, axis=0)) / 2.0
-        return (sc * np.exp(-1j * theta)).astype(np.complex64)
+        cpe   = np.angle(np.mean(sc ** 2, axis=1, keepdims=True)) / 2.0
+        sc_c1 = sc * np.exp(-1j * cpe)
+        theta = np.angle(np.mean(sc_c1 ** 2, axis=0)) / 2.0
+        return (sc_c1 * np.exp(-1j * theta)).astype(np.complex64)
 
     lb_c = _correct(lb)   # (n_sym, 180)
     ub_c = _correct(ub)
@@ -573,6 +600,17 @@ class NRSC5TextDecoder(Decoder):
     def _run_pipeline(self, iq: np.ndarray, sc_outer: int) -> dict:
         info = {}
 
+        # Stage 1: CFO correction — find FM carrier, shift it to DC.
+        # A 17-subcarrier CFO (≈6 250 Hz at 90.7 MHz with ~69 ppm RTL-SDR
+        # crystal error) causes full ICI across all OFDM bins; MER collapses
+        # to near 0 dB before this correction.
+        cfo            = _estimate_cfo(iq)
+        info['cfo']    = int(round(cfo))
+        if abs(cfo) > 200.0:
+            iq = _apply_cfo(iq, cfo)
+        self._dbg('CFO={:+.0f} Hz  ({:+.1f} ppm)'.format(
+            cfo, cfo / 90.7e6 * 1e6))
+
         # Cap timing filter at the primary sideband outer edge (SC 545).
         # Extending beyond 545 (secondary band territory) adds only noise and
         # dilutes the CP correlation peak, reducing sync_q.
@@ -582,6 +620,7 @@ class NRSC5TextDecoder(Decoder):
         iq_filt        = _sideband_only(iq, sc_clip)
         offset, sync_q = _find_timing(iq_filt)
         info['sync_q'] = round(sync_q, 1)
+        self._dbg('offset={} sync_q={:.2f}'.format(offset, sync_q))
 
         n_sym = (len(iq_filt) - offset) // _SYM
         if n_sym < _BLKSZ:
@@ -594,17 +633,22 @@ class NRSC5TextDecoder(Decoder):
 
         # MER display: primary sideband only (SC 356..545)
         info['mer'] = round(_mer_from_ffts(ffts, sc_clip), 1)
+        self._dbg('MER={:+.1f} dB  n_sym={}'.format(info['mer'], n_sym))
 
         sync_ok = sync_q > 6.0
         mer_ok  = info['mer'] > 0.0
         if sync_ok and mer_ok:
             info['status'] = 'locked'
-        elif sync_q > 3.0:
+        elif sync_q > 2.0:
             info['status'] = 'syncing'
         else:
             info['status'] = 'searching…'
 
-        if not sync_ok:
+        # Gate: require at least marginal timing evidence before Viterbi.
+        # Threshold is intentionally low (2.0) — with FM interference the CP
+        # metric background is elevated; CFO correction brings sync_q up, but
+        # even a weak lock is worth attempting if MER looks positive.
+        if sync_q < 2.0:
             return info
 
         # Stage 5: fill buffer_pm (n_sym_used, 720)
@@ -643,6 +687,7 @@ class NRSC5TextDecoder(Decoder):
 
         # Stage 9: HDLC frame scan for AAS/SIS PDUs
         pdus = _scan_hdlc_frames(raw_bytes)
+        self._dbg('bc_off={} PDUs={}'.format(self._bc_offset, list(pdus.keys())))
         if pdus:
             # Found PDUs with current bc_offset — keep it
             info.update(pdus)
@@ -660,10 +705,12 @@ class NRSC5TextDecoder(Decoder):
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
-        return '[HD:{} MER:{:+.0f}dB sync:{:.1f} bc:{}] '.format(
+        cfo = result.get('cfo', 0)
+        return '[HD:{} MER:{:+.0f}dB sync:{:.1f} cfo:{:+d}Hz bc:{}] '.format(
             result.get('status', '?'),
             result.get('mer', -99.0),
             result.get('sync_q', 0.0),
+            cfo,
             self._bc_offset)
 
     def draw_overlay(self, screen_obj, state: AppState, result: dict,

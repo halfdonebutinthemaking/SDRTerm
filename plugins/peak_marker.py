@@ -13,7 +13,7 @@ _SNAP_DB      = 6.0    # immediately snap to a peak this much stronger than held
 class PeakMarker(Decoder):
     name            = 'peak_marker'
     key             = 'k'
-    key_help        = '-/+=hold'
+    key_help        = '-/+=hold  c=center'
     min_sample_rate = 250_000
 
     def __init__(self):
@@ -80,6 +80,9 @@ class PeakMarker(Decoder):
             return True
         if key in (ord('+'), ord('=')):
             self._hold_s = min(_HOLD_MAX, round(self._hold_s + _HOLD_STEP, 1))
+            return True
+        if key == ord('c') and self._held_hz is not None:
+            state.pending_freq = self._held_hz
             return True
         return False
 
