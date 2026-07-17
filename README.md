@@ -98,7 +98,8 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 
 | Key | Action |
 |-----|--------|
-| `←` / `→` | Shift center frequency left / right |
+| `←` / `→` | Shift center frequency by one display column (≈ bandwidth ÷ terminal width) |
+| `,` / `.` | Shift center frequency by one FFT bin (finest step) |
 | `↑` / `↓` | Increase / decrease bandwidth (steps through the current device's supported rates) |
 | `a` | Toggle hardware AGC on/off |
 | `g` | Enter gain mode — `↑`/`↓` adjust gain ±0.5 dB, `g` again to exit |

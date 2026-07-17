@@ -631,9 +631,17 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
     elif key in (ord('i'), ord('I')):
         state.iq_corr = not state.iq_corr
     elif key == curses.KEY_LEFT:
-        state.center_hz -= state.bw_hz / FFT_BINS
+        _, COLS = stdscr.getmaxyx()
+        state.center_hz -= state.bw_hz / max(1, COLS - LABEL_W)
         sdr.center_freq  = state.center_hz
     elif key == curses.KEY_RIGHT:
+        _, COLS = stdscr.getmaxyx()
+        state.center_hz += state.bw_hz / max(1, COLS - LABEL_W)
+        sdr.center_freq  = state.center_hz
+    elif key == ord(','):
+        state.center_hz -= state.bw_hz / FFT_BINS
+        sdr.center_freq  = state.center_hz
+    elif key == ord('.'):
         state.center_hz += state.bw_hz / FFT_BINS
         sdr.center_freq  = state.center_hz
     elif key == curses.KEY_UP:
