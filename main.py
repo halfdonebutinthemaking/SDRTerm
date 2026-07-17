@@ -817,7 +817,7 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
             if now - last_draw >= REFRESH_S and spec_count >= SPEC_NEED:
                 samples = np.concatenate(spec_chunks)
                 results['spectrum'] = registry['spectrum'].process(
-                    samples[:SPEC_NEED], state)
+                    samples[:SPEC_NEED], state, results, sdr)
                 spec_chunks.clear()
                 spec_count = 0
                 wf_rows.append(results['spectrum']['mags_db'].copy())

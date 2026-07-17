@@ -11,13 +11,10 @@ class LocalFileDevice(Device):
     (set by main.py via device.sample_rate = ...) so the spectrum updates at
     roughly the same cadence as real hardware.
 
-    For SigMF files the recorded centre frequency is read from the .sigmf-meta
-    companion.  When center_freq is changed after open() the reader applies a
-    complex mixer so the signal tracks the new axis — mirroring what real
-    hardware does on a retune.
-
-    For plain .iq and .wav files the centre is unknown so no mixing is applied;
-    changing center_freq only shifts the frequency-axis labels.
+    For SigMF files the recorded centre frequency (_file_center_hz) is read
+    from the .sigmf-meta companion and exposed so the spectrum plugin can roll
+    its output to compensate for display-centre changes (follow mode, manual
+    frequency entry).  IQ samples are never modified.
     """
 
     name                 = 'localfile'
@@ -161,10 +158,9 @@ class LocalFileDevice(Device):
         interval = num_samples / pace_sr
 
         def _run():
-            data         = self._data
-            n            = len(data)
-            sample_count = 0   # absolute index; keeps mixer phase continuous
-            deadline     = time.monotonic()
+            data     = self._data
+            n        = len(data)
+            deadline = time.monotonic()
             while not self._stop_evt.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
@@ -182,19 +178,6 @@ class LocalFileDevice(Device):
                     chunk     = np.concatenate([tail, head])
                     self._pos = end - n
 
-                # Mixer: only for SigMF files where the recorded centre is known.
-                # Shifts the signal so it appears at the correct FFT bin after
-                # the user (or follow mode) changes center_freq.
-                if self._file_center_hz is not None:
-                    mix_hz = self._file_center_hz - self._center_hz
-                    if abs(mix_hz) > 0.5:
-                        idx   = np.arange(sample_count,
-                                          sample_count + num_samples,
-                                          dtype=np.float64)
-                        phi   = (2.0 * np.pi * mix_hz / pace_sr) * idx
-                        chunk = (chunk * np.exp(1j * phi)).astype(np.complex64)
-
-                sample_count += num_samples
                 callback(chunk, None)
                 deadline += interval
 

@@ -61,8 +61,13 @@ class PeakMarker(Decoder):
         else:
             frac = max_idx / n
 
-        # fftshifted: frac=0 → center_hz − bw/2,  frac=1 → center_hz + bw/2
-        new_hz = state.center_hz + (frac - 0.5) * state.bw_hz
+        # For file replay the IQ samples are always baseband-relative to the
+        # recorded centre, not to the current display centre.  Use
+        # _file_center_hz as the FFT reference so that new_hz stays correct
+        # even after follow mode has moved state.center_hz away from the file
+        # centre.  Falls back to state.center_hz for real hardware.
+        ref_hz = getattr(sdr, '_file_center_hz', None) or state.center_hz
+        new_hz = ref_hz + (frac - 0.5) * state.bw_hz
 
         now = time.monotonic()
         if (self._held_hz is None
