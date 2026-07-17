@@ -44,7 +44,7 @@ uv run python main.py
 | Flag | Argument | Description |
 |------|----------|-------------|
 | `--d` | `NAME` | Open a specific device by name (e.g. `RTL-SDR-V3`). Falls back to auto-detect if omitted. |
-| `--file` | `PATH` | Replay a `.iq` (raw complex64) or stereo `.wav` IQ file instead of opening hardware. Selects the `localfile` device automatically. WAV sample rate is read from the file header. |
+| `--file` | `PATH` | Replay a `.iq` (raw complex64), stereo `.wav`, or SigMF (`.sigmf-data` / `.sigmf`) IQ file instead of opening hardware. Selects the `localfile` device automatically. WAV and SigMF sample rates and centre frequency are read from the file metadata. |
 | `--bw` | `BW` | Set the initial capture bandwidth / sample rate (e.g. `2.4M`, `1024k`, `250000`). For `.iq` files: must match the rate the file was recorded at. For `.wav` files: overrides the rate from the file header. |
 | `--f` | `FREQ` | Set the initial center frequency. Accepts `105.8M`, `433.5k`, or a raw Hz value. |
 | `--g` | `GAIN` | Set the initial gain in dB (e.g. `32.8`). Ignored if `--i on` is also set. |
@@ -115,7 +115,7 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 | `]` | Widen FM channel bandwidth (+10 kHz, max 200 kHz) |
 | `m` | Toggle FM decoder off |
 
-### RDS plugin tab (key `r`)
+### RDS plugin tab (key `d`)
 
 Decodes RDS (Radio Data System) data embedded in the 57 kHz subcarrier of FM broadcasts. Displays PI code, PS name (station name), RadioText (song/artist), PTY (programme type), TP (traffic programme) and TA (traffic announcement) flags. Data accumulates incrementally — the display fills in as groups are received.
 
@@ -136,6 +136,31 @@ Tracks and displays the strongest signal peak in the visible spectrum. The marke
 | `-` | Decrease hold time (−0.5 s, min 0.5 s) |
 | `+` / `=` | Increase hold time (+0.5 s, max 10 s) |
 | `c` | Set center frequency to the current peak frequency |
+| `t` | Toggle follow mode — continuously retunes the SDR center to chase the detected peak |
+
+### Record plugin tab (key `r`)
+
+Captures the output of the immediately preceding plugin in the pipeline to a file. If FM precedes record, audio is saved as WAV; if record has no recordable predecessor, raw IQ is written as SigMF (`.sigmf-data` + `.sigmf-meta`).
+
+| Key | Action |
+|-----|--------|
+| `o` | Set output path prefix (default: auto-generated timestamp name) |
+
+### RTL-TCP passive server plugin tab (key `t`)
+
+Starts a TCP server that streams the live IQ data to any RTL-TCP client (e.g. SDR#, GQRX, GNU Radio). Client frequency/gain/rate commands are silently ignored — hardware is controlled only by SDRTerm.
+
+| Key | Action |
+|-----|--------|
+| `o` | Set listen port (default: 1234) |
+
+### RTL-TCP active server plugin tab (key `u`)
+
+Like the passive server but also applies client-sent frequency, gain, and sample-rate commands to the hardware. Use this when the connected client needs full hardware control (e.g. wideband scanning software).
+
+| Key | Action |
+|-----|--------|
+| `o` | Set listen port (default: 1234) |
 
 ---
 
@@ -285,17 +310,29 @@ The application tries each discovered device in filename order and opens the fir
 
 Replays an IQ file as if it were live hardware. The file loops continuously. Two formats are supported:
 
-| Format | Extension | Layout | Sample rate |
-|--------|-----------|--------|-------------|
-| Raw IQ | `.iq` | Raw `complex64` binary | Must be supplied via `--bw` |
-| WAV IQ | `.wav` | Stereo PCM (int16 / int32 / float32); left = I, right = Q | Read from WAV header automatically |
+| Format | Extension | Layout | Sample rate | Centre frequency |
+|--------|-----------|--------|-------------|-----------------|
+| Raw IQ | `.iq` | Raw `complex64` binary | Must be supplied via `--bw` | Must be supplied via `--f` |
+| WAV IQ | `.wav` | Stereo PCM (int16 / int32 / float32); left = I, right = Q | Read from WAV header automatically | Must be supplied via `--f` |
+| SigMF  | `.sigmf-data` / `.sigmf` | Raw `cf32_le` binary + JSON metadata sidecar | Read from `.sigmf-meta` | Read from `.sigmf-meta`; follow mode works without `--f` |
 
 ```bash
-# Raw IQ file — supply the sample rate explicitly
+# Raw IQ file — supply sample rate and centre frequency explicitly
 uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
 
 # WAV IQ file — sample rate comes from the file header
 uv run python main.py --file recording.wav --f 105.8M
+
+# SigMF file — sample rate and centre frequency are read from the sidecar
+uv run python main.py --file recording.sigmf-data
+```
+
+A synthetic Doppler test signal in SigMF format can be generated with `gen_doppler_test.py`:
+
+```bash
+uv run python gen_doppler_test.py          # writes doppler_test.sigmf-data/.sigmf-meta
+uv run python main.py --file doppler_test.sigmf-data
+# Enable peak_marker (k), go to its tab, press t — follow mode chases the drift
 ```
 
 Pacing uses a monotonic deadline so the replay rate stays accurate regardless of processing time. Raw `.iq` files are memory-mapped (`np.memmap`) so large files do not load into RAM; WAV files are loaded fully into memory on open.
@@ -465,12 +502,13 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 ## Project structure
 
 ```
-main.py           — UI loop, keyboard dispatch, curses rendering
-core.py           — shared constants, AppState, Decoder/Device base classes
-fix_venv.py       — re-applies venv compatibility patches after uv sync --reinstall
-diag_nrsc5.py     — standalone NRSC-5 diagnostic script (CFO, sync, Viterbi pipeline)
-pyproject.toml    — project metadata and dependencies
-uv.lock           — locked dependency versions
+main.py                — UI loop, keyboard dispatch, curses rendering
+core.py                — shared constants, AppState, Decoder/Device base classes
+fix_venv.py            — re-applies venv compatibility patches after uv sync --reinstall
+diag_nrsc5.py          — standalone NRSC-5 diagnostic script (CFO, sync, Viterbi pipeline)
+gen_doppler_test.py    — generates a synthetic LEO Doppler SigMF test file (±20 kHz, 10 s)
+pyproject.toml         — project metadata and dependencies
+uv.lock                — locked dependency versions
 
 plugins/
   __init__.py        — auto-discovery loader
