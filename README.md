@@ -108,27 +108,35 @@ The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain av
 | `p` | Open plugin menu — `↑`/`↓` navigate, `space` stage toggle, `<`/`>` reorder pipeline, `ret` apply, `esc` cancel |
 | `b` | Toggle bias-tee on/off (RTL-SDR V3 only, when hardware supports it) |
 
+### Plugin tabs (all plugins)
+
+Navigate to a plugin tab with `tab`. Two keys are available on every plugin tab:
+
+| Key | Action |
+|-----|--------|
+| `x` | Disable this plugin and return to the core tab |
+| `d` | Open the debug console for this plugin (scroll with `↑`/`↓`/`PgUp`/`PgDn`, `esc` to close) |
+
 ### FM plugin tab
 
 | Key | Action |
 |-----|--------|
 | `[` | Narrow FM channel bandwidth (−10 kHz, min 30 kHz) |
 | `]` | Widen FM channel bandwidth (+10 kHz, max 200 kHz) |
-| `m` | Toggle FM decoder off |
 
-### RDS plugin tab (key `d`)
+### RDS plugin tab
 
 Decodes RDS (Radio Data System) data embedded in the 57 kHz subcarrier of FM broadcasts. Displays PI code, PS name (station name), RadioText (song/artist), PTY (programme type), TP (traffic programme) and TA (traffic announcement) flags. Data accumulates incrementally — the display fills in as groups are received.
 
 No tab-specific keys.
 
-### NRSC-5 plugin tab (key `n`)
+### NRSC-5 plugin tab
 
 Decodes NRSC-5 HD Radio digital sidebands (IBOC) in pure Python/NumPy. Performs automatic carrier frequency offset (CFO) correction and two-pass per-symbol phase correction. The overlay highlights the primary digital sideband region (±129–198 kHz) on the spectrum or waterfall.
 
 No tab-specific keys.
 
-### Peak marker plugin tab (key `k`)
+### Peak marker plugin tab
 
 Tracks and displays the strongest signal peak in the visible spectrum. The marker holds its position for a configurable dwell time before following a new peak; it snaps immediately if a signal 6 dB stronger appears.
 
@@ -139,7 +147,7 @@ Tracks and displays the strongest signal peak in the visible spectrum. The marke
 | `c` | Set center frequency to the current peak frequency |
 | `t` | Toggle follow mode — continuously retunes the SDR center to chase the detected peak |
 
-### Record plugin tab (key `r`)
+### Record plugin tab
 
 Captures the output of the immediately preceding plugin in the pipeline to a file. If FM precedes record, audio is saved as WAV; if record has no recordable predecessor, raw IQ is written as SigMF (`.sigmf-data` + `.sigmf-meta`).
 
@@ -147,7 +155,7 @@ Captures the output of the immediately preceding plugin in the pipeline to a fil
 |-----|--------|
 | `o` | Set output path prefix (default: auto-generated timestamp name) |
 
-### RTL-TCP passive server plugin tab (key `t`)
+### RTL-TCP passive server plugin tab
 
 Starts a TCP server that streams the live IQ data to any RTL-TCP client (e.g. SDR#, GQRX, GNU Radio). Client frequency/gain/rate commands are silently ignored — hardware is controlled only by SDRTerm.
 
@@ -155,7 +163,7 @@ Starts a TCP server that streams the live IQ data to any RTL-TCP client (e.g. SD
 |-----|--------|
 | `o` | Set listen port (default: 1234) |
 
-### RTL-TCP active server plugin tab (key `u`)
+### RTL-TCP active server plugin tab
 
 Like the passive server but also applies client-sent frequency, gain, and sample-rate commands to the hardware. Use this when the connected client needs full hardware control (e.g. wideband scanning software).
 
