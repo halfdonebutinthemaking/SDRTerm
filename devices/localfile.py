@@ -10,6 +10,14 @@ class LocalFileDevice(Device):
     The file loops continuously.  Playback is paced at the current sample rate
     (set by main.py via device.sample_rate = ...) so the spectrum updates at
     roughly the same cadence as real hardware.
+
+    For SigMF files the recorded centre frequency is read from the .sigmf-meta
+    companion.  When center_freq is changed after open() the reader applies a
+    complex mixer so the signal tracks the new axis — mirroring what real
+    hardware does on a retune.
+
+    For plain .iq and .wav files the centre is unknown so no mixing is applied;
+    changing center_freq only shifts the frequency-axis labels.
     """
 
     name                 = 'localfile'
@@ -24,13 +32,14 @@ class LocalFileDevice(Device):
         self._file_sr_explicit = False      # True if set_file_rate() was called
         self._sr               = 2_400_000  # reported to the app
         self._center_hz        = 0.0
+        self._file_center_hz   = None       # set only for SigMF; None = no mixer
         self._gain             = 0.0
         self._stop_evt         = threading.Event()
         self._thread           = None
 
     def set_path(self, path: str) -> None:
         self._path             = path
-        self._file_sr_explicit = False   # reset on each new path
+        self._file_sr_explicit = False
 
     def set_file_rate(self, rate: int) -> None:
         self._file_sr          = rate
@@ -53,13 +62,13 @@ class LocalFileDevice(Device):
         data = np.memmap(self._path, dtype=np.complex64, mode='r')
         if len(data) == 0:
             return False
-        self._data = data
-        self._pos  = 0
+        self._data           = data
+        self._pos            = 0
+        self._file_center_hz = None   # centre unknown; mixer disabled
         return True
 
     def _open_sigmf(self) -> bool:
         import json
-        # Accept either the .sigmf-data file or the bare stem
         base = self._path
         for suffix in ('.sigmf-data', '.sigmf'):
             if base.lower().endswith(suffix):
@@ -71,10 +80,10 @@ class LocalFileDevice(Device):
         data = np.memmap(data_path, dtype=np.complex64, mode='r')
         if len(data) == 0:
             return False
-        self._data = data
-        self._pos  = 0
+        self._data           = data
+        self._pos            = 0
+        self._file_center_hz = None   # will be overwritten below if meta has it
 
-        # Read sample rate and center frequency from companion meta file
         if not self._file_sr_explicit and os.path.exists(meta_path):
             try:
                 with open(meta_path) as mf:
@@ -87,7 +96,8 @@ class LocalFileDevice(Device):
                 if captures:
                     freq = captures[0].get('core:frequency')
                     if freq:
-                        self._center_hz = float(freq)
+                        self._center_hz      = float(freq)
+                        self._file_center_hz = float(freq)  # mixer enabled
             except (OSError, json.JSONDecodeError, KeyError):
                 pass
         return True
@@ -96,7 +106,6 @@ class LocalFileDevice(Device):
         from scipy.io import wavfile
         rate, raw = wavfile.read(self._path)
 
-        # Normalise every supported dtype to float32 in [-1, 1]
         if raw.dtype == np.uint8:
             raw = (raw.astype(np.float32) - 128.0) / 128.0
         elif raw.dtype == np.int16:
@@ -107,18 +116,16 @@ class LocalFileDevice(Device):
             raw = raw.astype(np.float32)
 
         if raw.ndim == 2:
-            # Stereo: channel 0 = I, channel 1 = Q
             iq = (raw[:, 0] + 1j * raw[:, 1]).astype(np.complex64)
         else:
-            # Mono: treat as real-only signal
             iq = raw.astype(np.complex64)
 
         if len(iq) == 0:
             return False
 
-        self._data = iq
-        self._pos  = 0
-        # Auto-use the WAV header's sample rate unless the caller set one explicitly
+        self._data           = iq
+        self._pos            = 0
+        self._file_center_hz = None   # centre unknown; mixer disabled
         if not self._file_sr_explicit:
             self._file_sr = int(rate)
             self._sr      = int(rate)
@@ -133,7 +140,7 @@ class LocalFileDevice(Device):
 
     # ── hardware-property shims ───────────────────────────────────────────────
     @property
-    def sample_rate(self):   return self._sr
+    def sample_rate(self):    return self._sr
     @sample_rate.setter
     def sample_rate(self, v): self._sr = int(v)
 
@@ -150,15 +157,14 @@ class LocalFileDevice(Device):
     # ── async reader ──────────────────────────────────────────────────────────
     def read_samples_async(self, callback, num_samples: int = 16_384) -> None:
         self._stop_evt.clear()
-        # Capture file_sr now so that app BW changes (which rewrite self._sr)
-        # cannot alter the playback pacing mid-stream.
         pace_sr  = self._file_sr
         interval = num_samples / pace_sr
 
         def _run():
-            data     = self._data
-            n        = len(data)
-            deadline = time.monotonic()
+            data         = self._data
+            n            = len(data)
+            sample_count = 0   # absolute index; keeps mixer phase continuous
+            deadline     = time.monotonic()
             while not self._stop_evt.is_set():
                 remaining = deadline - time.monotonic()
                 if remaining > 0:
@@ -176,6 +182,19 @@ class LocalFileDevice(Device):
                     chunk     = np.concatenate([tail, head])
                     self._pos = end - n
 
+                # Mixer: only for SigMF files where the recorded centre is known.
+                # Shifts the signal so it appears at the correct FFT bin after
+                # the user (or follow mode) changes center_freq.
+                if self._file_center_hz is not None:
+                    mix_hz = self._file_center_hz - self._center_hz
+                    if abs(mix_hz) > 0.5:
+                        idx   = np.arange(sample_count,
+                                          sample_count + num_samples,
+                                          dtype=np.float64)
+                        phi   = (2.0 * np.pi * mix_hz / pace_sr) * idx
+                        chunk = (chunk * np.exp(1j * phi)).astype(np.complex64)
+
+                sample_count += num_samples
                 callback(chunk, None)
                 deadline += interval
 

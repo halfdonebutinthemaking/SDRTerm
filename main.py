@@ -775,9 +775,12 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
             # sdr.* from inside the librtlsdr async-read callback, which
             # deadlocks libusb's internal event-loop locks.
             if state.pending_freq is not None:
-                state.center_hz   = state.pending_freq
-                sdr.center_freq   = state.pending_freq
+                state.center_hz    = state.pending_freq
+                sdr.center_freq    = state.pending_freq
                 state.pending_freq = None
+                iq_deque.clear()
+                spec_chunks.clear()
+                spec_count = 0
 
             if state.pending_gain is not None:
                 if state.pending_gain < 0:
