@@ -11,6 +11,7 @@ class FMDecoder(Decoder):
     key             = 'm'
     key_help        = '[/]=band'
     min_sample_rate = 250_000
+    priority        = 10   # run before RDS and record so audio is never delayed
 
     def __init__(self):
         from scipy.signal import lfilter, lfilter_zi, firwin

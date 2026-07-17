@@ -65,6 +65,7 @@ class RDS(Decoder):
     key             = 'd'
     key_help        = ''
     min_sample_rate = 250_000
+    priority        = 5    # after FM (needs its audio), before record
 
     def __init__(self):
         self._lock     = threading.Lock()

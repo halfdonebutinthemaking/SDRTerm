@@ -767,26 +767,32 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     def _sdr_cb(samples, _ctx):
         if stop_evt.is_set():
             return
-        # Real-time pass: run audio/record plugins inline, in pipeline order.
-        # _prev_plugin lets the record plugin find its immediate predecessor.
+        # Real-time pass: run audio/record plugins sorted by descending priority
+        # so high-priority plugins (FM=10, RDS=5) always run before record (0),
+        # regardless of the user's pipeline order.
         frame_results = {}
         prev_plugin   = None
-        for plugin in all_plugins:
-            if plugin.name not in state.active_decoders:
-                continue
-            if not plugin.realtime:
-                # Background plugin — push to its worker queue (non-blocking).
-                try:
-                    bg_queues[plugin.name].put_nowait(samples)
-                except queue.Full:
-                    pass   # worker is behind; drop this chunk
-                continue
+        rt_active = sorted(
+            (p for p in all_plugins
+             if p.realtime and p.name in state.active_decoders),
+            key=lambda p: -p.priority,
+        )
+        for plugin in rt_active:
             frame_results['_prev_plugin'] = prev_plugin
             r = plugin.process(samples, state, frame_results, sdr)
             if r is not None:
                 frame_results[plugin.name] = r
             prev_plugin = plugin
         results.update(frame_results)
+
+        # Background pass: push samples to each worker queue (non-blocking).
+        for plugin in all_plugins:
+            if not plugin.realtime and plugin.name in state.active_decoders:
+                try:
+                    bg_queues[plugin.name].put_nowait(samples)
+                except queue.Full:
+                    pass   # worker is behind; drop this chunk
+
         iq_deque.append(samples)
 
     reader: list = [None]

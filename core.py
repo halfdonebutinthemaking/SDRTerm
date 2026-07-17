@@ -103,6 +103,7 @@ class Decoder:
     min_sample_rate: int  = 250_000
     realtime:        bool = True   # False → process() runs in a background worker thread
     bg_queue_depth:  int  = 4     # chunks buffered before dropping (only used when realtime=False)
+    priority:        int  = 0     # higher → runs earlier in the realtime pass; bg plugins ignore this
 
     def start(self, state: AppState) -> None:       pass
     def process(self, samples: np.ndarray, state: AppState,
