@@ -153,7 +153,7 @@ class RtlTcpPassiveDecoder(Decoder):
             self._client_sock = None
             self._server_sock = None
         if self._thread:
-            self._thread.join(timeout=2.0)
+            self._thread.join(timeout=0.5)
             self._thread = None
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:

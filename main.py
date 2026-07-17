@@ -647,15 +647,15 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
     elif key == curses.KEY_UP:
         higher = [b for b in sdr.supported_bandwidths if b > state.bw_hz]
         if higher:
-            state.bw_hz     = min(higher)
-            sdr.sample_rate = state.bw_hz
+            state.bw_hz = min(higher)
+            # sdr.sample_rate applied by _start_reader() after async read stops
     elif key == curses.KEY_DOWN:
         min_bw = _required_bw(state.active_decoders, registry)
         lower  = [b for b in sdr.supported_bandwidths
                   if b < state.bw_hz and b >= min_bw]
         if lower:
-            state.bw_hz     = max(lower)
-            sdr.sample_rate = state.bw_hz
+            state.bw_hz = max(lower)
+            # sdr.sample_rate applied by _start_reader() after async read stops
     # ── core-only keys ────────────────────────────────────────────────────────
     elif state.tab_idx == 0:
         if key in (ord('v'), ord('V')):
@@ -801,6 +801,9 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         if reader[0] and reader[0].is_alive():
             sdr.cancel_read_async()
             reader[0].join(timeout=1.0)
+        # Set sample rate only after the async read has fully stopped —
+        # librtlsdr is not safe to reconfigure while rtlsdr_read_async() runs.
+        sdr.sample_rate = state.bw_hz
         def _run():
             sdr.read_samples_async(_sdr_cb, num_samples=READ_MAX)
         t = threading.Thread(target=_run, daemon=True)
@@ -848,16 +851,17 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 state.pending_gain = None
 
             if state.pending_sr is not None:
-                state.bw_hz     = _nearest_bw(state.pending_sr, sdr.supported_bandwidths)
-                sdr.sample_rate = state.bw_hz
+                state.bw_hz      = _nearest_bw(state.pending_sr, sdr.supported_bandwidths)
                 state.pending_sr = None
-                # bw_hz changed → the check below restarts the reader
+                # bw_hz changed → the check below cancels old reader and restarts
+                # with sdr.sample_rate set safely inside _start_reader()
 
             if state.bw_hz != last_bw:
                 last_bw = state.bw_hz
                 spec_chunks.clear()
                 spec_count = 0
                 wf_rows.clear()
+                iq_deque.clear()   # discard stale samples from old bandwidth
                 _start_reader()
 
             while iq_deque:

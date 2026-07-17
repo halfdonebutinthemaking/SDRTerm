@@ -534,7 +534,7 @@ class NRSC5TextDecoder(Decoder):
         self._active = False
         self._event.set()
         if self._thread:
-            self._thread.join(timeout=5.0)
+            self._thread.join(timeout=0.5)
             self._thread = None
         with self._buf_lock:
             self._raw_buf = np.zeros(0, dtype=np.complex64)
