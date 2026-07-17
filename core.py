@@ -97,10 +97,11 @@ class AppState:
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
 class Decoder:
-    name:            str = ''   # unique ID used as registry key
-    key:             str = ''   # keyboard letter that toggles this plugin ('' = always-on)
-    key_help:        str = ''   # shown in footer help line
-    min_sample_rate: int = 250_000
+    name:            str  = ''     # unique ID used as registry key
+    key:             str  = ''     # keyboard letter that toggles this plugin ('' = always-on)
+    key_help:        str  = ''     # shown in footer help line
+    min_sample_rate: int  = 250_000
+    realtime:        bool = True   # False → process() runs in a background worker thread
 
     def start(self, state: AppState) -> None:       pass
     def process(self, samples: np.ndarray, state: AppState,

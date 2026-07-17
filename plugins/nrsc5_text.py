@@ -495,6 +495,7 @@ class NRSC5TextDecoder(Decoder):
     key             = 'n'
     key_help        = ''
     min_sample_rate = _MIN_SR
+    realtime        = False
 
     def __init__(self):
         self._buf_lock  = threading.Lock()

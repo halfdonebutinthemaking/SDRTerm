@@ -18,6 +18,7 @@ class RtlTcpActiveDecoder(Decoder):
     key             = 'u'
     key_help        = 'o=port'
     min_sample_rate = 250_000
+    realtime        = False
 
     _MAGIC        = b'RTL0'
     _TUNER_R820T2 = 5

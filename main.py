@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, curses, threading, json, glob, datetime
+import os, time, curses, threading, json, glob, datetime, queue
 from collections import deque
 import numpy as np
 
@@ -723,20 +723,62 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     results: dict = {}
     stop_evt  = threading.Event()
 
+    # ── tiered plugin execution ───────────────────────────────────────────────
+    # realtime=True  → process() called inline in the SDR callback (same thread,
+    #                  zero latency; must be fast — FM, RDS, record).
+    # realtime=False → samples pushed to a per-plugin bounded queue; a dedicated
+    #                  daemon thread drains it at whatever pace it can sustain.
+    #                  If the queue fills the chunk is silently dropped (display
+    #                  plugins tolerate this; audio plugins never land here).
+    _BG_MAXQ = 4   # ~260 ms backlog at 250 kHz / 16 384 samples per chunk
+    bg_queues = {
+        p.name: queue.Queue(maxsize=_BG_MAXQ)
+        for p in all_plugins if not p.realtime
+    }
+
+    def _bg_worker(plugin, q):
+        while not stop_evt.is_set():
+            try:
+                chunk = q.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            if chunk is None:       # shutdown sentinel
+                break
+            r = plugin.process(chunk, state, results, sdr)
+            if r is not None:
+                results[plugin.name] = r
+
+    bg_workers = [
+        threading.Thread(target=_bg_worker,
+                         args=(p, bg_queues[p.name]),
+                         name='bg-' + p.name, daemon=True)
+        for p in all_plugins if not p.realtime
+    ]
+    for t in bg_workers:
+        t.start()
+
     def _sdr_cb(samples, _ctx):
         if stop_evt.is_set():
             return
-        # Process plugins in pipeline order.  _prev_plugin lets the record
-        # plugin find its immediate predecessor without scanning all_plugins.
+        # Real-time pass: run audio/record plugins inline, in pipeline order.
+        # _prev_plugin lets the record plugin find its immediate predecessor.
         frame_results = {}
         prev_plugin   = None
         for plugin in all_plugins:
-            if plugin.name in state.active_decoders:
-                frame_results['_prev_plugin'] = prev_plugin
-                r = plugin.process(samples, state, frame_results, sdr)
-                if r is not None:
-                    frame_results[plugin.name] = r
-                prev_plugin = plugin
+            if plugin.name not in state.active_decoders:
+                continue
+            if not plugin.realtime:
+                # Background plugin — push to its worker queue (non-blocking).
+                try:
+                    bg_queues[plugin.name].put_nowait(samples)
+                except queue.Full:
+                    pass   # worker is behind; drop this chunk
+                continue
+            frame_results['_prev_plugin'] = prev_plugin
+            r = plugin.process(samples, state, frame_results, sdr)
+            if r is not None:
+                frame_results[plugin.name] = r
+            prev_plugin = plugin
         results.update(frame_results)
         iq_deque.append(samples)
 
@@ -831,6 +873,14 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         sdr.cancel_read_async()
         if reader[0]:
             reader[0].join(timeout=2.0)
+        # Send shutdown sentinels so workers blocked on q.get() exit immediately.
+        for q in bg_queues.values():
+            try:
+                q.put_nowait(None)
+            except queue.Full:
+                pass   # stop_evt is set; worker exits on its next Empty timeout
+        for t in bg_workers:
+            t.join(timeout=1.0)
         for name in list(state.active_decoders):
             registry[name].stop()
         sdr.close()

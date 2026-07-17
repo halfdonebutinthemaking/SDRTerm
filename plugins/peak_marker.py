@@ -15,6 +15,7 @@ class PeakMarker(Decoder):
     key             = 'k'
     key_help        = '-/+=hold  c=center  t=follow'
     min_sample_rate = 250_000
+    realtime        = False
 
     def __init__(self):
         self._held_hz     = None
