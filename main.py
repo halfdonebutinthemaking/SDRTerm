@@ -730,9 +730,8 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     #                  daemon thread drains it at whatever pace it can sustain.
     #                  If the queue fills the chunk is silently dropped (display
     #                  plugins tolerate this; audio plugins never land here).
-    _BG_MAXQ = 4   # ~260 ms backlog at 250 kHz / 16 384 samples per chunk
     bg_queues = {
-        p.name: queue.Queue(maxsize=_BG_MAXQ)
+        p.name: queue.Queue(maxsize=p.bg_queue_depth)
         for p in all_plugins if not p.realtime
     }
 

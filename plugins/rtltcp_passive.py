@@ -13,6 +13,7 @@ class RtlTcpPassiveDecoder(Decoder):
     key_help        = 'o=port'
     min_sample_rate = 250_000
     realtime        = False
+    bg_queue_depth  = 8    # extra buffer absorbs network jitter without adding much latency
 
     _MAGIC        = b'RTL0'
     _TUNER_R820T2 = 5

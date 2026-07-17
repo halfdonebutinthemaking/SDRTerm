@@ -496,6 +496,7 @@ class NRSC5TextDecoder(Decoder):
     key_help        = ''
     min_sample_rate = _MIN_SR
     realtime        = False
+    bg_queue_depth  = 16   # Viterbi decode spikes; absorb ~1 s of burst without dropping
 
     def __init__(self):
         self._buf_lock  = threading.Lock()

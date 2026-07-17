@@ -102,6 +102,7 @@ class Decoder:
     key_help:        str  = ''     # shown in footer help line
     min_sample_rate: int  = 250_000
     realtime:        bool = True   # False → process() runs in a background worker thread
+    bg_queue_depth:  int  = 4     # chunks buffered before dropping (only used when realtime=False)
 
     def start(self, state: AppState) -> None:       pass
     def process(self, samples: np.ndarray, state: AppState,
