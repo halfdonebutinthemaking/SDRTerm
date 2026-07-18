@@ -721,6 +721,13 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     if state.bw_hz < _min_needed:
         state.bw_hz = _nearest_bw(_min_needed, sdr.supported_bandwidths)
 
+    # For file devices: latch _file_center_hz to the initial display centre
+    # if it wasn't already set from metadata or the filename.  This ensures
+    # the spectrum-roll mechanism (used by follow mode) has a stable reference
+    # even for plain .iq / .wav files without embedded frequency information.
+    if hasattr(sdr, '_file_center_hz') and sdr._file_center_hz is None:
+        sdr._file_center_hz = state.center_hz
+
     sdr.sample_rate = state.bw_hz
     sdr.center_freq = state.center_hz
     sdr.gain        = 'auto' if state.gain_auto else state.gain_db
@@ -970,6 +977,13 @@ def main() -> None:
             sdr = open_file_device(args.file, bw_hz)
             if sdr is None:
                 error_msg = 'cannot open file: {}'.format(args.file)
+            elif not args.f:
+                # Use centre frequency embedded in the file (SigMF meta or
+                # filename pattern) as the initial display centre when --f
+                # was not supplied explicitly.
+                file_center = getattr(sdr, '_file_center_hz', None)
+                if file_center is not None:
+                    state.center_hz = file_center
         elif args.d:
             sdr = open_device_by_name(args.d)
             if sdr is None:

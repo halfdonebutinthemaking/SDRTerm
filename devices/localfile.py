@@ -1,8 +1,14 @@
 import os
+import re
 import time
 import threading
 import numpy as np
 from core import Device, AppState, BW_STEPS
+
+# Match a centre frequency embedded in a filename, e.g.:
+#   baseband_179965057Hz_17-48-03_18-07-2026 250k.wav   (SDR++)
+#   recording_433920000Hz.iq
+_FNAME_FREQ_RE = re.compile(r'[_\-\s](\d{6,12})Hz[_\-\s\.]', re.IGNORECASE)
 
 
 class LocalFileDevice(Device):
@@ -59,9 +65,12 @@ class LocalFileDevice(Device):
         data = np.memmap(self._path, dtype=np.complex64, mode='r')
         if len(data) == 0:
             return False
-        self._data           = data
-        self._pos            = 0
-        self._file_center_hz = None   # centre unknown; mixer disabled
+        self._data = data
+        self._pos  = 0
+        m = _FNAME_FREQ_RE.search(os.path.basename(self._path))
+        self._file_center_hz = float(m.group(1)) if m else None
+        if self._file_center_hz is not None:
+            self._center_hz = self._file_center_hz
         return True
 
     def _open_sigmf(self) -> bool:
@@ -120,9 +129,12 @@ class LocalFileDevice(Device):
         if len(iq) == 0:
             return False
 
-        self._data           = iq
-        self._pos            = 0
-        self._file_center_hz = None   # centre unknown; mixer disabled
+        self._data = iq
+        self._pos  = 0
+        m = _FNAME_FREQ_RE.search(os.path.basename(self._path))
+        self._file_center_hz = float(m.group(1)) if m else None
+        if self._file_center_hz is not None:
+            self._center_hz = self._file_center_hz
         if not self._file_sr_explicit:
             self._file_sr = int(rate)
             self._sr      = int(rate)
