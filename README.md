@@ -145,7 +145,10 @@ Tracks and displays the strongest signal peak in the visible spectrum. The marke
 | `-` | Decrease hold time (−0.5 s, min 0.5 s) |
 | `+` / `=` | Increase hold time (+0.5 s, max 10 s) |
 | `c` | Set center frequency to the current peak frequency |
-| `t` | Toggle follow mode — continuously retunes the SDR center to chase the detected peak |
+| `t` | Toggle follow mode — retunes the SDR center to chase the detected peak |
+| `r` | Toggle alpha-beta tracking mode — predicts the signal's next position using estimated drift rate, narrowing the search window to ±10 kHz around the prediction; status shows drift rate in Hz/s; marker turns green |
+
+Follow and tracking are independent and can be combined: tracking alone gives a smooth, noise-resistant frequency estimate; adding follow retunes the hardware to keep the signal centred.
 
 ### Record plugin tab
 
