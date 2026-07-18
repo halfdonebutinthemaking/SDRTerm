@@ -74,6 +74,8 @@ The footer shows the active tab name, device status (bandwidth, bias-tee state),
 
 Press `v` to switch between **spectrum** (bar chart) and **waterfall** (scrolling time-frequency) views. The waterfall fills from the top with the newest frame; older frames scroll downward. Signal strength is encoded in block characters (`░▒▓█`). Plugin overlays (such as the FM channel highlight) apply in both views.
 
+![Waterfall view](images/03_waterfall.png)
+
 ### FM plugin tab
 
 ![FM plugin tab with channel highlight](images/02_plugin_fm.png)
