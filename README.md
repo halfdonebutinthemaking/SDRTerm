@@ -138,17 +138,23 @@ No tab-specific keys.
 
 ### Peak marker plugin tab
 
-Tracks and displays the strongest signal peak in the visible spectrum. The marker holds its position for a configurable dwell time before following a new peak; it snaps immediately if a signal 6 dB stronger appears.
+Marks the strongest signal peak in the visible spectrum and optionally follows or tracks it. Two operating modes are available:
+
+**Hold-off mode** (default) — the marker locks onto the strongest peak and holds its position for a configurable dwell time before updating. It snaps immediately if a signal 6 dB stronger appears elsewhere. Good for identifying and centering on a stable or slow-moving signal.
+
+**Alpha-beta tracking mode** (`r`) — each frame the plugin predicts the signal's next frequency using the current drift-rate estimate, then searches only within ±10 kHz of that prediction. An alpha-beta filter updates both the frequency estimate and the drift rate from the measurement residual. The hold-off timer is bypassed — the estimate updates every frame. The marker turns green and the status line shows the estimated drift rate (e.g. `TRACK −320 Hz/s`). Best for Doppler-shifting signals (satellites, aircraft) where the signal moves continuously and predictably.
+
+**Follow mode** (`t`) — available in both modes. When active, issues a hardware retune whenever the tracked frequency drifts more than 500 Hz (tracking mode) or 1 kHz (hold-off mode) from the current SDR centre frequency, keeping the signal visible in the display.
+
+Combining `r` + `t` is the recommended setup for Doppler tracking: the alpha-beta filter smooths the frequency estimate and rejects noise peaks, while follow mode keeps the signal centred on the screen.
 
 | Key | Action |
 |-----|--------|
-| `-` | Decrease hold time (−0.5 s, min 0.5 s) |
-| `+` / `=` | Increase hold time (+0.5 s, max 10 s) |
-| `c` | Set center frequency to the current peak frequency |
-| `t` | Toggle follow mode — retunes the SDR center to chase the detected peak |
-| `r` | Toggle alpha-beta tracking mode — predicts the signal's next position using estimated drift rate, narrowing the search window to ±10 kHz around the prediction; status shows drift rate in Hz/s; marker turns green |
-
-Follow and tracking are independent and can be combined: tracking alone gives a smooth, noise-resistant frequency estimate; adding follow retunes the hardware to keep the signal centred.
+| `-` | Decrease hold time (−0.5 s, min 0.5 s) — hold-off mode only |
+| `+` / `=` | Increase hold time (+0.5 s, max 10 s) — hold-off mode only |
+| `c` | Retune SDR centre to the current peak frequency (one-shot) |
+| `t` | Toggle follow mode |
+| `r` | Toggle alpha-beta tracking mode |
 
 ### Record plugin tab
 
