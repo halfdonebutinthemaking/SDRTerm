@@ -1,16 +1,17 @@
-# SDRTerm — Terminal RF Spectrum Analyzer
+# SDRTerm
 
-A terminal-based RF spectrum analyzer for RTL-SDR dongles, written in Python.  
-Displays a live dBFS spectrum in the terminal using curses, with interactive controls for frequency, bandwidth, gain, and pluggable decoders such as FM audio.
+![SDRTerm live spectrum](images/running.gif)
 
----
+Most SDR tools are GUI applications that require a display server, or narrow command-line tools that do one thing without interactivity. SDRTerm fills the gap: a live RF spectrum analyser that runs entirely in the terminal, with real-time controls and a plugin pipeline for signal decoding.
 
-## Intention
+No display server. No framework. SSH into a headless box, connect an RTL-SDR dongle, and see the spectrum.
 
-The goal is a lightweight, dependency-minimal spectrum viewer that runs entirely in the terminal — no GUI, no browser, no heavy SDR framework.  
-It reads raw IQ samples directly from RTL-SDR hardware via `pyrtlsdr`, computes an averaged FFT, and renders a scrolling spectrum with a dB-scaled vertical axis, similar to the waterfall-less view in GQRX or SDR#.
-
-Decoders (FM audio, ADS-B, …) and hardware drivers are discovered at runtime from `plugins/` and `devices/` — adding support for a new mode or dongle requires only a single new file.
+**What it does:**
+- Live dBFS spectrum and waterfall, rendered in the terminal with curses
+- Interactive frequency, bandwidth, and gain control
+- Plugin decoders: FM audio, RDS, NRSC-5 HD Radio, peak tracking with Doppler follow, frequency range scan
+- IQ file replay (raw `.iq`, WAV, SigMF) — analyse recordings without hardware
+- Pluggable hardware drivers — one file per device
 
 ---
 
@@ -64,15 +65,15 @@ uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
 
 ## Display
 
-![Core spectrum view](images/01_main.png)
+![SDRTerm spectrum](images/running.gif)
 
 The core tab shows the full-bandwidth spectrum.  
-The header displays the current gain setting and the low / center / high frequencies of the visible window.  
+The header displays the low / center / high frequencies of the visible window.  
 The footer shows the active tab name, device status (bandwidth, bias-tee state), IQ correction state, and all available shortcuts.
 
 Press `v` to switch between **spectrum** (bar chart) and **waterfall** (scrolling time-frequency) views. The waterfall fills from the top with the newest frame; older frames scroll downward. Signal strength is encoded in block characters (`░▒▓█`). Plugin overlays (such as the FM channel highlight) apply in both views.
 
-![Waterfall view](images/03_waterfall.png)
+![Waterfall view](images/waterfall.gif)
 
 ---
 
@@ -134,6 +135,7 @@ Bandwidth equals the IQ sample rate delivered by the device. Narrower bandwidth 
 Each device declares the bandwidths it supports via `supported_bandwidths`. The `↑`/`↓` keys step through that list only — they never request a rate the device cannot handle.
 
 **RTL-SDR V3 supported rates:** `250 000` · `1 024 000` · `1 400 000` · `1 800 000` · `2 048 000` · `2 400 000` Hz  
+**HackRF One supported rates:** `2` · `4` · `6` · `8` · `10` · `12.5` · `16` · `20` MHz  
 **localfile device:** all of the above (software device, accepts any step).
 
 Plugins declare `min_sample_rate`; enabling a plugin raises the bandwidth if necessary, but never lowers it below the current user setting.
@@ -298,6 +300,7 @@ Hardware drivers live in `devices/`. Each file that contains a `Device` subclass
 ```
 devices/
   rtlsdr_v3.py   — RTL-SDR V3 dongle (pyrtlsdr)
+  hackrf.py      — HackRF One (pyhackrf / libhackrf)
   localfile.py   — IQ file replay (raw complex64 .iq or stereo .wav)
   __init__.py    — auto-discovery loader
 ```
@@ -503,9 +506,12 @@ plugins/
 devices/
   __init__.py          — auto-discovery loader
   rtlsdr_v3.py         — RTL-SDR V3 driver (pyrtlsdr)
+  hackrf.py            — HackRF One driver (pyhackrf / libhackrf)
   localfile.py         — IQ file replay device (raw complex64, memory-mapped)
 
 images/
-  01_main.png          — core tab screenshot
-  03_waterfall.png     — waterfall view screenshot
+  running.gif          — live spectrum animation
+  waterfall.gif        — waterfall view animation
+  01_main.png          — core tab screenshot (static)
+  03_waterfall.png     — waterfall view screenshot (static)
 ```
