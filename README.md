@@ -64,8 +64,6 @@ uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
 
 ## Display
 
-### Core tab
-
 ![Core spectrum view](images/01_main.png)
 
 The core tab shows the full-bandwidth spectrum.  
@@ -75,14 +73,6 @@ The footer shows the active tab name, device status (bandwidth, bias-tee state),
 Press `v` to switch between **spectrum** (bar chart) and **waterfall** (scrolling time-frequency) views. The waterfall fills from the top with the newest frame; older frames scroll downward. Signal strength is encoded in block characters (`░▒▓█`). Plugin overlays (such as the FM channel highlight) apply in both views.
 
 ![Waterfall view](images/03_waterfall.png)
-
-### FM plugin tab
-
-![FM plugin tab with channel highlight](images/02_plugin_fm.png)
-
-Switching to the FM plugin tab with `tab` highlights the selected FM channel bandwidth in cyan.  
-The highlight is drawn as a post-body overlay and appears in both the spectrum and waterfall views.  
-The footer switches to FM-specific controls; core shortcuts (`f`, `q`) remain available on every tab.
 
 ---
 
@@ -119,68 +109,21 @@ Navigate to a plugin tab with `tab`. Two keys are available on every plugin tab:
 | `x` | Disable this plugin and return to the core tab |
 | `d` | Open the debug console for this plugin (scroll with `↑`/`↓`/`PgUp`/`PgDn`, `esc` to close) |
 
-### FM plugin tab
+---
 
-| Key | Action |
-|-----|--------|
-| `[` | Narrow FM channel bandwidth (−10 kHz, min 30 kHz) |
-| `]` | Widen FM channel bandwidth (+10 kHz, max 200 kHz) |
+## Plugins
 
-### RDS plugin tab
-
-Decodes RDS (Radio Data System) data embedded in the 57 kHz subcarrier of FM broadcasts. Displays PI code, PS name (station name), RadioText (song/artist), PTY (programme type), TP (traffic programme) and TA (traffic announcement) flags. Data accumulates incrementally — the display fills in as groups are received.
-
-No tab-specific keys.
-
-### NRSC-5 plugin tab
-
-Decodes NRSC-5 HD Radio digital sidebands (IBOC) in pure Python/NumPy. Performs automatic carrier frequency offset (CFO) correction and two-pass per-symbol phase correction. The overlay highlights the primary digital sideband region (±129–198 kHz) on the spectrum or waterfall.
-
-No tab-specific keys.
-
-### Peak marker plugin tab
-
-Marks the strongest signal peak in the visible spectrum and optionally follows or tracks it. Two operating modes are available:
-
-**Hold-off mode** (default) — the marker locks onto the strongest peak and holds its position for a configurable dwell time before updating. It snaps immediately if a signal 6 dB stronger appears elsewhere. Good for identifying and centering on a stable or slow-moving signal.
-
-**Alpha-beta tracking mode** (`r`) — each frame the plugin predicts the signal's next frequency using the current drift-rate estimate, then searches only within ±10 kHz of that prediction. An alpha-beta filter updates both the frequency estimate and the drift rate from the measurement residual. The hold-off timer is bypassed — the estimate updates every frame. The marker turns green and the status line shows the estimated drift rate (e.g. `TRACK −320 Hz/s`). Best for Doppler-shifting signals (satellites, aircraft) where the signal moves continuously and predictably.
-
-**Follow mode** (`t`) — available in both modes. When active, issues a hardware retune whenever the tracked frequency drifts more than 500 Hz (tracking mode) or 1 kHz (hold-off mode) from the current SDR centre frequency, keeping the signal visible in the display.
-
-Combining `r` + `t` is the recommended setup for Doppler tracking: the alpha-beta filter smooths the frequency estimate and rejects noise peaks, while follow mode keeps the signal centred on the screen.
-
-| Key | Action |
-|-----|--------|
-| `-` | Decrease hold time (−0.5 s, min 0.5 s) — hold-off mode only |
-| `+` / `=` | Increase hold time (+0.5 s, max 10 s) — hold-off mode only |
-| `c` | Retune SDR centre to the current peak frequency (one-shot) |
-| `t` | Toggle follow mode |
-| `r` | Toggle alpha-beta tracking mode |
-
-### Record plugin tab
-
-Captures the output of the immediately preceding plugin in the pipeline to a file. If FM precedes record, audio is saved as WAV; if record has no recordable predecessor, raw IQ is written as SigMF (`.sigmf-data` + `.sigmf-meta`).
-
-| Key | Action |
-|-----|--------|
-| `o` | Set output path prefix (default: auto-generated timestamp name) |
-
-### RTL-TCP passive server plugin tab
-
-Starts a TCP server that streams the live IQ data to any RTL-TCP client (e.g. SDR#, GQRX, GNU Radio). Client frequency/gain/rate commands are silently ignored — hardware is controlled only by SDRTerm.
-
-| Key | Action |
-|-----|--------|
-| `o` | Set listen port (default: 1234) |
-
-### RTL-TCP active server plugin tab
-
-Like the passive server but also applies client-sent frequency, gain, and sample-rate commands to the hardware. Use this when the connected client needs full hardware control (e.g. wideband scanning software).
-
-| Key | Action |
-|-----|--------|
-| `o` | Set listen port (default: 1234) |
+| Plugin | Description | Docs |
+|--------|-------------|------|
+| `spectrum` | Always-on FFT display and waterfall | [spectrum.md](plugins/spectrum.md) |
+| `fm` | FM broadcast audio decoder with channel-bandwidth highlight | [fm.md](plugins/fm.md) |
+| `rds` | RDS decoder — PS name, RadioText, PTY, PI code, TP/TA | [rds.md](plugins/rds.md) |
+| `nrsc5_text` | NRSC-5 HD Radio decoder (pure Python, CFO correction, Viterbi) | [nrsc5_text.md](plugins/nrsc5_text.md) |
+| `peak_marker` | Peak-frequency marker with hold-off and alpha-beta Doppler tracking | [peak_marker.md](plugins/peak_marker.md) |
+| `record` | Write signal to file (WAV audio or raw IQ/SigMF) | [record.md](plugins/record.md) |
+| `rtl-tcp-passive` | RTL-TCP server — stream IQ to clients, ignore commands | [rtltcp_passive.md](plugins/rtltcp_passive.md) |
+| `rtl-tcp-active` | RTL-TCP server — stream IQ and apply client commands to hardware | [rtltcp_active.md](plugins/rtltcp_active.md) |
+| `range-scan` | Stepped frequency scan with signal detection list | [range_scan.md](plugins/range_scan.md) |
 
 ---
 
@@ -205,12 +148,13 @@ Plugins live in `plugins/`. Each file that contains a `Decoder` subclass with a 
 plugins/
   spectrum.py        — always-on FFT display (built-in, key-less)
   fm.py              — FM broadcast audio decoder
-  rds.py             — RDS (Radio Data System) decoder — PS name, RadioText, PTY, PI, TP/TA
+  rds.py             — RDS (Radio Data System) decoder
   nrsc5_text.py      — NRSC-5 HD Radio decoder (digital sideband, pure Python)
-  peak_marker.py     — peak-frequency marker with hold-off and center-frequency snap
+  peak_marker.py     — peak-frequency marker with hold-off and Doppler tracking
   record.py          — write signal to file (WAV or raw IQ)
   rtltcp_passive.py  — RTL-TCP server, streams IQ to clients (read-only)
-  rtltcp_active.py   — RTL-TCP server, applies client frequency/gain/rate commands to hardware
+  rtltcp_active.py   — RTL-TCP server, applies client frequency/gain/rate commands
+  range_scan.py      — stepped frequency scan with signal detection list
   __init__.py        — auto-discovery loader
 ```
 
@@ -263,7 +207,7 @@ class MyDecoder(Decoder):
 
 #### Drawing overlays on the core view
 
-`draw_overlay()` is called after every frame (spectrum or waterfall) with a reference to the live curses window. The plugin can paint anything on top of the body rows — without re-rendering row content — using `chgat()` to change the color attribute of already-drawn characters:
+`draw_overlay()` is called after every frame (spectrum or waterfall) with a reference to the live curses window. The plugin can paint anything on top of the body rows using `chgat()` to change the color attribute of already-drawn characters:
 
 ```python
 import curses
@@ -272,7 +216,6 @@ from core import LABEL_W
 class MyDecoder(Decoder):
     def draw_overlay(self, screen_obj, state, result,
                      freq_min, freq_range, plot_w, height):
-        # Compute column range for some frequency span
         span_l = state.center_hz - 50_000
         span_r = state.center_hz + 50_000
         col_l  = int(max(0,      (span_l - freq_min) / freq_range * plot_w))
@@ -289,6 +232,10 @@ class MyDecoder(Decoder):
 
 `chgat(y, x, n, attr)` recolors `n` characters at `(y, x)` in place without touching character content, so it works identically in both spectrum and waterfall modes. Color pair 1 is cyan (initialized by the framework at startup).
 
+#### Full-view plugins
+
+Set `full_view = True` to replace the entire spectrum body with a custom view. Implement `draw_full(screen_obj, state, result, rows, cols)` to render into the full terminal area (footer is drawn by the framework). See `range_scan.py` for a complete example.
+
 ### Making a plugin recordable
 
 Implement the recording hooks so the `record` plugin can capture this plugin's output:
@@ -298,18 +245,16 @@ class MyDecoder(Decoder):
     record_ext = 'myext'     # file extension; None = not recordable (default)
 
     def record_open(self, path: str):
-        return open(path, 'wb')   # return a file handle
+        return open(path, 'wb')
 
     def record_write(self, handle, result: dict) -> int:
         data = result.get('mydata')
         handle.write(data)
-        return len(data)          # bytes written
+        return len(data)
 
     def record_close(self, handle) -> None:
         handle.close()
 ```
-
-The file is picked up on the next run with no other changes needed.
 
 ---
 
@@ -372,7 +317,6 @@ class MyDevice(Device):
     def open(self) -> bool:   ...   # return False if hardware unavailable
     def close(self) -> None:  ...
 
-    # must expose these as properties
     @property
     def sample_rate(self): ...
     @sample_rate.setter
@@ -420,42 +364,6 @@ Software-only, applied per frame before the FFT:
 ---
 
 ## Implementation
-
-### Signal processing
-
-```
-RTL-SDR IQ samples
-  → reshape into N_AVG frames of FFT_BINS samples each
-  → (optional) IQ correction per frame
-  → Hann window × frame
-  → FFT (FFT_BINS points) → fftshift
-  → |FFT|² accumulated across N_AVG frames
-  → 10·log10(mean power / FFT_BINS²)   [dBFS]
-```
-
-Constants:
-
-| Name | Value | Purpose |
-|------|-------|---------|
-| `FFT_BINS` | 4096 | Bin count; larger = lower mean noise floor |
-| `N_AVG` | 8 | Frames averaged per display update; reduces variance |
-| `REFRESH_S` | 0.15 s | Target frame period (~7 fps) |
-| `DB_MAX` / `DB_MIN` | 0 / −110 dBFS | Vertical axis range |
-
-### FM decoder
-
-FM audio is demodulated via instantaneous frequency (conjugate product of successive samples), then resampled to 48 kHz using `scipy.signal.resample_poly` with a ratio derived from `gcd(sample_rate, 48000)`. This allows the FM decoder to run at any bandwidth preset without forcing a sample-rate change on the hardware.
-
-A 6th-order Chebyshev IF filter selects the channel around the centre frequency before demodulation; its bandwidth is controlled by `[`/`]`. A 15 kHz FIR audio LPF and a 50 µs de-emphasis IIR (EU standard) are applied after resampling.
-
-### Noise floor
-
-```
-bin_width = sample_rate / FFT_BINS
-```
-
-Increasing `FFT_BINS` from 512 → 4096 lowers the mean floor by ~9 dB (`10·log10(4096/512)`).  
-Reducing bandwidth lowers the floor further — identical to reducing the RBW on a bench spectrum analyser.
 
 ### curses rendering
 
@@ -531,22 +439,34 @@ pyproject.toml         — project metadata and dependencies
 uv.lock                — locked dependency versions
 
 plugins/
-  __init__.py        — auto-discovery loader
-  spectrum.py        — always-on FFT spectrum decoder
-  fm.py              — FM broadcast audio decoder (with WAV recording hooks)
-  rds.py             — RDS decoder: PS name, RadioText, PTY, PI code, TP/TA flags
-  nrsc5_text.py      — NRSC-5 HD Radio decoder (pure Python, CFO correction, Viterbi)
-  peak_marker.py     — peak-frequency marker with configurable hold and center-snap
-  record.py          — write signal to file via predecessor plugin's recording hooks
-  rtltcp_passive.py  — RTL-TCP server: stream IQ to clients, ignore commands
-  rtltcp_active.py   — RTL-TCP server: stream IQ and apply client commands to hardware
+  __init__.py          — auto-discovery loader
+  spectrum.py          — always-on FFT spectrum decoder
+  spectrum.md          — spectrum plugin documentation
+  fm.py                — FM broadcast audio decoder (with WAV recording hooks)
+  fm.md                — FM plugin documentation
+  rds.py               — RDS decoder: PS name, RadioText, PTY, PI code, TP/TA flags
+  rds.md               — RDS plugin documentation
+  nrsc5_text.py        — NRSC-5 HD Radio decoder (pure Python, CFO correction, Viterbi)
+  nrsc5_text.md        — NRSC-5 plugin documentation
+  peak_marker.py       — peak-frequency marker with hold-off and Doppler tracking
+  peak_marker.md       — peak marker plugin documentation
+  record.py            — write signal to file via predecessor plugin's recording hooks
+  record.md            — record plugin documentation
+  rtltcp_passive.py    — RTL-TCP server: stream IQ to clients, ignore commands
+  rtltcp_passive.md    — RTL-TCP passive server documentation
+  rtltcp_active.py     — RTL-TCP server: stream IQ and apply client commands to hardware
+  rtltcp_active.md     — RTL-TCP active server documentation
+  range_scan.py        — stepped frequency scan with signal detection list
+  range_scan.md        — range-scan plugin documentation
+  images/
+    02_plugin_fm.png   — FM plugin tab screenshot
 
 devices/
-  __init__.py     — auto-discovery loader
-  rtlsdr_v3.py    — RTL-SDR V3 driver (pyrtlsdr)
-  localfile.py    — IQ file replay device (raw complex64, memory-mapped)
+  __init__.py          — auto-discovery loader
+  rtlsdr_v3.py         — RTL-SDR V3 driver (pyrtlsdr)
+  localfile.py         — IQ file replay device (raw complex64, memory-mapped)
 
 images/
-  01_main.png      — core tab screenshot
-  02_plugin_fm.png — FM plugin tab screenshot
+  01_main.png          — core tab screenshot
+  03_waterfall.png     — waterfall view screenshot
 ```
