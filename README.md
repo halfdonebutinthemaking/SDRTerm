@@ -328,7 +328,7 @@ uv run python main.py --file recording.sigmf-data
 A synthetic Doppler test signal in SigMF format can be generated with `gen_doppler_test.py`:
 
 ```bash
-uv run python gen_doppler_test.py          # writes doppler_test.sigmf-data/.sigmf-meta
+uv run python scripts/gen_doppler_test.py  # writes doppler_test.sigmf-data/.sigmf-meta
 uv run python main.py --file doppler_test.sigmf-data
 # Enable peak_marker (k), go to its tab, press t — follow mode chases the drift
 ```
@@ -466,10 +466,12 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 main.py                — UI loop, keyboard dispatch, curses rendering
 core.py                — shared constants, AppState, Decoder/Device base classes
 fix_venv.py            — re-applies venv compatibility patches after uv sync --reinstall
-diag_nrsc5.py          — standalone NRSC-5 diagnostic script (CFO, sync, Viterbi pipeline)
-gen_doppler_test.py    — generates a synthetic LEO Doppler SigMF test file (±20 kHz, 10 s)
 pyproject.toml         — project metadata and dependencies
 uv.lock                — locked dependency versions
+
+scripts/
+  gen_doppler_test.py  — generates a synthetic LEO Doppler SigMF test file (±20 kHz, 10 s)
+  diag_nrsc5.py        — standalone NRSC-5 diagnostic script (CFO, sync, Viterbi pipeline)
 
 plugins/
   __init__.py          — auto-discovery loader
