@@ -2,7 +2,9 @@
 
 Decodes NRSC-5 HD Radio digital sidebands (IBOC) in pure Python/NumPy.
 
-![NRSC-5 plugin tab](images/08_nrsc.png) Performs automatic carrier frequency offset (CFO) correction and two-pass per-symbol phase correction. The overlay highlights the primary digital sideband region (±129–198 kHz) on the spectrum or waterfall.
+![NRSC-5 decoder in action](images/nrsc.gif)
+
+Performs automatic carrier frequency offset (CFO) correction and two-pass per-symbol phase correction. The overlay highlights the primary digital sideband region (±129–198 kHz) on the spectrum or waterfall.
 
 ## How it works
 
