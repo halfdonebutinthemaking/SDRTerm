@@ -190,8 +190,8 @@ from core import Decoder, AppState
 
 class MyDecoder(Decoder):
     name            = 'mymode'          # unique ID
-    key             = 'y'               # toggle key
-    key_help        = 'o=path'          # shown in footer
+    key             = 'y'               # shown in plugin menu; required for menu listing
+    key_help        = 'o=path'          # tab-specific shortcut hints shown in footer
     min_sample_rate = 250_000           # minimum BW this decoder needs
 
     def start(self, state: AppState) -> None:   ...
