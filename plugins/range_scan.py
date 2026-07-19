@@ -28,6 +28,8 @@ class RangeScan(Decoder):
     full_view       = True
 
     def __init__(self):
+        self._scan_freq_min = 0.0   # user-configured scan bounds (0 = derive from device)
+        self._scan_freq_max = 0.0
         self._scanning      = False
         self._min_freq      = 0.0
         self._max_freq      = 0.0
@@ -212,15 +214,15 @@ class RangeScan(Decoder):
         bw = state.bw_hz
 
         # Derive scan range
-        if state.scan_freq_min > 0:
-            f_min = state.scan_freq_min
+        if self._scan_freq_min > 0:
+            f_min = self._scan_freq_min
         elif hasattr(sdr, 'freq_min') and sdr.freq_min > 0:
             f_min = sdr.freq_min
         else:
             f_min = state.center_hz - 20 * bw
 
-        if state.scan_freq_max > 0:
-            f_max = state.scan_freq_max
+        if self._scan_freq_max > 0:
+            f_max = self._scan_freq_max
         elif hasattr(sdr, 'freq_max') and sdr.freq_max > 0:
             f_max = sdr.freq_max
         else:
@@ -298,18 +300,46 @@ class RangeScan(Decoder):
             return True
 
         if key == ord('m'):
-            state.path_input        = ''
-            state.path_input_target = 'range-scan-min'
-            state.path_input_label  = 'Scan min freq'
+            state.path_input       = ''
+            state.path_input_label = 'Scan min freq'
+            plugin = self
+            state.path_input_cb    = lambda val: plugin._set_scan_min(val)
             return True
 
         if key == ord('n'):
-            state.path_input        = ''
-            state.path_input_target = 'range-scan-max'
-            state.path_input_label  = 'Scan max freq'
+            state.path_input       = ''
+            state.path_input_label = 'Scan max freq'
+            plugin = self
+            state.path_input_cb    = lambda val: plugin._set_scan_max(val)
             return True
 
         return False
+
+    def _set_scan_min(self, val: str) -> None:
+        parsed = parse_freq(val)
+        if parsed is not None:
+            self._scan_freq_min = parsed
+
+    def _set_scan_max(self, val: str) -> None:
+        parsed = parse_freq(val)
+        if parsed is not None:
+            self._scan_freq_max = parsed
+
+    def save_state(self) -> dict:
+        return {
+            'scan_freq_min': self._scan_freq_min,
+            'scan_freq_max': self._scan_freq_max,
+            'dwell_s':       self._dwell_s,
+            'min_snr':       self._min_snr,
+            'sort_snr':      self._sort_snr,
+        }
+
+    def load_state(self, d: dict) -> None:
+        self._scan_freq_min = d.get('scan_freq_min', 0.0)
+        self._scan_freq_max = d.get('scan_freq_max', 0.0)
+        self._dwell_s       = d.get('dwell_s', _DWELL_DEFAULT)
+        self._min_snr       = d.get('min_snr',  _SNR_DEFAULT)
+        self._sort_snr      = d.get('sort_snr',  False)
 
     def status_text(self, state: AppState, result: dict):
         if result.get('scanning'):

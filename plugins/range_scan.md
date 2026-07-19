@@ -4,6 +4,8 @@ Stepped scan across a configurable frequency range.
 
 ![Range scan plugin view](images/05_range-scan.png) Tunes the SDR through the range step by step, accumulates FFT power at each position, detects signal peaks by SNR, and presents a live list of found signals. Navigate the list and press return to tune to any signal.
 
+![Range scan in action](images/range.gif)
+
 ## Controls
 
 | Key | Action |
@@ -26,7 +28,7 @@ If `m`/`n` are not set, the scan range is derived automatically:
 1. Device `freq_min`/`freq_max` if available (RTL-SDR V3: 25 MHz – 1766 MHz)
 2. Otherwise: centre frequency ± 20 × current bandwidth
 
-The range is saved in presets so it persists across sessions.
+The scan range, dwell time, SNR threshold, and sort order are all saved in presets and persist across sessions.
 
 ## Step size and dwell
 

@@ -50,6 +50,7 @@ uv run python main.py
 | `--f` | `FREQ` | Set the initial center frequency. Accepts `105.8M`, `433.5k`, or a raw Hz value. |
 | `--g` | `GAIN` | Set the initial gain in dB (e.g. `32.8`). Ignored if `--i on` is also set. |
 | `--i` | `on\|off` | Enable (`on`) or disable (`off`) hardware AGC at startup. |
+| `--preset` | `FILE` | Load a `.sdrterm` preset file at startup (overrides all other settings). |
 
 Examples:
 
@@ -205,7 +206,49 @@ class MyDecoder(Decoder):
     def status_text(self, state, result) -> str:   ...
     def draw_overlay(self, screen_obj, state, result,
                      freq_min, freq_range, plot_w, height): ...
+
+    # preset persistence — implement to survive save/load cycles
+    def save_state(self) -> dict:        return {}
+    def load_state(self, d: dict) -> None: ...
 ```
+
+#### Preset persistence
+
+Implement `save_state()` and `load_state()` to let the preset system serialise your plugin's configuration. Both are called automatically when the user saves or loads a preset — no wiring in `main.py` required.
+
+```python
+class MyDecoder(Decoder):
+    def __init__(self):
+        self._threshold = 10.0
+
+    def save_state(self) -> dict:
+        return {'threshold': self._threshold}
+
+    def load_state(self, d: dict) -> None:
+        self._threshold = d.get('threshold', 10.0)
+```
+
+The saved dict is stored under `plugin_states.<name>` in the `.sdrterm` JSON file.
+
+#### Text input from the user
+
+To prompt the user for a free-form string (path, frequency, port number), set `state.path_input` to the initial value and register a callback on `state.path_input_cb`. The framework displays the prompt in the footer and calls the callback with the entered string when the user presses `ret`:
+
+```python
+def handle_key(self, key, state, sdr) -> bool:
+    if key == ord('o'):
+        state.path_input       = self._path or ''
+        state.path_input_label = 'Output path'
+        plugin = self
+        state.path_input_cb    = lambda val: plugin._set_path(val or None)
+        return True
+    return False
+
+def _set_path(self, path):
+    self._path = path
+```
+
+The label shown before the input cursor is controlled by `state.path_input_label` (default `'Path'`). The framework resets both `path_input` and `path_input_cb` to `None` after the callback runs.
 
 #### Drawing overlays on the core view
 
@@ -435,8 +478,11 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 ## Project structure
 
 ```
-main.py                — UI loop, keyboard dispatch, curses rendering
+main.py                — CLI argument parsing and curses main loop
 core.py                — shared constants, AppState, Decoder/Device base classes
+keys.py                — keyboard handler (handle_keys state machine)
+presets.py             — preset save / load / migrate logic
+render.py              — curses rendering (draw, overlays, menus)
 fix_venv.py            — re-applies venv compatibility patches after uv sync --reinstall
 pyproject.toml         — project metadata and dependencies
 uv.lock                — locked dependency versions

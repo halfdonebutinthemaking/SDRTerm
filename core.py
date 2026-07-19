@@ -1,7 +1,7 @@
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 # ── constants ─────────────────────────────────────────────────────────────────
 CENTER_HZ  = 105.8e6
@@ -79,9 +79,9 @@ class AppState:
     tab_idx:           int           = 0     # 0=core, N=Nth enabled plugin
     menu_cursor:       int           = 0
     menu_active:       Optional[set] = None  # None=closed; set=pending enabled set
-    path_input:        Optional[str] = None  # None=closed; str=collecting input
-    path_input_target: Optional[str] = None  # plugin name that opened the input
-    debug_console:     Optional[str] = None  # plugin name of open console, or None
+    path_input:        Optional[str]      = None  # None=closed; str=collecting input
+    path_input_cb:     Optional[Callable] = None  # called with input string on confirm
+    debug_console:     Optional[str]      = None  # plugin name of open console, or None
     debug_scroll:      int           = 0     # lines scrolled from tail (0 = tail)
     pending_sr:        Optional[int]   = None  # sample-rate change queued by active plugin
     pending_freq:      Optional[float] = None  # frequency change queued by active plugin
@@ -93,8 +93,6 @@ class AppState:
     preset_cursor:     int             = 0
     save_input:        Optional[str]   = None  # None=closed; str=filename (or "?:"+path for overwrite confirm)
     plugin_order:      list            = field(default_factory=list)  # plugin name order from last preset
-    scan_freq_min:     float           = 0.0   # range-scan lower bound (0 = derive from device)
-    scan_freq_max:     float           = 0.0   # range-scan upper bound (0 = derive from device)
     path_input_label:  str             = 'Path'  # prompt label shown in path_input modal
 
 
@@ -131,6 +129,11 @@ class Decoder:
             self._debug_lines = deque(maxlen=1000)
         self._debug_lines.append(msg)
 
+    # persistent state hooks — implement to let the preset system serialise
+    # per-plugin settings without storing them on AppState.
+    def save_state(self) -> dict:  return {}
+    def load_state(self, d: dict) -> None: pass
+
     # recording hooks — implement to make this plugin's output recordable by
     # the record plugin.  record_ext=None means "not recordable".
     record_ext: Optional[str] = None
@@ -166,6 +169,7 @@ class Device:
 
     def open(self) -> bool:             return False
     def close(self) -> None:            pass
+    def reopen(self) -> None:           self.close(); self.open()
     def read_samples_async(self, callback, num_samples: int) -> None: pass
     def cancel_read_async(self) -> None: pass
     def handle_key(self, key: int, state: 'AppState') -> bool: return False
@@ -176,7 +180,7 @@ class Device:
 def _required_bw(names: set, registry: dict) -> int:
     if not names:
         return 0
-    return max(registry[n].min_sample_rate for n in names)
+    return max((registry[n].min_sample_rate for n in names if n in registry), default=0)
 
 
 def _nearest_bw(rate: int, supported: list) -> int:
