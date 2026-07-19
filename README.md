@@ -234,7 +234,40 @@ class MyDecoder(Decoder):
 
 #### Full-view plugins
 
-Set `full_view = True` to replace the entire spectrum body with a custom view. Implement `draw_full(screen_obj, state, result, rows, cols)` to render into the full terminal area (footer is drawn by the framework). See `range_scan.py` for a complete example.
+Set `full_view = True` to take over the entire terminal body. When the plugin's tab is active, the framework skips spectrum/waterfall rendering entirely and calls `draw_full()` instead. The framework still draws the footer row and handles all modals (frequency entry, path input, flash messages).
+
+```python
+import curses
+
+class MyDecoder(Decoder):
+    full_view = True
+
+    def draw_full(self, screen_obj, state: AppState, result: dict,
+                  rows: int, cols: int) -> None:
+        # rows and cols are the full terminal dimensions.
+        # The footer occupies row rows-1 — draw content into rows 0..rows-2.
+        # The framework calls screen_obj.erase() before this method.
+        try:
+            screen_obj.addstr(0, 0, 'My plugin view', curses.A_BOLD)
+            for i, item in enumerate(result.get('items', [])):
+                if 1 + i >= rows - 1:
+                    break
+                screen_obj.addstr(1 + i, 0, str(item)[:cols - 1])
+        except curses.error:
+            pass
+```
+
+Key differences from overlay plugins:
+
+| | Overlay (`draw_overlay`) | Full-view (`draw_full`) |
+|-|--------------------------|------------------------|
+| When called | After every spectrum/waterfall frame | Instead of spectrum/waterfall, on the active plugin tab only |
+| What it renders | Decorations on top of the existing body | The entire screen body |
+| Spectrum still drawn | Yes | No |
+| Footer | Drawn by framework | Drawn by framework |
+| `realtime` setting | Usually `True` | Usually `False` (background worker) |
+
+See `range_scan.py` for a complete example.
 
 ### Making a plugin recordable
 
