@@ -6,7 +6,10 @@ Captures the output of the immediately preceding plugin in the pipeline to a fil
 
 | Key | Action |
 |-----|--------|
+| `e` | Start recording (press again to stop) |
 | `o` | Set output path prefix (default: auto-generated timestamp name) |
+
+Recording is idle when the plugin is first enabled. The status line shows `[REC ready]` until `e` is pressed. Pressing `e` a second time closes and finalises the file.
 
 ## Output format
 

@@ -8,7 +8,7 @@ from core import Decoder, AppState
 class RecordDecoder(Decoder):
     name            = 'record'
     key             = 'r'
-    key_help        = 'o=path'
+    key_help        = 'e=rec/stop  o=path'
     min_sample_rate = 250_000
 
     def __init__(self):
@@ -20,78 +20,26 @@ class RecordDecoder(Decoder):
         self._bytes       = 0
         self._error       = None
         self._sigmf_meta  = None   # dict written to .sigmf-meta on close
+        self._recording   = False  # idle until user presses e
 
     def set_path(self, path):
         self._path = path or None
 
     def start(self, state: AppState) -> None:
-        self._bytes      = 0
-        self._error      = None
-        self._file       = None
+        self._bytes       = 0
+        self._error       = None
+        self._file        = None
         self._predecessor = None
-        self._mode       = None
-        self._sigmf_meta = None
+        self._mode        = None
+        self._sigmf_meta  = None
+        self._recording   = False
 
-    def process(self, samples: np.ndarray, state: AppState,
-                results: dict = None, sdr=None) -> dict:
-        if self._error:
-            return {'error': self._error, 'bytes': self._bytes,
-                    'path': self._active_path, 'mode': self._mode or 'err'}
-
-        # _prev_plugin is injected by main.py's pipeline loop so we always know
-        # the immediately preceding active plugin, not just any upstream result.
-        predecessor = (results or {}).get('_prev_plugin')
-
-        # Open output file(s) on the first call; mode is locked at that point.
-        if self._file is None:
-            if predecessor is not None and predecessor.record_ext is not None:
-                self._predecessor = predecessor
-                self._mode        = predecessor.record_ext
-                base = self._path or _default_path(self._mode)
-                self._active_path = base
-                try:
-                    self._file = self._predecessor.record_open(base)
-                except OSError as e:
-                    self._error = str(e)
-                    return {'error': self._error}
-            else:
-                # Raw IQ → SigMF
-                self._predecessor = None
-                self._mode        = 'sigmf'
-                base = _sigmf_base(self._path or _default_path('sigmf'))
-                self._active_path = base
-                data_path = base + '.sigmf-data'
-                try:
-                    self._file = open(data_path, 'wb')
-                except OSError as e:
-                    self._error = str(e)
-                    return {'error': self._error}
-                self._sigmf_meta = _build_meta(state)
-
-        # Write one frame.
-        if self._predecessor is None:
-            iq = samples.astype(np.complex64)
-            self._file.write(iq.tobytes())
-            self._bytes += iq.nbytes
-        else:
-            pred_result = (results or {}).get(self._predecessor.name)
-            if pred_result is not None:
-                self._bytes += self._predecessor.record_write(self._file, pred_result)
-
-        return {
-            'bytes': self._bytes,
-            'path':  self._active_path,
-            'mode':  self._mode,
-        }
-
-    def stop(self) -> None:
+    def _close_file(self) -> None:
         if self._file:
             if self._predecessor is not None:
                 self._predecessor.record_close(self._file)
             else:
                 self._file.close()
-                # Write the companion .sigmf-meta file now that we know the
-                # total sample count (bytes / 8 bytes per complex64 sample).
                 if self._sigmf_meta is not None and self._active_path:
                     self._sigmf_meta['annotations'] = [{
                         'core:sample_start': 0,
@@ -104,6 +52,70 @@ class RecordDecoder(Decoder):
                     except OSError:
                         pass
             self._file = None
+
+    def process(self, samples: np.ndarray, state: AppState,
+                results: dict = None, sdr=None) -> dict:
+        if not self._recording:
+            return {'recording': False, 'bytes': self._bytes}
+
+        if self._error:
+            return {'error': self._error, 'bytes': self._bytes,
+                    'path': self._active_path, 'mode': self._mode or 'err',
+                    'recording': True}
+
+        # _prev_plugin is injected by main.py's pipeline loop so we always know
+        # the immediately preceding active plugin, not just any upstream result.
+        predecessor = (results or {}).get('_prev_plugin')
+
+        # Open output file(s) on the first call after recording starts.
+        if self._file is None:
+            if predecessor is not None and predecessor.record_ext is not None:
+                self._predecessor = predecessor
+                self._mode        = predecessor.record_ext
+                base = self._path or _default_path(self._mode)
+                self._active_path = base
+                try:
+                    self._file = self._predecessor.record_open(base)
+                except OSError as e:
+                    self._error = str(e)
+                    return {'error': self._error, 'recording': True}
+            else:
+                # Raw IQ → SigMF
+                self._predecessor = None
+                self._mode        = 'sigmf'
+                base = _sigmf_base(self._path or _default_path('sigmf'))
+                self._active_path = base
+                data_path = base + '.sigmf-data'
+                try:
+                    self._file = open(data_path, 'wb')
+                except OSError as e:
+                    self._error = str(e)
+                    return {'error': self._error, 'recording': True}
+                self._sigmf_meta = _build_meta(state)
+
+        # Write one frame.
+        try:
+            if self._predecessor is None:
+                iq = samples.astype(np.complex64)
+                self._file.write(iq.tobytes())
+                self._bytes += iq.nbytes
+            else:
+                pred_result = (results or {}).get(self._predecessor.name)
+                if pred_result is not None:
+                    self._bytes += self._predecessor.record_write(self._file, pred_result)
+        except (OSError, ValueError):
+            pass
+
+        return {
+            'recording': True,
+            'bytes':     self._bytes,
+            'path':      self._active_path,
+            'mode':      self._mode,
+        }
+
+    def stop(self) -> None:
+        self._recording = False
+        self._close_file()
         self._bytes       = 0
         self._active_path = None
         self._error       = None
@@ -112,6 +124,21 @@ class RecordDecoder(Decoder):
         self._sigmf_meta  = None
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
+        if key == ord('e'):
+            if not self._recording:
+                # Reset per-recording state so a fresh file is opened.
+                self._bytes       = 0
+                self._error       = None
+                self._file        = None
+                self._predecessor = None
+                self._mode        = None
+                self._sigmf_meta  = None
+                self._active_path = None
+                self._recording   = True
+            else:
+                self._recording = False
+                self._close_file()
+            return True
         if key == ord('o'):
             state.path_input    = self._path or ''
             plugin = self
@@ -122,6 +149,8 @@ class RecordDecoder(Decoder):
     def status_text(self, state: AppState, result: dict) -> str:
         if not result:
             return ''
+        if not result.get('recording'):
+            return '[REC ready] '
         if 'error' in result:
             return '[REC error: {}] '.format(result['error'][:30])
         mb   = result['bytes'] / 1_048_576
