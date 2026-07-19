@@ -141,6 +141,11 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         if reader[0] and reader[0].is_alive():
             sdr.cancel_read_async()
             reader[0].join(timeout=1.0)
+            # If the old reader is still alive after the timeout, skip this
+            # restart cycle — the main loop will retry on the next iteration
+            # once the reader has had more time to wind down.
+            if reader[0].is_alive():
+                return
         # Set sample rate only after the async read has fully stopped —
         # librtlsdr is not safe to reconfigure while rtlsdr_read_async() runs.
         sdr.sample_rate = state.bw_hz
@@ -156,6 +161,8 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     spec_count  = 0
     last_draw   = 0.0
     last_bw     = state.bw_hz
+    bw_change_t = 0.0          # monotonic time of last bw_hz mutation
+    BW_DEBOUNCE = 0.15         # seconds to wait after last BW keypress before restarting
 
     try:
         while not state.quit:
@@ -197,12 +204,19 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 # with sdr.sample_rate set safely inside _start_reader()
 
             if state.bw_hz != last_bw:
-                last_bw = state.bw_hz
+                # BW changed — flush stale data and arm the debounce timer.
+                # Don't restart the reader yet; rapid keypresses keep pushing
+                # this forward so the reader only restarts once settled.
+                last_bw     = state.bw_hz
+                bw_change_t = time.monotonic()
                 spec_chunks.clear()
                 spec_count = 0
                 wf_rows.clear()
-                iq_deque.clear()   # discard stale samples from old bandwidth
+                iq_deque.clear()
+
+            if bw_change_t and time.monotonic() - bw_change_t >= BW_DEBOUNCE:
                 _start_reader()
+                bw_change_t = 0.0
 
             while iq_deque:
                 try:
