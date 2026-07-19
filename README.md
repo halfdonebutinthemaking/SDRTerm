@@ -495,6 +495,10 @@ plugins/
   range_scan.md        — range-scan plugin documentation
   images/
     02_plugin_fm.png   — FM plugin tab screenshot
+    05_range-scan.png  — range-scan plugin view
+    06_rds.png         — RDS plugin tab screenshot
+    07_peak-marker.png — peak marker plugin tab screenshot
+    08_nrsc.png        — NRSC-5 plugin tab screenshot
 
 devices/
   __init__.py          — auto-discovery loader
