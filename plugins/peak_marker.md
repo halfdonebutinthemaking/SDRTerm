@@ -2,9 +2,9 @@
 
 Marks the strongest signal peak in the visible spectrum and optionally follows or tracks it.
 
-![Peak marker plugin tab](images/07_peak-marker.png) Two operating modes are available.
-
 ![Peak marker in action](images/peak.gif)
+
+Two operating modes are available.
 
 ## Controls
 
