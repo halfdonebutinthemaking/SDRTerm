@@ -338,7 +338,7 @@ class RangeScan(Decoder):
         min_snr    = result.get('min_snr', self._min_snr)
         sort_snr   = result.get('sort_snr', self._sort_snr)
         signals    = result.get('signals', {})
-        cursor     = result.get('cursor', self._cursor)
+        cursor     = self._cursor   # authoritative; updated by handle_key on main thread
 
         now = time.monotonic()
 
@@ -389,7 +389,6 @@ class RangeScan(Decoder):
             cursor = max(0, min(len(sigs) - 1, cursor))
         else:
             cursor = 0
-        self._cursor = cursor
 
         # Scroll so cursor is visible
         scroll = max(0, cursor - body_rows + 1) if body_rows > 0 else 0
