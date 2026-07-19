@@ -16,8 +16,8 @@ Use this mode for wideband scanning software or other tools that need to retune 
 
 ## Difference from passive server
 
-| | Passive (`t`) | Active (`u`) |
-|-|--------------|--------------|
+| | Passive | Active |
+|-|---------|--------|
 | IQ stream to client | yes | yes |
 | Client can retune hardware | no | yes |
 | SDRTerm retains control | yes | no (client drives) |
