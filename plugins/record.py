@@ -162,8 +162,13 @@ class RecordDecoder(Decoder):
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
+_SAMPLES_DIR = 'samples'
+
+
 def _default_path(ext: str) -> str:
-    return 'sdrterm_{}.{}'.format(datetime.now().strftime('%d-%m-%Y_%H%M%S'), ext)
+    os.makedirs(_SAMPLES_DIR, exist_ok=True)
+    return os.path.join(_SAMPLES_DIR,
+                        'sdrterm_{}.{}'.format(datetime.now().strftime('%d-%m-%Y_%H%M%S'), ext))
 
 
 def _sigmf_base(path: str) -> str:

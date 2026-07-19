@@ -487,6 +487,9 @@ fix_venv.py            — re-applies venv compatibility patches after uv sync -
 pyproject.toml         — project metadata and dependencies
 uv.lock                — locked dependency versions
 
+presets/               — saved .sdrterm preset files (auto-created on first save)
+samples/               — recorded IQ / SigMF files (auto-created on first recording)
+
 scripts/
   gen_doppler_test.py  — generates a synthetic LEO Doppler SigMF test file (±20 kHz, 10 s)
   diag_nrsc5.py        — standalone NRSC-5 diagnostic script (CFO, sync, Viterbi pipeline)
@@ -517,6 +520,8 @@ plugins/
     06_rds.png         — RDS plugin tab screenshot
     07_peak-marker.png — peak marker plugin tab screenshot
     08_nrsc.png        — NRSC-5 plugin tab screenshot
+    range.gif          — range-scan in action
+    peak.gif           — peak marker in action
 
 devices/
   __init__.py          — auto-discovery loader

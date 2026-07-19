@@ -11,9 +11,13 @@ _PRESET_FIELDS = (
 )
 
 
+_PRESET_DIR = 'presets'
+
+
 def _preset_default_name() -> str:
-    return 'preset_{}.sdrterm'.format(
-        datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
+    os.makedirs(_PRESET_DIR, exist_ok=True)
+    return os.path.join(_PRESET_DIR, 'preset_{}.sdrterm'.format(
+        datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')))
 
 
 def _migrate_preset(data: dict) -> dict:
@@ -69,7 +73,7 @@ def _load_preset(path: str, state: AppState, plugins: list = None) -> bool:
 
 
 def _find_presets() -> list:
-    return sorted(glob.glob('*.sdrterm'))
+    return sorted(glob.glob(os.path.join(_PRESET_DIR, '*.sdrterm')))
 
 
 def _apply_preset(path: str, state: AppState, registry: dict, sdr,
