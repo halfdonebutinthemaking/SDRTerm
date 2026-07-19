@@ -131,6 +131,11 @@ class Decoder:
             self._debug_lines = deque(maxlen=1000)
         self._debug_lines.append(msg)
 
+    # persistent state hooks — implement to let the preset system serialise
+    # per-plugin settings without storing them on AppState.
+    def save_state(self) -> dict:  return {}
+    def load_state(self, d: dict) -> None: pass
+
     # recording hooks — implement to make this plugin's output recordable by
     # the record plugin.  record_ext=None means "not recordable".
     record_ext: Optional[str] = None
@@ -176,7 +181,7 @@ class Device:
 def _required_bw(names: set, registry: dict) -> int:
     if not names:
         return 0
-    return max(registry[n].min_sample_rate for n in names)
+    return max((registry[n].min_sample_rate for n in names if n in registry), default=0)
 
 
 def _nearest_bw(rate: int, supported: list) -> int:
