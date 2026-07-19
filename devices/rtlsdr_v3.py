@@ -9,6 +9,8 @@ class RtlSdrDevice(Device):
     name                 = 'RTL-SDR-V3'
     key_help             = 'b=bias-tee'
     supported_bandwidths = _RTL_BW
+    freq_min             = 25_000_000.0      # 25 MHz
+    freq_max             = 1_766_000_000.0   # 1766 MHz
 
     def __init__(self):
         self._sdr      = None

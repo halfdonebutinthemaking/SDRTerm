@@ -55,6 +55,7 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
 _PRESET_FIELDS = (
     'center_hz', 'bw_hz', 'gain_db', 'gain_auto', 'iq_corr',
     'fm_bw_hz', 'nrsc5_sc_outer', 'waterfall_active', 'active_decoders',
+    'scan_freq_min', 'scan_freq_max',
 )
 
 
@@ -200,6 +201,54 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
         _draw_debug_console(screen_obj, state, registry[state.debug_console])
         return
 
+    # Full-view plugin: bypass spectrum rendering, hand all content to the plugin
+    if state.tab_idx > 0 and state.tab_idx <= len(tab_plugins):
+        _fv = tab_plugins[state.tab_idx - 1]
+        if _fv.full_view:
+            ROWS, COLS = screen_obj.getmaxyx()
+            screen_obj.erase()
+            _fv.draw_full(screen_obj, state, results.get(_fv.name) or {}, ROWS, COLS)
+            _fv_res = results.get(_fv.name) or {}
+            try:
+                if state.freq_input is not None:
+                    prompt = 'Freq: {}_'.format(state.freq_input)
+                    screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+                    screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
+                elif state.path_input is not None:
+                    prompt = '{}: {}_'.format(state.path_input_label, state.path_input)
+                    screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+                    screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
+                else:
+                    ctx = '[{}]'.format(_fv.name)
+                    screen_obj.addstr(ROWS - 1, 0, ctx, curses.A_BOLD)
+                    _fv_col = len(ctx) + 1
+                    _fv_text = _fv.status_text(state, _fv_res)
+                    if _fv_text:
+                        screen_obj.addstr(ROWS - 1, _fv_col, _fv_text, curses.A_BOLD)
+                        _fv_col += len(_fv_text)
+                    _fv_parts = ['x=discard', 'd=debug']
+                    if _fv.key_help:
+                        _fv_parts.append(_fv.key_help)
+                    _fv_parts += ['f=freq', 'q=quit']
+                    _fv_rhs = '  '.join(_fv_parts)
+                    screen_obj.addstr(ROWS - 1, COLS - len(_fv_rhs) - 1, _fv_rhs)
+            except curses.error:
+                pass
+            if state.menu_active is not None:
+                _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS)
+            if state.preset_menu is not None:
+                _draw_preset_menu(screen_obj, state, ROWS, COLS)
+            if time.monotonic() < state.flash_until and state.flash_msg:
+                _fv_msg = '  {}  '.format(state.flash_msg)
+                _fv_x   = max(0, (COLS - len(_fv_msg)) // 2)
+                try:
+                    screen_obj.addstr(ROWS - 1, _fv_x, _fv_msg[:COLS - _fv_x],
+                                      curses.A_REVERSE | curses.A_BOLD)
+                except curses.error:
+                    pass
+            screen_obj.refresh()
+            return
+
     sp = results.get('spectrum')
     if sp is None:
         return
@@ -307,7 +356,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
         elif state.path_input is not None:
-            prompt = 'Path: {}_'.format(state.path_input)
+            prompt = '{}: {}_'.format(state.path_input_label, state.path_input)
             screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
             screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
 
@@ -489,7 +538,9 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
     # ── path input modal ─────────────────────────────────────────────────────
     if state.path_input is not None:
         if key == 27:
-            state.path_input = state.path_input_target = None
+            state.path_input        = None
+            state.path_input_target = None
+            state.path_input_label  = 'Path'
         elif key in (10, 13, curses.KEY_ENTER):
             if state.path_input_target == '__preset__':
                 if state.path_input:
@@ -497,11 +548,20 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
                     state.flash_msg   = ('loaded: ' + os.path.basename(state.path_input)) \
                                          if ok else 'cannot load: ' + state.path_input
                     state.flash_until = time.monotonic() + 2.0
+            elif state.path_input_target in ('range-scan-min', 'range-scan-max'):
+                parsed = parse_freq(state.path_input)
+                if parsed is not None:
+                    if state.path_input_target == 'range-scan-min':
+                        state.scan_freq_min = parsed
+                    else:
+                        state.scan_freq_max = parsed
             else:
                 target = registry.get(state.path_input_target)
                 if target and hasattr(target, 'set_path'):
                     target.set_path(state.path_input or None)
-            state.path_input = state.path_input_target = None
+            state.path_input        = None
+            state.path_input_target = None
+            state.path_input_label  = 'Path'
         elif key in (curses.KEY_BACKSPACE, 127, 8):
             state.path_input = state.path_input[:-1]
         elif 32 <= key <= 126:

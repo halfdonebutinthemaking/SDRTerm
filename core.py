@@ -93,6 +93,9 @@ class AppState:
     preset_cursor:     int             = 0
     save_input:        Optional[str]   = None  # None=closed; str=filename (or "?:"+path for overwrite confirm)
     plugin_order:      list            = field(default_factory=list)  # plugin name order from last preset
+    scan_freq_min:     float           = 0.0   # range-scan lower bound (0 = derive from device)
+    scan_freq_max:     float           = 0.0   # range-scan upper bound (0 = derive from device)
+    path_input_label:  str             = 'Path'  # prompt label shown in path_input modal
 
 
 # ── Decoder base ──────────────────────────────────────────────────────────────
@@ -104,6 +107,7 @@ class Decoder:
     realtime:        bool = True   # False → process() runs in a background worker thread
     bg_queue_depth:  int  = 4     # chunks buffered before dropping (only used when realtime=False)
     priority:        int  = 0     # higher → runs earlier in the realtime pass; bg plugins ignore this
+    full_view:       bool = False  # True → plugin replaces the spectrum/waterfall body entirely
 
     def start(self, state: AppState) -> None:       pass
     def process(self, samples: np.ndarray, state: AppState,
@@ -116,6 +120,8 @@ class Decoder:
     def draw_overlay(self, screen_obj, state: AppState, result: dict,
                      freq_min: float, freq_range: float,
                      plot_w: int, height: int) -> None:   pass
+    def draw_full(self, screen_obj, state: AppState, result: dict,
+                  rows: int, cols: int) -> None:          pass
 
     # per-instance debug ring buffer — write with self._dbg(msg)
     _debug_lines: object = None  # deque, lazily initialised on first _dbg() call
@@ -148,10 +154,15 @@ class Device:
     supported_bandwidths — bandwidths (Hz) the device can operate at, in
       ascending order.  The BW up/down toggle steps through this list only.
       Defaults to BW_STEPS so devices that don't override it keep working.
+
+    freq_min / freq_max — tunable range (Hz). 0 = unknown. Used by range-scan
+      to derive default scan limits when none are configured.
     """
-    name:                str  = ''
-    key_help:            str  = ''
-    supported_bandwidths: list = BW_STEPS
+    name:                str   = ''
+    key_help:            str   = ''
+    supported_bandwidths: list  = BW_STEPS
+    freq_min:            float = 0.0
+    freq_max:            float = 0.0
 
     def open(self) -> bool:             return False
     def close(self) -> None:            pass
