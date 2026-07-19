@@ -1,6 +1,8 @@
 # range-scan — Frequency Range Scanner
 
-Stepped scan across a configurable frequency range. Tunes the SDR through the range step by step, accumulates FFT power at each position, detects signal peaks by SNR, and presents a live list of found signals. Navigate the list and press return to tune to any signal.
+Stepped scan across a configurable frequency range.
+
+![Range scan plugin view](images/05_range-scan.png) Tunes the SDR through the range step by step, accumulates FFT power at each position, detects signal peaks by SNR, and presents a live list of found signals. Navigate the list and press return to tune to any signal.
 
 ## Controls
 

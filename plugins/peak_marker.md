@@ -1,6 +1,8 @@
 # peak_marker — Peak Frequency Marker
 
-Marks the strongest signal peak in the visible spectrum and optionally follows or tracks it. Two operating modes are available.
+Marks the strongest signal peak in the visible spectrum and optionally follows or tracks it.
+
+![Peak marker plugin tab](images/07_peak-marker.png) Two operating modes are available.
 
 ## Controls
 
