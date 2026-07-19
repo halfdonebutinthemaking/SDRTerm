@@ -178,11 +178,6 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         state.quit = True
         return
 
-    if key in (ord('f'), ord('F')):
-        state.freq_input = ''
-        redraw()
-        return
-
     if key == 9:                                  # tab — cycle context
         n_tabs = 1 + len(tab_plugins)
         state.tab_idx = (state.tab_idx + 1) % n_tabs
@@ -202,7 +197,8 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         redraw()
         return
 
-    # ── plugin-specific keys (plugin tab only, checked before global keys) ────
+    # ── plugin-specific keys (checked before global keys so plugins can
+    #    override globals like f/F when their tab is active) ───────────────────
     if state.tab_idx > 0:
         plugin = tab_plugins[state.tab_idx - 1]
         if key == ord('x'):
@@ -218,6 +214,11 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         if plugin.handle_key(key, state, sdr):
             redraw()
             return
+
+    if key in (ord('f'), ord('F')):
+        state.freq_input = ''
+        redraw()
+        return
 
     # ── global parameter keys — active on every tab ───────────────────────────
     if key in (ord('a'), ord('A')):

@@ -8,7 +8,7 @@ from core import Decoder, AppState
 class RecordDecoder(Decoder):
     name            = 'record'
     key             = 'r'
-    key_help        = 'e=rec/stop  o=path'
+    key_help        = 'e=rec/stop  f=fmt  o=path'
     min_sample_rate = 250_000
 
     def __init__(self):
@@ -16,11 +16,12 @@ class RecordDecoder(Decoder):
         self._active_path = None   # base path (no extension) while recording
         self._file        = None   # open data file handle
         self._predecessor = None   # plugin whose hooks we delegate to; None = raw IQ
-        self._mode        = None   # 'sigmf' or the predecessor's record_ext string
+        self._mode        = None   # 'sigmf', 'iq', or the predecessor's record_ext string
         self._bytes       = 0
         self._error       = None
         self._sigmf_meta  = None   # dict written to .sigmf-meta on close
         self._recording   = False  # idle until user presses e
+        self._format      = 'sigmf'  # raw-IQ format: 'sigmf' or 'iq'
 
     def set_path(self, path):
         self._path = path or None
@@ -56,7 +57,7 @@ class RecordDecoder(Decoder):
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
         if not self._recording:
-            return {'recording': False, 'bytes': self._bytes}
+            return {'recording': False, 'bytes': self._bytes, 'fmt': self._format}
 
         if self._error:
             return {'error': self._error, 'bytes': self._bytes,
@@ -79,8 +80,20 @@ class RecordDecoder(Decoder):
                 except OSError as e:
                     self._error = str(e)
                     return {'error': self._error, 'recording': True}
+            elif self._format == 'iq':
+                # Raw IQ → plain .iq file, no companion metadata
+                self._predecessor = None
+                self._mode        = 'iq'
+                path = self._path or _default_path('iq')
+                self._active_path = path
+                try:
+                    self._file = open(path, 'wb')
+                except OSError as e:
+                    self._error = str(e)
+                    return {'error': self._error, 'recording': True}
+                self._sigmf_meta = None
             else:
-                # Raw IQ → SigMF
+                # Raw IQ → SigMF (.sigmf-data + .sigmf-meta)
                 self._predecessor = None
                 self._mode        = 'sigmf'
                 base = _sigmf_base(self._path or _default_path('sigmf'))
@@ -139,6 +152,10 @@ class RecordDecoder(Decoder):
                 self._recording = False
                 self._close_file()
             return True
+        if key == ord('f'):
+            if not self._recording:
+                self._format = 'iq' if self._format == 'sigmf' else 'sigmf'
+            return True
         if key == ord('o'):
             state.path_input    = self._path or ''
             plugin = self
@@ -150,7 +167,7 @@ class RecordDecoder(Decoder):
         if not result:
             return ''
         if not result.get('recording'):
-            return '[REC ready] '
+            return '[REC ready·{}] '.format(result.get('fmt', 'sigmf'))
         if 'error' in result:
             return '[REC error: {}] '.format(result['error'][:30])
         mb   = result['bytes'] / 1_048_576
