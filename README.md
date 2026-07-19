@@ -4,7 +4,7 @@
 
 Most SDR tools are GUI applications that require a display server, or narrow command-line tools that do one thing without interactivity. SDRTerm fills the gap: a live RF spectrum analyser that runs entirely in the terminal, with real-time controls and a plugin pipeline for signal decoding.
 
-No display server. No framework. SSH into a headless box, connect an RTL-SDR dongle, and see the spectrum.
+No display server. No framework. SSH into a headless box, connect a supported device, and see the spectrum.
 
 **What it does:**
 - Live dBFS spectrum and waterfall, rendered in the terminal with curses
@@ -99,7 +99,7 @@ Press `v` to switch between **spectrum** (bar chart) and **waterfall** (scrollin
 | `i` | Toggle software IQ correction on/off |
 | `v` | Toggle between spectrum (bar chart) and waterfall (scrolling time-frequency) views |
 | `p` | Open plugin menu — `↑`/`↓` navigate, `space` stage toggle, `<`/`>` reorder pipeline, `ret` apply, `esc` cancel |
-| `b` | Toggle bias-tee on/off (RTL-SDR V3 only, when hardware supports it) |
+| `b` | Device-specific toggle — bias-tee on RTL-SDR V3, RF amplifier on HackRF (shown in footer) |
 
 ### Plugin tabs (all plugins)
 
@@ -297,46 +297,15 @@ class MyDecoder(Decoder):
 
 Hardware drivers live in `devices/`. Each file that contains a `Device` subclass with a non-empty `name` is discovered automatically.
 
-```
-devices/
-  rtlsdr_v3.py   — RTL-SDR V3 dongle (pyrtlsdr)
-  hackrf.py      — HackRF One (pyhackrf / libhackrf)
-  localfile.py   — IQ file replay (raw complex64 .iq or stereo .wav)
-  __init__.py    — auto-discovery loader
-```
+| Device | Description | Docs |
+|--------|-------------|------|
+| `RTL-SDR-V3` | RTL-SDR V3 dongle — 25 MHz–1766 MHz, up to 2.4 MSPS | [rtlsdr_v3.md](devices/rtlsdr_v3.md) |
+| `HackRF` | HackRF One — 1 MHz–6 GHz, up to 20 MSPS | [hackrf.md](devices/hackrf.md) |
+| `localfile` | IQ file replay — raw `.iq`, WAV, SigMF | [localfile.md](devices/localfile.md) |
 
 The application tries each discovered device in filename order and opens the first one that succeeds. `--d NAME` selects a specific driver by name (case-insensitive). `--file PATH` selects the `localfile` device directly.
 
-### localfile device
-
-Replays an IQ file as if it were live hardware. The file loops continuously. Two formats are supported:
-
-| Format | Extension | Layout | Sample rate | Centre frequency |
-|--------|-----------|--------|-------------|-----------------|
-| Raw IQ | `.iq` | Raw `complex64` binary | Must be supplied via `--bw` | Must be supplied via `--f` |
-| WAV IQ | `.wav` | Stereo PCM (int16 / int32 / float32); left = I, right = Q | Read from WAV header automatically | Must be supplied via `--f` |
-| SigMF  | `.sigmf-data` / `.sigmf` | Raw `cf32_le` binary + JSON metadata sidecar | Read from `.sigmf-meta` | Read from `.sigmf-meta`; follow mode works without `--f` |
-
-```bash
-# Raw IQ file — supply sample rate and centre frequency explicitly
-uv run python main.py --file recording.iq --bw 2.4M --f 105.8M
-
-# WAV IQ file — sample rate comes from the file header
-uv run python main.py --file recording.wav --f 105.8M
-
-# SigMF file — sample rate and centre frequency are read from the sidecar
-uv run python main.py --file recording.sigmf-data
-```
-
-A synthetic Doppler test signal in SigMF format can be generated with `gen_doppler_test.py`:
-
-```bash
-uv run python scripts/gen_doppler_test.py  # writes doppler_test.sigmf-data/.sigmf-meta
-uv run python main.py --file doppler_test.sigmf-data
-# Enable peak_marker (k), go to its tab, press t — follow mode chases the drift
-```
-
-Pacing uses a monotonic deadline so the replay rate stays accurate regardless of processing time. Raw `.iq` files are memory-mapped (`np.memmap`) so large files do not load into RAM; WAV files are loaded fully into memory on open.
+See [localfile.md](devices/localfile.md) for supported formats, filename frequency parsing, and usage examples.
 
 ### Writing a device driver
 
@@ -506,8 +475,11 @@ plugins/
 devices/
   __init__.py          — auto-discovery loader
   rtlsdr_v3.py         — RTL-SDR V3 driver (pyrtlsdr)
+  rtlsdr_v3.md         — RTL-SDR V3 device documentation
   hackrf.py            — HackRF One driver (pyhackrf / libhackrf)
+  hackrf.md            — HackRF One device documentation
   localfile.py         — IQ file replay device (raw complex64, memory-mapped)
+  localfile.md         — localfile device documentation
 
 images/
   running.gif          — live spectrum animation
