@@ -4,7 +4,7 @@ Stepped scan across a configurable frequency range.
 
 ![Range scan plugin view](images/05_range-scan.png) Tunes the SDR through the range step by step, accumulates FFT power at each position, detects signal peaks by SNR, and presents a live list of found signals. Navigate the list and press return to tune to any signal.
 
-![Range scan in action](../images/range.gif)
+![Range scan in action](images/range.gif)
 
 ## Controls
 

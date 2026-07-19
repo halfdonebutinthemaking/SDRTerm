@@ -4,7 +4,7 @@ Marks the strongest signal peak in the visible spectrum and optionally follows o
 
 ![Peak marker plugin tab](images/07_peak-marker.png) Two operating modes are available.
 
-![Peak marker in action](../images/peak.gif)
+![Peak marker in action](images/peak.gif)
 
 ## Controls
 
