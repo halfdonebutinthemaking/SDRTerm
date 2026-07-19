@@ -218,51 +218,68 @@ class TestBandwidthStepping:
 # ── path input modal ──────────────────────────────────────────────────────────
 
 class TestPathInputModal:
-    def test_enter_sets_scan_freq_min(self, ctx):
+    def test_enter_calls_callback_with_input(self, ctx):
+        received = []
         ctx['state'].path_input = '88M'
-        ctx['state'].path_input_target = 'range-scan-min'
+        ctx['state'].path_input_cb = lambda val: received.append(val)
         press(10, ctx)
-        assert ctx['state'].scan_freq_min == pytest.approx(88e6)
+        assert received == ['88M']
+
+    def test_enter_clears_path_input(self, ctx):
+        ctx['state'].path_input = '88M'
+        ctx['state'].path_input_cb = lambda val: None
+        press(10, ctx)
         assert ctx['state'].path_input is None
 
-    def test_enter_sets_scan_freq_max(self, ctx):
-        ctx['state'].path_input = '108M'
-        ctx['state'].path_input_target = 'range-scan-max'
+    def test_enter_clears_callback(self, ctx):
+        ctx['state'].path_input = '88M'
+        ctx['state'].path_input_cb = lambda val: None
         press(10, ctx)
-        assert ctx['state'].scan_freq_max == pytest.approx(108e6)
+        assert ctx['state'].path_input_cb is None
+
+    def test_esc_does_not_call_callback(self, ctx):
+        called = []
+        ctx['state'].path_input = 'anything'
+        ctx['state'].path_input_cb = lambda val: called.append(val)
+        press(27, ctx)
+        assert called == []
+
+    def test_esc_clears_path_input(self, ctx):
+        ctx['state'].path_input = 'anything'
+        ctx['state'].path_input_cb = lambda val: None
+        press(27, ctx)
+        assert ctx['state'].path_input is None
 
     def test_esc_resets_label_to_default(self, ctx):
         ctx['state'].path_input = 'anything'
-        ctx['state'].path_input_target = 'range-scan-min'
+        ctx['state'].path_input_cb = lambda val: None
         ctx['state'].path_input_label = 'Scan min freq'
         press(27, ctx)
         assert ctx['state'].path_input_label == 'Path'
-        assert ctx['state'].path_input is None
 
     def test_enter_resets_label_to_default(self, ctx):
         ctx['state'].path_input = '88M'
-        ctx['state'].path_input_target = 'range-scan-min'
+        ctx['state'].path_input_cb = lambda val: None
         ctx['state'].path_input_label = 'Scan min freq'
         press(10, ctx)
         assert ctx['state'].path_input_label == 'Path'
 
-    def test_invalid_freq_does_not_update_scan_min(self, ctx):
-        original = ctx['state'].scan_freq_min
-        ctx['state'].path_input = 'notafreq'
-        ctx['state'].path_input_target = 'range-scan-min'
+    def test_no_callback_enter_still_clears(self, ctx):
+        ctx['state'].path_input = '88M'
+        ctx['state'].path_input_cb = None
         press(10, ctx)
-        assert ctx['state'].scan_freq_min == original
+        assert ctx['state'].path_input is None
 
     def test_characters_appended(self, ctx):
         ctx['state'].path_input = ''
-        ctx['state'].path_input_target = 'range-scan-min'
+        ctx['state'].path_input_cb = lambda val: None
         for ch in '88M':
             press(ord(ch), ctx)
         assert ctx['state'].path_input == '88M'
 
     def test_backspace_removes_char(self, ctx):
         ctx['state'].path_input = '88M'
-        ctx['state'].path_input_target = 'range-scan-min'
+        ctx['state'].path_input_cb = lambda val: None
         press(curses.KEY_BACKSPACE, ctx)
         assert ctx['state'].path_input == '88'
 

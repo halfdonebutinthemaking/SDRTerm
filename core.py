@@ -1,7 +1,7 @@
 import numpy as np
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
 
 # ── constants ─────────────────────────────────────────────────────────────────
 CENTER_HZ  = 105.8e6
@@ -79,9 +79,9 @@ class AppState:
     tab_idx:           int           = 0     # 0=core, N=Nth enabled plugin
     menu_cursor:       int           = 0
     menu_active:       Optional[set] = None  # None=closed; set=pending enabled set
-    path_input:        Optional[str] = None  # None=closed; str=collecting input
-    path_input_target: Optional[str] = None  # plugin name that opened the input
-    debug_console:     Optional[str] = None  # plugin name of open console, or None
+    path_input:        Optional[str]      = None  # None=closed; str=collecting input
+    path_input_cb:     Optional[Callable] = None  # called with input string on confirm
+    debug_console:     Optional[str]      = None  # plugin name of open console, or None
     debug_scroll:      int           = 0     # lines scrolled from tail (0 = tail)
     pending_sr:        Optional[int]   = None  # sample-rate change queued by active plugin
     pending_freq:      Optional[float] = None  # frequency change queued by active plugin
@@ -93,8 +93,6 @@ class AppState:
     preset_cursor:     int             = 0
     save_input:        Optional[str]   = None  # None=closed; str=filename (or "?:"+path for overwrite confirm)
     plugin_order:      list            = field(default_factory=list)  # plugin name order from last preset
-    scan_freq_min:     float           = 0.0   # range-scan lower bound (0 = derive from device)
-    scan_freq_max:     float           = 0.0   # range-scan upper bound (0 = derive from device)
     path_input_label:  str             = 'Path'  # prompt label shown in path_input modal
 
 

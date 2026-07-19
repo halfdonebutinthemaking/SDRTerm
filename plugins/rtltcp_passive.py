@@ -158,8 +158,9 @@ class RtlTcpPassiveDecoder(Decoder):
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
         if key == ord('o'):
-            state.path_input        = str(self._port)
-            state.path_input_target = self.name
+            state.path_input    = str(self._port)
+            plugin = self
+            state.path_input_cb = lambda val: plugin.set_path(val or None)
             return True
         return False
 

@@ -56,14 +56,6 @@ class TestPresetRoundtrip:
         s2 = _round_trip(state)
         assert 'fm' in s2.active_decoders
 
-    def test_scan_freq_min(self, state):
-        state.scan_freq_min = 88e6
-        assert _round_trip(state).scan_freq_min == pytest.approx(88e6)
-
-    def test_scan_freq_max(self, state):
-        state.scan_freq_max = 108e6
-        assert _round_trip(state).scan_freq_max == pytest.approx(108e6)
-
 
 # ── invariants ────────────────────────────────────────────────────────────────
 
@@ -111,6 +103,74 @@ class TestPresetInvariants:
             assert 'fm' in data['plugin_order']
         finally:
             os.unlink(path)
+
+    def test_version_written(self, state):
+        with tempfile.NamedTemporaryFile(suffix='.sdrterm', delete=False, mode='w') as f:
+            path = f.name
+        try:
+            _save_preset_to(path, state, [])
+            with open(path) as fh:
+                data = json.load(fh)
+            assert data.get('version') == 1
+        finally:
+            os.unlink(path)
+
+    def test_plugin_states_written_for_plugins_with_state(self, state):
+        from plugins.range_scan import RangeScan
+        p = RangeScan()
+        p._scan_freq_min = 88e6
+        with tempfile.NamedTemporaryFile(suffix='.sdrterm', delete=False, mode='w') as f:
+            path = f.name
+        try:
+            _save_preset_to(path, state, [p])
+            with open(path) as fh:
+                data = json.load(fh)
+            assert 'plugin_states' in data
+            assert data['plugin_states']['range-scan']['scan_freq_min'] == pytest.approx(88e6)
+        finally:
+            os.unlink(path)
+
+    def test_plugin_states_loaded_on_load(self, state):
+        from plugins.range_scan import RangeScan
+        p = RangeScan()
+        p._scan_freq_min = 88e6
+        p._scan_freq_max = 108e6
+        with tempfile.NamedTemporaryFile(suffix='.sdrterm', delete=False, mode='w') as f:
+            path = f.name
+        try:
+            _save_preset_to(path, state, [p])
+            p2 = RangeScan()
+            _load_preset(path, AppState(), [p2])
+            assert p2._scan_freq_min == pytest.approx(88e6)
+            assert p2._scan_freq_max == pytest.approx(108e6)
+        finally:
+            os.unlink(path)
+
+
+# ── preset migration ──────────────────────────────────────────────────────────
+
+class TestPresetMigration:
+    def test_v0_scan_freq_migrated_to_plugin_states(self, state):
+        from main import _migrate_preset
+        data = {'center_hz': 100e6, 'scan_freq_min': 88e6, 'scan_freq_max': 108e6}
+        out = _migrate_preset(data)
+        assert 'scan_freq_min' not in out
+        assert out['plugin_states']['range-scan']['scan_freq_min'] == pytest.approx(88e6)
+        assert out['plugin_states']['range-scan']['scan_freq_max'] == pytest.approx(108e6)
+        assert out['version'] == 1
+
+    def test_v1_not_migrated_again(self, state):
+        from main import _migrate_preset
+        data = {'version': 1, 'center_hz': 100e6}
+        out = _migrate_preset(data)
+        assert 'plugin_states' not in out   # nothing added
+
+    def test_v0_without_scan_freq_still_upgrades_version(self, state):
+        from main import _migrate_preset
+        data = {'center_hz': 100e6}
+        out = _migrate_preset(data)
+        assert out['version'] == 1
+        assert 'plugin_states' not in out
 
 
 # ── error handling ────────────────────────────────────────────────────────────

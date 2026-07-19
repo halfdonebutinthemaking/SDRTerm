@@ -113,8 +113,9 @@ class RecordDecoder(Decoder):
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
         if key == ord('o'):
-            state.path_input        = self._path or ''
-            state.path_input_target = self.name
+            state.path_input    = self._path or ''
+            plugin = self
+            state.path_input_cb = lambda val: plugin.set_path(val or None)
             return True
         return False
 
