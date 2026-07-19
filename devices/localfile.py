@@ -165,6 +165,10 @@ class LocalFileDevice(Device):
 
     # ── async reader ──────────────────────────────────────────────────────────
     def read_samples_async(self, callback, num_samples: int = 16_384) -> None:
+        # Ensure any previous _run thread has stopped before clearing the
+        # event; otherwise it may see the cleared flag and run past its cancel.
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
         self._stop_evt.clear()
         pace_sr  = self._file_sr
         interval = num_samples / pace_sr

@@ -169,6 +169,7 @@ class Device:
 
     def open(self) -> bool:             return False
     def close(self) -> None:            pass
+    def reopen(self) -> None:           self.close(); self.open()
     def read_samples_async(self, callback, num_samples: int) -> None: pass
     def cancel_read_async(self) -> None: pass
     def handle_key(self, key: int, state: 'AppState') -> bool: return False

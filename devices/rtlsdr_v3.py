@@ -30,6 +30,20 @@ class RtlSdrDevice(Device):
         if self._sdr:
             self._sdr.close()
 
+    def reopen(self) -> None:
+        # Close and reopen to get a fresh librtlsdr/libusb handle.
+        # On macOS, calling rtlsdr_read_async() on a handle that just ran an
+        # async read leaves lingering IOKit transfer state that causes SIGABRT.
+        # A full close+open is the only reliable way to clear it.
+        bias = self._bias_tee
+        self.close()
+        self.open()
+        if bias and self._has_bias_tee:
+            try:
+                self._sdr.set_bias_tee(True)
+            except Exception:
+                self._bias_tee = False
+
     @property
     def sample_rate(self):
         return self._sdr.sample_rate

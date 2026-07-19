@@ -140,14 +140,18 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     def _start_reader():
         if reader[0] and reader[0].is_alive():
             sdr.cancel_read_async()
-            reader[0].join(timeout=1.0)
-            # If the old reader is still alive after the timeout, skip this
-            # restart cycle — the main loop will retry on the next iteration
-            # once the reader has had more time to wind down.
+            reader[0].join(timeout=2.0)
             if reader[0].is_alive():
+                # Async read didn't stop in time — skip and let the debounce
+                # timer retry on the next loop iteration.
                 return
-        # Set sample rate only after the async read has fully stopped —
-        # librtlsdr is not safe to reconfigure while rtlsdr_read_async() runs.
+            # Reopen the device to get a clean C-level handle.  On macOS,
+            # libusb/IOKit leaves lingering USB transfer state after
+            # rtlsdr_read_async() returns; reusing the same handle for the
+            # next call causes SIGABRT.  close()+open() is the safe path.
+            sdr.reopen()
+            sdr.center_freq = state.center_hz
+            sdr.gain        = 'auto' if state.gain_auto else state.gain_db
         sdr.sample_rate = state.bw_hz
         def _run():
             sdr.read_samples_async(_sdr_cb, num_samples=READ_MAX)
@@ -215,8 +219,13 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 iq_deque.clear()
 
             if bw_change_t and time.monotonic() - bw_change_t >= BW_DEBOUNCE:
+                before = reader[0]
                 _start_reader()
-                bw_change_t = 0.0
+                if reader[0] is not before:
+                    # new reader was started — debounce satisfied
+                    bw_change_t = 0.0
+                # else: old reader still alive after timeout; keep bw_change_t
+                # set so the main loop retries on the next tick
 
             while iq_deque:
                 try:
