@@ -1,3 +1,4 @@
+import json
 import os
 import numpy as np
 from scipy.signal import decimate as sp_decimate
@@ -5,10 +6,24 @@ from core import Decoder, AppState
 
 _MODEL_SR      = 200_000   # Hz — sample rate the model was trained at
 _MODEL_SAMPLES = 1_024
-_MODEL_PATH    = os.path.join(os.path.dirname(__file__), '..', 'models',
-                              'modclass_lite.onnx')
-_LABELS   = ['OOK', 'AM-DSB', 'WBFM', 'BPSK', 'QPSK', '8PSK', 'QAM16', 'FSK']
-_N_CLS    = len(_LABELS)
+_MODELS_DIR    = os.path.join(os.path.dirname(__file__), '..', 'models')
+_MODEL_PATH    = os.path.join(_MODELS_DIR, 'modclass_lite.onnx')
+_LABELS_PATH   = os.path.join(_MODELS_DIR, 'modclass_labels.json')
+
+# Fallback label list used when no JSON sidecar exists (synthetic-trained model)
+_FALLBACK_LABELS = ['OOK', 'AM-DSB', 'WBFM', 'BPSK', 'QPSK', '8PSK', 'QAM16', 'FSK']
+
+
+def _load_labels() -> list[str]:
+    try:
+        with open(_LABELS_PATH) as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return _FALLBACK_LABELS
+
+
+_LABELS = _load_labels()
+_N_CLS  = len(_LABELS)
 
 # Minimum peak power (dBFS) and confidence to display a result
 _MIN_DB   = -70.0
@@ -48,6 +63,9 @@ class ModClassDecoder(Decoder):
         self._smoothed_probs = None
         self._raw_probs      = None
         self._error          = None
+        # Reload labels in case the model was retrained since import
+        self._labels = _load_labels()
+        self._n_cls  = len(self._labels)
         try:
             import onnxruntime as ort
             opts = ort.SessionOptions()
@@ -106,7 +124,8 @@ class ModClassDecoder(Decoder):
         prev_hz = self._peak_hz
         if (self._smoothed_probs is None
                 or prev_hz is None
-                or abs(peak_hz - prev_hz) > _RESET_HZ):
+                or abs(peak_hz - prev_hz) > _RESET_HZ
+                or len(self._smoothed_probs) != self._n_cls):
             self._smoothed_probs = raw_probs.copy()
         else:
             self._smoothed_probs = (_EMA_ALPHA * raw_probs
@@ -117,20 +136,20 @@ class ModClassDecoder(Decoder):
         idx  = int(np.argmax(self._smoothed_probs))
         conf = float(self._smoothed_probs[idx])
 
-        self._label = _LABELS[idx] if conf >= self._threshold else None
+        self._label = self._labels[idx] if conf >= self._threshold else None
         self._conf  = conf
-        self._dbg(f'{peak_hz/1e6:.3f} MHz → {_LABELS[idx]} {conf:.2f} '
-                  f'(raw {_LABELS[int(np.argmax(raw_probs))]} '
+        self._dbg(f'{peak_hz/1e6:.3f} MHz → {self._labels[idx]} {conf:.2f} '
+                  f'(raw {self._labels[int(np.argmax(raw_probs))]} '
                   f'{float(raw_probs.max()):.2f})')
 
         return {
             'label':      self._label,
             'conf':       self._conf,
             'peak_hz':    self._peak_hz,
-            'smoothed':   {_LABELS[i]: float(self._smoothed_probs[i])
-                           for i in range(_N_CLS)},
-            'raw':        {_LABELS[i]: float(raw_probs[i])
-                           for i in range(_N_CLS)},
+            'smoothed':   {self._labels[i]: float(self._smoothed_probs[i])
+                           for i in range(self._n_cls)},
+            'raw':        {self._labels[i]: float(raw_probs[i])
+                           for i in range(self._n_cls)},
         }
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
