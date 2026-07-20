@@ -1,0 +1,23 @@
+{
+  "global": {
+    "core:datatype": "cf32_le",
+    "core:sample_rate": 250000,
+    "core:version": "1.0.0",
+    "core:recorder": "SDRTerm gen_constellation_test.py",
+    "core:description": "Synthetic QPSK test. Symbol rate 10500 sym/s, RRC \u03b1=0.35, SNR 20.0 dB."
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 120000000.0,
+      "core:datetime": "2026-07-20T13:33:26.469181Z"
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 2500000,
+      "core:description": "QPSK 10500 sym/s RRC \u03b1=0.35 SNR=20.0dB"
+    }
+  ]
+}

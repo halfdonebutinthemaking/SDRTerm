@@ -1,8 +1,44 @@
 # Future Additions
 
-Three directions that would give SDRTerm a distinctive identity in the SDR community.
+Directions that would give SDRTerm a distinctive identity in the SDR community.
 Each is achievable in pure Python, fits the existing plugin architecture, and addresses
 a gap that no other terminal-based SDR tool currently fills.
+
+---
+
+## 4. VDL Mode 2 Decoder
+
+**Status:** Postponed — need a real VDL2 recording to develop against  
+**Dependencies:** None beyond existing stack (pure NumPy/SciPy)
+
+VDL Mode 2 is the digital datalink used by commercial aviation for ACARS and
+ADS-C text messages, transmitted in D8PSK at 31.5 kbps on 25 kHz channels
+(primary: 136.900 MHz). No terminal SDR tool currently decodes it.
+
+### Decode chain
+
+1. Mix to baseband (from `peak_marker` frequency)
+2. Low-pass filter + decimate to ~4× symbol rate
+3. Gardner symbol timing recovery loop
+4. Differential 8PSK demodulation (multiply symbol by conjugate of previous)
+5. NRZI decoding + descrambler polynomial
+6. HDLC frame sync (`0x7E` flag correlation)
+7. Bit destuffing (remove zeros after five consecutive ones)
+8. CRC-CCITT frame verification
+9. AVLC header parse → ACARS message text extraction
+
+### Plugin tab output
+
+Scrolling decoded frame list showing callsign, flight number, and message body.
+ASCII constellation of the recovered D8PSK symbols (8 clusters at 22.5° spacing)
+as a secondary view to confirm lock.
+
+### Pre-requisites
+
+A real recording of a VDL2 burst in SigMF format is needed to develop and
+validate the timing recovery and descrambler. VDL2 is bursty (~20–30 ms packets
+with silence between), so the recording will look very different from a continuous
+carrier — power envelope will show clear on/off pattern.
 
 ---
 
