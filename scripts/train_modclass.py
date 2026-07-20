@@ -92,9 +92,19 @@ def load_radioml(path: str, snr_min: int = 0,
         keys = list(f.keys())
         print(f'  HDF5 keys: {keys}')
 
-        X_all = f['X'][:]          # (N, 2, 1024)
-        Y_all = f['Y'][:]          # (N, n_classes) one-hot
-        Z_all = f['Z'][:]          # (N,) SNR values
+        X_all = f['X'][:]          # expected (N, 2, 1024)
+        Y_all = f['Y'][:]          # expected (N, n_classes) one-hot
+        Z_all = f['Z'][:]          # expected (N,) SNR values
+
+        print(f'  X {X_all.shape}  Y {Y_all.shape}  Z {Z_all.shape}')
+
+        # Some variants (Kaggle) store Z as (N, 1) — squeeze to 1D
+        Z_all = Z_all.ravel()
+
+        # Some variants store X as (N, 1024, 2) channel-last — transpose to (N, 2, 1024)
+        if X_all.ndim == 3 and X_all.shape[-1] == 2 and X_all.shape[1] != 2:
+            print(f'  Transposing X from channel-last {X_all.shape} to channel-first')
+            X_all = X_all.transpose(0, 2, 1)
 
         # Try to read class names from file metadata; fall back to known list
         classes = None
