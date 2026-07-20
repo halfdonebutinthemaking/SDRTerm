@@ -18,8 +18,9 @@ sdrterm_*.wav
 sdrterm_*.sigmf-data
 sdrterm_*.sigmf-meta
 
-# SDRTerm user presets
+# SDRTerm user presets (root-level only; presets/ directory is versioned)
 *.sdrterm
+!presets/*.sdrterm
 
 # Retrained / user-replaced model files (keep the shipped modclass_lite.onnx)
 plugins/modclass/models/*_custom.onnx
