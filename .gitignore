@@ -18,3 +18,6 @@ sdrterm_*.wav
 
 # SDRTerm user presets
 *.sdrterm
+
+# Retrained / user-replaced model files (keep the shipped modclass_lite.onnx)
+models/*_custom.onnx
