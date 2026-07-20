@@ -18,4 +18,5 @@ dev = [
 ]
 ml = [
     "onnxruntime>=1.18",
+    "h5py>=3.11",
 ]

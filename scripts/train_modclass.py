@@ -8,8 +8,8 @@ Two data modes:
 
 Usage:
     uv run --with torch --with onnxscript scripts/train_modclass.py
-    uv run --with torch --with onnxscript scripts/train_modclass.py \\
-        --data data/GOLD_XYZ_OSC.0_1024.hdf5
+    uv run --with torch --with onnxscript --with h5py scripts/train_modclass.py \\
+        --data data/GOLD_XYZ_OSC.0001_1024.hdf5
 
 The onnxruntime package (inference only) is installed separately:
     uv add --group ml onnxruntime
@@ -74,7 +74,9 @@ def load_radioml(path: str, snr_min: int = 0,
     try:
         import h5py
     except ImportError:
-        print('h5py required for RadioML loading:  uv run --with h5py ...')
+        print('h5py not found.  Run:')
+        print('  uv run --with torch --with onnxscript --with h5py '
+              'scripts/train_modclass.py --data <path>')
         sys.exit(1)
 
     print(f'Loading {path} …')

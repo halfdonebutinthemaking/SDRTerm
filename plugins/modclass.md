@@ -79,7 +79,7 @@ and place it in the `data/` directory.
 **Step 2 — Train and export**
 
 ```bash
-uv run --with torch --with onnxscript scripts/train_modclass.py \
+uv run --with torch --with onnxscript --with h5py scripts/train_modclass.py \
     --data data/GOLD_XYZ_OSC.0001_1024.hdf5
 ```
 
