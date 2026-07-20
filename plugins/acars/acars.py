@@ -41,7 +41,9 @@ _SYNC_LEN   = len(_SYNC_BITS)   # 24
 
 _MAX_TEXT   = 220            # max text chars between STX and ETX
 _MAX_FRAMES = 64
-_MAX_BITS   = _AUDIO_SR * 4  # ring buffer ~4 s
+# Ring buffer: 3 s of 12 kHz audio.  A max-length ACARS frame is ~0.87 s so
+# 3 s guarantees any frame that has fully arrived is decodable in one pass.
+_AUDIO_BUF_MAX = _AUDIO_SR * 3   # 36 000 samples
 
 # ── resampling ratio: 250000 → 12000 = 6/125 ─────────────────────────────────
 _AUDIO_UP   = 6
@@ -245,16 +247,19 @@ class AcarsDecoder(Decoder):
     full_view       = True
 
     def __init__(self):
-        self._messages = deque(maxlen=_MAX_FRAMES)
-        self._seen     = set()     # dedup: (reg, flight, text_prefix)
+        self._messages  = deque(maxlen=_MAX_FRAMES)
+        self._seen      = set()                          # dedup: (reg, flight, text_prefix)
+        self._audio_buf = np.empty(0, dtype=np.float32) # rolling 12 kHz audio ring buffer
 
     def start(self, state: AppState) -> None:
         self._messages.clear()
         self._seen.clear()
+        self._audio_buf = np.empty(0, dtype=np.float32)
 
     def stop(self) -> None:
         self._messages.clear()
         self._seen.clear()
+        self._audio_buf = np.empty(0, dtype=np.float32)
 
     # ── process ───────────────────────────────────────────────────────────────
 
@@ -265,14 +270,18 @@ class AcarsDecoder(Decoder):
         audio = np.abs(samples).astype(np.float32)
         audio -= float(np.mean(audio))     # remove DC (carrier)
 
-        # ── Resample IQ_SR → AUDIO_SR ────────────────────────────────────────
+        # ── Resample IQ_SR → AUDIO_SR and accumulate ─────────────────────────
         audio_12k = resample_poly(audio, _AUDIO_UP, _AUDIO_DOWN).astype(np.float32)
+        self._audio_buf = np.concatenate([self._audio_buf, audio_12k])
+        if len(self._audio_buf) > _AUDIO_BUF_MAX:
+            self._audio_buf = self._audio_buf[-_AUDIO_BUF_MAX:]
 
-        if len(audio_12k) < _SPB * 32:
+        # Need at least 0.5 s of audio before trying to decode (~6000 samples).
+        if len(self._audio_buf) < _AUDIO_SR // 2:
             return {'messages': list(self._messages), 'n_frames': len(self._messages)}
 
-        # ── FSK decision signal ───────────────────────────────────────────────
-        decision = _fsk_demod(audio_12k)
+        # ── FSK decision signal on the full ring buffer ───────────────────────
+        decision = _fsk_demod(self._audio_buf)
 
         # ── Try all 5 clock phases, collect unique frames ─────────────────────
         new_count = 0
@@ -283,9 +292,12 @@ class AcarsDecoder(Decoder):
                 key = (f['reg'], f['flight'], f['text'][:20])
                 if key in self._seen:
                     continue
-                self._seen.add(key)
-                if len(self._seen) > 512:
-                    self._seen.pop()
+                # Only mark confirmed frames as seen; BCS-error frames are shown
+                # but don't block a later clean decode of the same message.
+                if f['bcs_ok']:
+                    self._seen.add(key)
+                    if len(self._seen) > 512:
+                        self._seen.pop()
                 f['ts'] = time.strftime('%H:%M:%S')
                 self._messages.appendleft(f)
                 new_count += 1
