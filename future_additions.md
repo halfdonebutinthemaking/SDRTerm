@@ -8,37 +8,65 @@ a gap that no other terminal-based SDR tool currently fills.
 
 ## 4. VDL Mode 2 Decoder
 
-**Status:** Postponed — need a real VDL2 recording to develop against  
+**Status:** Implemented (`plugins/vdl2/`)  
 **Dependencies:** None beyond existing stack (pure NumPy/SciPy)
 
-VDL Mode 2 is the digital datalink used by commercial aviation for ACARS and
-ADS-C text messages, transmitted in D8PSK at 31.5 kbps on 25 kHz channels
-(primary: 136.900 MHz). No terminal SDR tool currently decodes it.
+D8PSK 10 500 sym/s, HDLC/AVLC framing, self-synchronising descrambler
+(G(x) = 1 + x + x⁶), CRC-CCITT. Decodes at centre frequency without
+`peak_marker`. See `plugins/vdl2/vdl2.md` for full documentation.
 
-### Decode chain
+### Known remaining limitations
 
-1. Mix to baseband (from `peak_marker` frequency)
-2. Low-pass filter + decimate to ~4× symbol rate
-3. Gardner symbol timing recovery loop
-4. Differential 8PSK demodulation (multiply symbol by conjugate of previous)
-5. NRZI decoding + descrambler polynomial
-6. HDLC frame sync (`0x7E` flag correlation)
-7. Bit destuffing (remove zeros after five consecutive ones)
-8. CRC-CCITT frame verification
-9. AVLC header parse → ACARS message text extraction
+- **No symbol timing recovery** — fixed sampling offset; long signals on a
+  drifting oscillator will eventually accumulate bit errors. A Gardner or
+  Mueller & Müller loop would fix this.
+- **No frequency correction** — carrier offset must stay within ~1 kHz for
+  the RRC matched filter to pass the signal cleanly.
 
-### Plugin tab output
+---
 
-Scrolling decoded frame list showing callsign, flight number, and message body.
-ASCII constellation of the recovered D8PSK symbols (8 clusters at 22.5° spacing)
-as a secondary view to confirm lock.
+## 5. Constellation — Mth-power phase correction
 
-### Pre-requisites
+**Status:** Not started — safe to implement, low risk  
+**Dependencies:** None; change is self-contained in `plugins/constellation/constellation.py`
 
-A real recording of a VDL2 burst in SigMF format is needed to develop and
-validate the timing recovery and descrambler. VDL2 is bursty (~20–30 ms packets
-with silence between), so the recording will look very different from a continuous
-carrier — power envelope will show clear on/off pattern.
+### Problem
+
+The carrier phase estimator is hardcoded to the 4th-power law:
+
+```python
+powered     = matched ** 4
+frame_phase = np.angle(np.mean(powered)) / 4.0
+candidates  = [frame_phase + k * np.pi / 2 for k in range(4)]
+```
+
+For M=2 (BPSK) and M=4 (QPSK) this works: all symbol phases raised to the
+4th power collapse to 1, giving a stable non-zero mean to estimate from.
+
+For **M=8 (8PSK)** the 4th power of the eight symbol phases produces only
+{+1, −1}. Their mean is ≈ 0 for balanced data, so `angle(0)` is undefined
+and the constellation spins into a ring instead of showing 8 clusters.
+
+### Fix
+
+Replace the hardcoded `4` with `self._m` throughout the estimator:
+
+```python
+powered     = matched ** self._m
+frame_phase = np.angle(np.mean(powered)) / float(self._m)
+candidates  = [frame_phase + k * 2 * np.pi / self._m for k in range(self._m)]
+```
+
+For M=4 this is algebraically identical to the current code (no regression).
+For M=8 the 8th power of all 8PSK symbols equals 1, giving a stable mean and
+correct phase correction.
+
+### Important: do not change the symbol sampling offset
+
+A previous attempt combined this fix with changing `offset` from
+`delay % SPS + SPS//2` (= 4) to `(len(taps)//2) % SPS` (= 0). The offset
+change caused flower-petal ISI patterns and was reverted. The Mth-power change
+alone is safe — **leave the offset formula untouched**.
 
 ---
 

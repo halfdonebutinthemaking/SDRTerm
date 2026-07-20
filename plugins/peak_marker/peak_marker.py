@@ -4,9 +4,9 @@ import numpy as np
 from core import Decoder, AppState, FFT_BINS, LABEL_W, fmt_freq
 
 _HOLD_DEFAULT = 2.0    # seconds between forced marker updates
-_HOLD_MIN     = 0.5
+_HOLD_MIN     = 0.2
 _HOLD_MAX     = 10.0
-_HOLD_STEP    = 0.5
+_HOLD_STEP    = 0.2
 _SNAP_DB      = 6.0    # immediately snap to a peak this much stronger than held
 
 _TRACK_ALPHA  = 0.3        # frequency correction gain
@@ -100,7 +100,7 @@ class PeakMarker(Decoder):
             self._held_hz = self._freq_est
             self._held_db = max_db
 
-            if self._follow and abs(self._freq_est - state.center_hz) > 500.0:
+            if abs(self._freq_est - state.center_hz) > 500.0:
                 state.pending_freq = self._freq_est
 
         else:

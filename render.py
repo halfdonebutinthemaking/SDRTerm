@@ -141,10 +141,13 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                     if _fv_text:
                         screen_obj.addstr(ROWS - 1, _fv_col, _fv_text, curses.A_BOLD)
                         _fv_col += len(_fv_text)
+                    # Centre frequency — shown on every full-view plugin tab
+                    _freq_str = ' {}  '.format(fmt_freq(state.center_hz))
+                    screen_obj.addstr(ROWS - 1, _fv_col, _freq_str, curses.A_DIM)
                     _fv_parts = ['x=discard', 'd=debug']
                     if _fv.key_help:
                         _fv_parts.append(_fv.key_help)
-                    _fv_parts += ['f=freq', 'q=quit']
+                    _fv_parts += ['</>=tune', 'f=freq', 'q=quit']
                     _fv_rhs = '  '.join(_fv_parts)
                     screen_obj.addstr(ROWS - 1, COLS - len(_fv_rhs) - 1, _fv_rhs)
             except curses.error:

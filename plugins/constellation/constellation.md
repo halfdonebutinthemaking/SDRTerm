@@ -143,11 +143,89 @@ is not PSK, or the SNR is too low (<5 dB).
 Rotating the symbol rate away from 10 500 sym/s in either direction causes the
 clusters to smear, confirming the tuning sensitivity.
 
+## What the constellation can identify
+
+### Modulation family and order
+
+| Pattern on screen | Modulation |
+|---|---|
+| 2 clusters on real axis | BPSK |
+| 4 clusters at 90° intervals, same radius | QPSK |
+| 8 or 16 clusters on a single ring | 8PSK / 16PSK |
+| Grid of clusters at multiple amplitudes | 16QAM, 64QAM, 256QAM |
+| Two or more concentric rings with clusters | APSK (e.g. DVB-S2) |
+| Smeared arcs, no discrete clusters | GMSK / MSK (continuous phase) |
+
+The key first question is **ring or grid**: PSK and APSK put all points at equal
+or quantised radii; QAM places them on a rectangular grid with multiple distinct
+amplitude levels.  The current reference overlay (red `o` markers) assumes a
+single ring — useful for PSK/APSK, but a grid overlay would be needed to
+precisely align with QAM.
+
+### Signal quality and impairments
+
+| Cluster shape | Cause |
+|---|---|
+| Whole constellation rotated | carrier phase error |
+| Clusters elongated radially | amplitude noise or AGC instability |
+| Clusters elongated in the arc direction | phase noise |
+| Asymmetric left/right vs. up/down | IQ imbalance |
+| Whole constellation shifted from origin | DC offset |
+
+### What the constellation cannot reveal
+
+- **Differential vs. absolute encoding** — same cluster positions, different bit
+  mapping; indistinguishable visually.
+- **Scrambling / LFSR whitening** — randomises which cluster each symbol lands
+  in but does not move the clusters.
+- **FEC / channel coding rate** — coding happens above the symbol layer.
+- **OFDM** — the signal is a sum of many subcarriers; the aggregate IQ looks
+  like a uniform disc.  Individual subcarriers must be demodulated first.
+- **Spread spectrum (DSSS)** — chips spread the energy; the constellation looks
+  like noise regardless of symbol rate tuning.
+
 ## Limitations
 
-- The 4th-power carrier correction is optimised for QPSK. For 8PSK or higher
-  orders the correction is approximate; the constellation may show slight
-  rotation between frames, causing blobs to widen slightly.
+### Phase correction only works reliably for QPSK
+
+The plugin uses a 4th-power carrier recovery to remove the unknown carrier phase:
+
+```
+frame_phase = angle(mean(symbols⁴)) / 4
+```
+
+For QPSK this works perfectly: the 4th power of the four symbol phases {1, j, −1, −j}
+all collapse to 1, giving a stable non-zero mean to measure.
+
+For **8PSK** the 4th power of the eight symbol phases produces only {+1, −1}.
+For balanced data their mean is approximately zero, so `angle(0)` is undefined and
+the correction produces garbage. The constellation spins continuously and shows a
+ring instead of 8 clusters.
+
+For **16PSK and higher orders** the situation is similar or worse.
+
+To properly recover carrier phase for M-PSK, an M-th power estimator is needed
+(`symbols^M`, then divide by M). That would introduce an M-way phase ambiguity,
+requiring a separate ambiguity resolver.
+
+### D8PSK (VDL Mode 2) specifically does not work
+
+VDL Mode 2 uses **differential** 8PSK, which has two additional problems beyond
+the phase correction issue above:
+
+1. **peak_marker cannot find the carrier.** D8PSK is wideband — its power is
+   spread across ~17 kHz by the RRC pulse-shaping filter.  Each FFT bin carries
+   only 1/140th of the total power, putting individual bins at or below the noise
+   floor.  `peak_marker` finds nothing to lock onto, so no symbols reach the
+   constellation at all.
+
+2. **The 4th-power correction fails for 8PSK** as described above.
+
+For VDL Mode 2 use the dedicated **VDL2 plugin** (`v`) instead, which handles
+wideband detection and differential decoding internally.
+
+### Other limitations
+
 - The RRC matched filter assumes α = 0.35. Real signals with different roll-off
   factors will produce slightly wider clusters but remain readable.
 - The display accumulates the last 4 000 symbols. Press `r` to clear when
