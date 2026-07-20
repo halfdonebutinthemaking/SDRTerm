@@ -89,82 +89,79 @@ def load_radioml(path: str, snr_min: int = 0,
     t0 = time.monotonic()
 
     with h5py.File(path, 'r') as f:
-        keys = list(f.keys())
-        print(f'  HDF5 keys: {keys}')
+        print(f'  HDF5 keys: {list(f.keys())}')
 
-        X_all = f['X'][:]          # expected (N, 2, 1024)
-        Y_all = f['Y'][:]          # expected (N, n_classes) one-hot
-        Z_all = f['Z'][:]          # expected (N,) SNR values
+        # ── step 1: load Y and Z only (small) to compute which rows we need ──
+        Y_all = f['Y'][:]                  # (N, n_classes)  ~240 MB
+        Z_all = f['Z'][:].ravel()          # (N,)             ~10 MB
+        n_total   = Y_all.shape[0]
+        n_classes = Y_all.shape[1]
+        print(f'  Total examples: {n_total:,}  '
+              f'Classes: {n_classes}  '
+              f'SNR range: {Z_all.min():.0f}..{Z_all.max():.0f} dB')
 
-        print(f'  X {X_all.shape}  Y {Y_all.shape}  Z {Z_all.shape}')
-
-        # Some variants (Kaggle) store Z as (N, 1) — squeeze to 1D
-        Z_all = Z_all.ravel()
-
-        # Some variants store X as (N, 1024, 2) channel-last — transpose to (N, 2, 1024)
-        if X_all.ndim == 3 and X_all.shape[-1] == 2 and X_all.shape[1] != 2:
-            print(f'  Transposing X from channel-last {X_all.shape} to channel-first')
-            X_all = X_all.transpose(0, 2, 1)
-
-        # Try to read class names from file metadata; fall back to known list
+        # ── step 2: class names ───────────────────────────────────────────────
         classes = None
         for attr in ('mod_classes', 'class_labels', 'mods'):
             val = f.attrs.get(attr)
             if val is not None:
                 classes = [s.decode() if isinstance(s, bytes) else str(s)
                            for s in val]
-                print(f'  Classes from HDF5 attr "{attr}": {classes}')
+                print(f'  Classes from HDF5 attr "{attr}"')
                 break
         for dset in ('mod_classes', 'class_labels', 'mods'):
             if dset in f and classes is None:
-                raw = f[dset][:]
                 classes = [s.decode() if isinstance(s, bytes) else str(s)
-                           for s in raw]
-                print(f'  Classes from HDF5 dataset "{dset}": {classes}')
+                           for s in f[dset][:]]
+                print(f'  Classes from HDF5 dataset "{dset}"')
                 break
 
-    n_classes = Y_all.shape[1]
+        # ── step 3: compute which row indices to load ─────────────────────────
+        y_all    = np.argmax(Y_all, axis=1).astype(np.int64)
+        snr_ok   = Z_all >= snr_min
+        keep_idx = []
+        for c in range(n_classes):
+            c_idx = np.where((y_all == c) & snr_ok)[0]
+            if len(c_idx) > max_per_class:
+                c_idx = np.random.choice(c_idx, max_per_class, replace=False)
+            keep_idx.append(c_idx)
+        keep_idx = np.sort(np.concatenate(keep_idx))  # sorted → h5py reads sequentially
+        print(f'  Selecting {len(keep_idx):,} examples '
+              f'({snr_ok.sum():,} pass SNR ≥ {snr_min} dB filter)  '
+              f'→ loading X …')
+
+        # ── step 4: load only the selected rows from X (avoids 20 GB read) ───
+        X_sel = f['X'][keep_idx]           # e.g. (144k, 1024, 2) ~1.1 GB
+        x_shape = X_sel.shape
+        print(f'  X loaded: {x_shape}  ({X_sel.nbytes / 1e9:.1f} GB)  '
+              f'{time.monotonic() - t0:.1f}s')
+
+    # ── normalise layout to (N, 2, 1024) channel-first ────────────────────────
+    if X_sel.ndim == 3 and X_sel.shape[-1] == 2 and X_sel.shape[1] != 2:
+        print('  Transposing X to channel-first (N, 2, 1024)')
+        X_sel = X_sel.transpose(0, 2, 1)
+
+    y_sel = y_all[keep_idx]
 
     if classes is None:
         if n_classes == len(_RADIOML_CLASSES):
             classes = _RADIOML_CLASSES
-            print(f'  Using built-in RadioML 2018.01a class list '
-                  f'({n_classes} classes)')
+            print(f'  Using built-in RadioML 2018.01a class list')
         else:
             classes = [f'class_{i}' for i in range(n_classes)]
-            print(f'  WARNING: {n_classes} classes in file but '
-                  f'{len(_RADIOML_CLASSES)} in built-in list. '
-                  f'Using generic names.')
+            print(f'  WARNING: {n_classes} classes but built-in list has '
+                  f'{len(_RADIOML_CLASSES)} — using generic names')
     elif len(classes) != n_classes:
-        print(f'  WARNING: class list length {len(classes)} != '
-              f'Y width {n_classes}. Truncating/padding.')
         classes = (classes + [f'class_{i}' for i in range(n_classes)])[:n_classes]
 
-    y_all = np.argmax(Y_all, axis=1).astype(np.int64)
-
-    # Filter by SNR
-    snr_mask = Z_all >= snr_min
-    X_all, y_all, Z_all = X_all[snr_mask], y_all[snr_mask], Z_all[snr_mask]
-    print(f'  {snr_mask.sum():,} examples with SNR ≥ {snr_min} dB '
-          f'(of {len(snr_mask):,} total)')
-
-    # Subsample per class for memory
-    idx = []
-    for c in range(n_classes):
-        c_idx = np.where(y_all == c)[0]
-        if len(c_idx) > max_per_class:
-            c_idx = np.random.choice(c_idx, max_per_class, replace=False)
-        idx.append(c_idx)
-    idx = np.concatenate(idx)
-    np.random.shuffle(idx)
-    X_all, y_all = X_all[idx], y_all[idx]
-    print(f'  Subsampled to {len(y_all):,} examples  '
-          f'({time.monotonic() - t0:.1f}s)')
-
-    # Split 85/15 train/val
-    split = int(0.85 * len(y_all))
-    return (X_all[:split].astype(np.float32), y_all[:split],
-            X_all[split:].astype(np.float32), y_all[split:],
+    # Shuffle and split 85/15
+    perm  = np.random.permutation(len(y_sel))
+    X_sel, y_sel = X_sel[perm].astype(np.float32), y_sel[perm]
+    split = int(0.85 * len(y_sel))
+    print(f'  {split:,} train / {len(y_sel)-split:,} val  '
+          f'(total {time.monotonic()-t0:.1f}s)')
+    return (X_sel[:split], y_sel[:split],
+            X_sel[split:], y_sel[split:],
             classes)
 
 
