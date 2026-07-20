@@ -6,10 +6,10 @@ active in the pipeline before it.
 
 ## Quick start
 
-Install the runtime inference library (needed once):
+Install the runtime and dataset dependencies (needed once):
 
 ```bash
-uv add --group ml onnxruntime
+uv sync --group ml          # installs onnxruntime + h5py
 ```
 
 A pre-trained synthetic model ships in `models/modclass_lite.onnx` and works
@@ -49,16 +49,25 @@ live.
 
 ## Training the model
 
-The model needs to be trained once to produce `models/modclass_lite.onnx`.  Two
-data modes are supported: **RadioML 2018.01a** (recommended) and **synthetic**
-(fast fallback).  After training, `models/modclass_labels.json` is written with
-the class list; the plugin picks it up automatically on the next start.
+The model is a small 1-D ResNet (~150 k parameters) that needs to be trained once
+to produce `models/modclass_lite.onnx`.  Two data sources are supported.  After
+training, `models/modclass_labels.json` is written with the class list used; the
+plugin picks it up automatically on the next start — no restart of SDRTerm needed.
+
+Training requires PyTorch (train-time only, not needed at runtime):
+
+```bash
+# PyTorch and the ONNX export tool are pulled in via --with, not installed
+# permanently.  onnxruntime and h5py live in the ml dependency group.
+uv sync --group ml
+```
 
 ### Option A — RadioML 2018.01a (recommended)
 
 RadioML 2018.01a is a publicly available dataset of real-channel-impaired IQ
 recordings covering 24 modulation types at SNRs from −20 to +30 dB.  Training on
-it gives significantly better real-world accuracy than synthetic data.
+it gives significantly better real-world accuracy than synthetic data because it
+captures real hardware impairments (phase noise, IQ imbalance, multipath).
 
 **Step 1 — Download the dataset (~3.5 GB)**
 
@@ -111,7 +120,7 @@ uv run --with torch --with onnxscript scripts/train_modclass.py
 
 Typical runtime: ~5 minutes on CPU, ~2 minutes on MPS.  Val accuracy ~92 % on
 synthetic test data.  Real-world accuracy is lower because synthetic signals do
-not include hardware impairments (phase noise, IQ imbalance, multipath).
+not include hardware impairments.
 
 ---
 
@@ -121,9 +130,6 @@ not include hardware impairments (phase noise, IQ imbalance, multipath).
 |------|-------------|
 | `models/modclass_lite.onnx` | Trained model weights (single-file ONNX, ~600 KB) |
 | `models/modclass_labels.json` | Ordered class list matching the model output indices |
-
-The plugin reloads both files each time it starts, so a retrain takes effect
-immediately without restarting SDRTerm.
 
 ---
 
@@ -144,11 +150,18 @@ immediately without restarting SDRTerm.
 
 ### RadioML 2018.01a model (24 classes)
 
-32PSK · 16APSK · 32QAM · FM · GMSK · 32APSK ·
-OFDM-64 · OFDM-72 · OFDM-128 · OFDM-256 · OFDM-512 · OFDM-1024 · OFDM-2048 ·
-256QAM · 64QAM · 16QAM · 32QAM ·
-AM-SSB-SC · AM-SSB-WC · AM-DSB-SC · AM-DSB-WC ·
-BPSK · QPSK · 8PSK · 16PSK · 32PSK
+| Class | Class | Class | Class |
+|-------|-------|-------|-------|
+| BPSK | QPSK | 8PSK | 16PSK |
+| 32PSK | 16APSK | 32APSK | 32QAM |
+| 64QAM | 16QAM | 256QAM | OFDM-64 |
+| OFDM-72 | OFDM-128 | OFDM-256 | OFDM-512 |
+| OFDM-1024 | OFDM-2048 | FM | GMSK |
+| AM-SSB-SC | AM-SSB-WC | AM-DSB-SC | AM-DSB-WC |
+
+The exact class-to-index mapping is determined at training time and saved to
+`models/modclass_labels.json`.  The plugin reads this file on start, so the
+displayed labels always match whatever model is loaded.
 
 ---
 
@@ -161,5 +174,5 @@ BPSK · QPSK · 8PSK · 16PSK · 32PSK
 - One signal at a time: the classifier assumes a single modulated carrier at the
   peak frequency.  Composite or multiplexed signals are not reliably identified.
 - The 200 kHz window is determined by the sample rate the model was trained at
-  (`_MODEL_SR = 200_000` in `train_modclass.py`).  To handle wider signals, raise
-  this constant and retrain.
+  (`_MODEL_SR = 200_000` in `train_modclass.py`).  To classify wider signals,
+  increase this constant and retrain.
