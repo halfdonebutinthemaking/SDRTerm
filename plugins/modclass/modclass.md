@@ -12,7 +12,7 @@ Install the runtime and dataset dependencies (needed once):
 uv sync --group ml          # installs onnxruntime + h5py
 ```
 
-A pre-trained synthetic model ships in `models/modclass_lite.onnx` and works
+A pre-trained synthetic model ships in `plugins/modclass/models/modclass_lite.onnx` and works
 out of the box.  For higher real-world accuracy, train on RadioML 2018.01a data
 (see [Training the model](#training-the-model) below).
 
@@ -50,8 +50,8 @@ live.
 ## Training the model
 
 The model is a small 1-D ResNet (~150 k parameters) that needs to be trained once
-to produce `models/modclass_lite.onnx`.  Two data sources are supported.  After
-training, `models/modclass_labels.json` is written with the class list used; the
+to produce `plugins/modclass/models/modclass_lite.onnx`.  Two data sources are supported.  After
+training, `plugins/modclass/models/modclass_labels.json` is written with the class list used; the
 plugin picks it up automatically on the next start — no restart of SDRTerm needed.
 
 Training requires PyTorch (train-time only, not needed at runtime):
@@ -128,8 +128,8 @@ not include hardware impairments.
 
 | File | Description |
 |------|-------------|
-| `models/modclass_lite.onnx` | Trained model weights (single-file ONNX, ~600 KB) |
-| `models/modclass_labels.json` | Ordered class list matching the model output indices |
+| `plugins/modclass/models/modclass_lite.onnx` | Trained model weights (single-file ONNX, ~600 KB) |
+| `plugins/modclass/models/modclass_labels.json` | Ordered class list matching the model output indices |
 
 ---
 
@@ -160,7 +160,7 @@ not include hardware impairments.
 | AM-SSB-SC | AM-SSB-WC | AM-DSB-SC | AM-DSB-WC |
 
 The exact class-to-index mapping is determined at training time and saved to
-`models/modclass_labels.json`.  The plugin reads this file on start, so the
+`plugins/modclass/models/modclass_labels.json`.  The plugin reads this file on start, so the
 displayed labels always match whatever model is loaded.
 
 ---

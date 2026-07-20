@@ -37,7 +37,7 @@ BATCH   = 64
 EPOCHS  = 40
 LR      = 1e-3
 
-OUT_DIR    = os.path.join(os.path.dirname(__file__), '..', 'models')
+OUT_DIR    = os.path.join(os.path.dirname(__file__), '..', 'plugins', 'modclass', 'models')
 OUT_MODEL  = os.path.join(OUT_DIR, 'modclass_lite.onnx')
 OUT_LABELS = os.path.join(OUT_DIR, 'modclass_labels.json')
 

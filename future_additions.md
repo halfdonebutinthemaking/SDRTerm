@@ -122,7 +122,7 @@ raw IQ (complex64)
 | `README.md` | Add plugin to feature list |
 | `plugins/README.md` | Add row to overview table |
 | `scripts/train_modclass.py` | Offline training script (RadioML → ONNX export) |
-| `models/modclass_lite.onnx` | Committed pre-trained model (~2 MB) |
+| `plugins/modclass/models/modclass_lite.onnx` | Committed pre-trained model (~2 MB) |
 
 ### Model architecture
 
