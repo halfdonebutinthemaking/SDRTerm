@@ -73,8 +73,12 @@ to **10 500 sym/s**.
 
 ### What "right" looks like
 
-Four compact blobs sitting on the diagonals, with empty space between them and
-a clear crosshair at the origin:
+The examples below are specific to the **QPSK test signal**.  For other
+modulations the number of blobs changes (2 for BPSK, 8 for 8PSK, etc.) but
+the diagnostic logic — tight blobs vs. smeared ring — is the same for all PSK.
+
+For the QPSK test signal: four compact blobs on the diagonals, empty space
+between them, clear crosshair at the origin:
 
 ```
                     +Q
