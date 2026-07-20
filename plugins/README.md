@@ -14,3 +14,4 @@
 | **rtl-tcp-passive** | Streams live IQ over TCP to RTL-TCP-compatible clients; hardware stays under SDRTerm control | | [rtltcp_passive.md](rtltcp_passive/rtltcp_passive.md) |
 | **rtl-tcp-active** | Like passive, but also forwards client frequency, gain, and sample-rate commands to hardware | | [rtltcp_active.md](rtltcp_active/rtltcp_active.md) |
 | **vdl2** | VDL Mode 2 decoder — D8PSK 10,500 sym/s, HDLC/AVLC frames, ACARS text; tune to a VDL2 channel at 250 kHz bandwidth and press `v` | | [vdl2.md](vdl2/vdl2.md) |
+| **freqhop** | Frequency hopper — maintain a saved list of frequencies with per-slot dwell times; cycles automatically so you can monitor multiple airband channels | | |

@@ -40,7 +40,7 @@ _RESET_HZ  = 50_000
 
 class ModClassDecoder(Decoder):
     name            = 'modclass'
-    key             = 'm'
+    key             = 'o'
     key_help        = '+/-=threshold'
     min_sample_rate = 250_000
     realtime        = False

@@ -29,12 +29,16 @@ class TestDiscovery:
         keys = [p.key for p in registry.values() if p.key]
         assert len(keys) == len(set(keys)), 'duplicate plugin activation keys'
 
-    def test_range_scan_is_full_view(self, registry):
-        assert registry['range-scan'].full_view is True
+    _FULL_VIEW_PLUGINS = {'range-scan', 'constellation', 'vdl2', 'freqhop', 'modclass'}
 
-    def test_only_range_scan_is_full_view(self, registry):
+    def test_known_full_view_plugins(self, registry):
+        for name in self._FULL_VIEW_PLUGINS:
+            if name in registry:
+                assert registry[name].full_view is True, f'{name}.full_view should be True'
+
+    def test_no_unexpected_full_view(self, registry):
         for name, plugin in registry.items():
-            if name != 'range-scan':
+            if name not in self._FULL_VIEW_PLUGINS:
                 assert not plugin.full_view, f'{name}.full_view should be False'
 
     def test_all_plugins_have_name(self, registry):
