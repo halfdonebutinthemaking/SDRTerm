@@ -6,7 +6,7 @@ from core import Decoder, AppState
 
 _MODEL_SR      = 200_000   # Hz — sample rate the model was trained at
 _MODEL_SAMPLES = 1_024
-_MODELS_DIR    = os.path.join(os.path.dirname(__file__), '..', 'models')
+_MODELS_DIR    = os.path.join(os.path.dirname(__file__), '..', '..', 'models')
 _MODEL_PATH    = os.path.join(_MODELS_DIR, 'modclass_lite.onnx')
 _LABELS_PATH   = os.path.join(_MODELS_DIR, 'modclass_labels.json')
 
