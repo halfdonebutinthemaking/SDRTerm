@@ -406,7 +406,7 @@ def train(args):
         model, dummy, OUT_MODEL,
         input_names=['input'], output_names=['logits'],
         dynamic_axes={'input': {0: 'batch'}, 'logits': {0: 'batch'}},
-        opset_version=17,
+        opset_version=18,
     )
 
     # Inline any external data so the model is a single self-contained file
