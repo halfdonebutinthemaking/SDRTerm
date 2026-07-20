@@ -11,6 +11,12 @@ Usage:
     uv run --with torch --with onnxscript --with h5py scripts/train_modclass.py \\
         --data data/GOLD_XYZ_OSC.0001_1024.hdf5
 
+Throttling (if training freezes the laptop):
+    --device cpu      avoid saturating the GPU/MPS
+    --threads 2       limit CPU thread usage (default: all cores)
+    --batch 32        smaller batches, less memory pressure
+    --throttle 50     sleep 50 ms between batches
+
 The onnxruntime package (inference only) is installed separately:
     uv add --group ml onnxruntime
 """
@@ -286,7 +292,8 @@ def build_model(n_classes: int):
 
 # ── training loop ──────────────────────────────────────────────────────────────
 
-def train(data_path: str | None):
+def train(args):
+    import time as _time
     try:
         import torch
         import torch.nn as nn
@@ -296,30 +303,48 @@ def train(data_path: str | None):
         print('  uv run --with torch --with onnxscript scripts/train_modclass.py')
         sys.exit(1)
 
-    if data_path:
-        Xtr, ytr, Xva, yva, classes = load_radioml(data_path)
-        n_train, n_val = len(ytr), len(yva)
-        print(f'RadioML: {n_train:,} train / {n_val:,} val  '
+    # ── thread / device setup ──────────────────────────────────────────────────
+    if args.threads:
+        torch.set_num_threads(args.threads)
+        torch.set_num_interop_threads(min(args.threads, 2))
+        print(f'CPU threads limited to {args.threads}')
+
+    if args.device == 'auto':
+        device = ('mps'  if torch.backends.mps.is_available() else
+                  'cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        device = args.device
+
+    throttle_s = (args.throttle / 1000.0) if args.throttle else 0.0
+
+    # ── data ───────────────────────────────────────────────────────────────────
+    if args.data:
+        Xtr, ytr, Xva, yva, classes = load_radioml(
+            args.data,
+            snr_min=args.snr_min,
+            max_per_class=args.max_per_class,
+        )
+        print(f'RadioML: {len(ytr):,} train / {len(yva):,} val  '
               f'({len(classes)} classes)')
     else:
         print('No --data provided — generating synthetic training set …')
-        t0 = time.monotonic()
+        t0 = _time.monotonic()
         Xtr, ytr = build_synthetic(2_000)
         Xva, yva = build_synthetic(400, snr_range=(0, 20))
         classes  = _SYNTH_CLASSES
         print(f'  {len(ytr):,} train / {len(yva):,} val  '
-              f'({time.monotonic()-t0:.1f}s)')
+              f'({_time.monotonic()-t0:.1f}s)')
 
-    n_classes = len(classes)
+    n_classes  = len(classes)
+    batch_size = args.batch
 
     tr_ds = TensorDataset(torch.from_numpy(Xtr), torch.from_numpy(ytr))
     va_ds = TensorDataset(torch.from_numpy(Xva), torch.from_numpy(yva))
-    tr_dl = DataLoader(tr_ds, batch_size=BATCH, shuffle=True,  num_workers=0)
-    va_dl = DataLoader(va_ds, batch_size=BATCH, shuffle=False, num_workers=0)
+    tr_dl = DataLoader(tr_ds, batch_size=batch_size, shuffle=True,  num_workers=0)
+    va_dl = DataLoader(va_ds, batch_size=batch_size, shuffle=False, num_workers=0)
 
-    device = ('mps'  if torch.backends.mps.is_available() else
-              'cuda' if torch.cuda.is_available() else 'cpu')
-    print(f'Device: {device}   Classes: {n_classes}')
+    print(f'Device: {device}   Batch: {batch_size}   '
+          f'Throttle: {args.throttle} ms   Classes: {n_classes}')
 
     model = build_model(n_classes).to(device)
     n_params = sum(p.numel() for p in model.parameters())
@@ -340,6 +365,8 @@ def train(data_path: str | None):
             loss.backward()
             opt.step()
             tr_loss += loss.item() * len(yb)
+            if throttle_s:
+                _time.sleep(throttle_s)
         sched.step()
 
         model.eval()
@@ -352,7 +379,7 @@ def train(data_path: str | None):
         acc = correct / total
 
         print(f'  Epoch {epoch:3d}/{EPOCHS}  '
-              f'loss={tr_loss/len(ytr):.4f}  '
+              f'loss={tr_loss/len(Xtr):.4f}  '
               f'val_acc={acc:.3f}  '
               f'lr={sched.get_last_lr()[0]:.2e}')
 
@@ -402,12 +429,25 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawTextHelpFormatter)
     parser.add_argument('--data', metavar='PATH',
-                        help='Path to GOLD_XYZ_OSC.0_1024.hdf5 (RadioML 2018.01a)')
+                        help='Path to GOLD_XYZ_OSC.0001_1024.hdf5 (RadioML 2018.01a)')
     parser.add_argument('--snr-min', type=int, default=0,
                         help='Minimum SNR (dB) to include from RadioML (default: 0)')
     parser.add_argument('--max-per-class', type=int, default=6_000,
                         help='Max examples per class from RadioML (default: 6000)')
+    parser.add_argument('--device', default='auto',
+                        choices=['auto', 'cpu', 'mps', 'cuda'],
+                        help='Training device (default: auto). Use cpu to avoid '
+                             'saturating the GPU and freezing the system.')
+    parser.add_argument('--threads', type=int, default=None,
+                        help='Limit PyTorch CPU threads (e.g. 2). '
+                             'Default: use all available cores.')
+    parser.add_argument('--batch', type=int, default=BATCH,
+                        help=f'Batch size (default: {BATCH}). '
+                             'Smaller values reduce memory pressure.')
+    parser.add_argument('--throttle', type=int, default=0, metavar='MS',
+                        help='Sleep this many milliseconds between batches '
+                             '(default: 0). Keeps the system responsive.')
     args = parser.parse_args()
 
     np.random.seed(42)
-    train(args.data)
+    train(args)
