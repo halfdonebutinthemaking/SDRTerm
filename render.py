@@ -20,7 +20,7 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
     hint1 = ' spc=toggle  ret=apply  esc=cancel '
     hint2 = ' </>=reorder pipeline '
     min_w = max(len(hint1) + 4, len(hint2) + 4,
-                max(len(p.name) for p in all_plugins) + 26, 44)
+                max(len(p.name) for p in all_plugins) + 12, 36)
     w  = min(COLS - 4, min_w)
     h  = len(all_plugins) + 5   # title + sep + plugins + 2 hint lines
     y0 = max(0, (ROWS - h) // 2)
@@ -34,8 +34,7 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
             enabled = plugin.name in state.menu_active
             tick    = 'x' if enabled else ' '
             attr    = curses.A_REVERSE if i == state.menu_cursor else curses.A_NORMAL
-            label   = '[{}] #{:d}  {:14}  key: {}'.format(
-                tick, i + 1, plugin.name, plugin.key or '—')
+            label   = '[{}] #{:d}  {}'.format(tick, i + 1, plugin.name)
             screen_obj.addstr(y0 + 2 + i, x0 + 2, label[:w - 4].ljust(w - 4), attr)
         screen_obj.addstr(y0 + h - 2, x0 + 2, hint1[:w - 4], curses.A_DIM)
         screen_obj.addstr(y0 + h - 1, x0 + 2, hint2[:w - 4], curses.A_DIM)
