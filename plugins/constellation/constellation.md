@@ -62,28 +62,74 @@ tight blobs.
 Replay:
 
 ```bash
-uv run python main.py --file samples/constellation_test.sigmf-data --f 120M
+uv run python main.py \
+  --file samples/constellation_test.sigmf-data \
+  --bw 250000 \
+  --f 120M
 ```
 
 Enable `peak_marker` (`k`), switch to constellation (`c`), then set symbol rate
-to **10 500 sym/s**. The display should show four tight clusters:
+to **10 500 sym/s**.
+
+### What "right" looks like
+
+Four compact blobs sitting on the diagonals, with empty space between them and
+a clear crosshair at the origin:
 
 ```
                     +Q
-                        
-        *    │    *     
-       ***   │   ***    
-        *    │    *     
+
+        *    │    *
+       ***   │   ***
+        *    │    *
 ─────────────+──────────
-        *    │    *     
-       ***   │   ***    
-        *    │    *     
-                        
+        *    │    *
+       ***   │   ***
+        *    │    *
+
                     -Q
 ```
 
+### What "wrong" looks like
+
+**Symbol rate too low** — you are sampling mid-transition between symbols.
+The blobs smear outward into arcs that eventually merge into a continuous ring:
+
+```
+                    +Q
+
+      . . ─ ─ ─ . .
+    .               .
+    .               .
+    .       +       .
+    .               .
+    .               .
+      . . ─ ─ ─ . .
+
+                    -Q
+```
+
+**Symbol rate too high** — you sample each symbol multiple times, so every
+cluster duplicates into an inner and outer ring:
+
+```
+                    +Q
+
+      * *  │  * *
+     *   * │ *   *
+─────────────+──────────
+     *   * │ *   *
+      * *  │  * *
+
+                    -Q
+```
+
+**Carrier not locked / wrong signal** — a flat cloud of noise with no
+structure at all means `peak_marker` is not tracking the signal, the signal
+is not PSK, or the SNR is too low (<5 dB).
+
 Rotating the symbol rate away from 10 500 sym/s in either direction causes the
-clusters to smear into a ring, confirming the tuning sensitivity.
+clusters to smear, confirming the tuning sensitivity.
 
 ## Limitations
 
