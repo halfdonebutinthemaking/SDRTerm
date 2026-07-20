@@ -43,8 +43,9 @@ class ModClassDecoder(Decoder):
     key             = 'm'
     key_help        = '+/-=threshold'
     min_sample_rate = 250_000
-    realtime        = False      # runs in background worker — inference is ~1 ms but
-    bg_queue_depth  = 2          # we don't want it blocking the display loop
+    realtime        = False
+    bg_queue_depth  = 2
+    full_view       = True
 
     def __init__(self):
         self._session        = None

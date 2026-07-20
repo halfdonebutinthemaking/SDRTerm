@@ -41,6 +41,7 @@ class ConstellationDecoder(Decoder):
     min_sample_rate = 10_000
     realtime        = False
     bg_queue_depth  = 2
+    full_view       = True
 
     def __init__(self):
         self._symrate    = _DEFAULT_SYMRATE
