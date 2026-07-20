@@ -7,11 +7,20 @@ _MODEL_SR      = 200_000   # Hz — sample rate the model was trained at
 _MODEL_SAMPLES = 1_024
 _MODEL_PATH    = os.path.join(os.path.dirname(__file__), '..', 'models',
                               'modclass_lite.onnx')
-_LABELS = ['OOK', 'AM-DSB', 'WBFM', 'BPSK', 'QPSK', '8PSK', 'QAM16', 'FSK']
+_LABELS   = ['OOK', 'AM-DSB', 'WBFM', 'BPSK', 'QPSK', '8PSK', 'QAM16', 'FSK']
+_N_CLS    = len(_LABELS)
 
 # Minimum peak power (dBFS) and confidence to display a result
 _MIN_DB   = -70.0
 _MIN_CONF =  0.55
+
+# EMA smoothing: weight on the newest frame's probabilities.
+# 0.2 → ~3 frames half-life (~450 ms at 150 ms/frame) before a label shift.
+_EMA_ALPHA = 0.20
+
+# If the tracked peak jumps more than this between frames, reset smoothing
+# (signal was lost and reacquired, or peak_marker jumped to a different signal).
+_RESET_HZ  = 50_000
 
 
 class ModClassDecoder(Decoder):
@@ -23,18 +32,22 @@ class ModClassDecoder(Decoder):
     bg_queue_depth  = 2          # we don't want it blocking the display loop
 
     def __init__(self):
-        self._session   = None
-        self._error     = None
-        self._threshold = _MIN_CONF
-        self._label     = None
-        self._conf      = 0.0
-        self._peak_hz   = None
+        self._session        = None
+        self._error          = None
+        self._threshold      = _MIN_CONF
+        self._label          = None
+        self._conf           = 0.0
+        self._peak_hz        = None
+        self._smoothed_probs = None   # EMA over probability vectors
+        self._raw_probs      = None   # last raw frame (shown alongside smoothed in tab)
 
     def start(self, state: AppState) -> None:
-        self._label   = None
-        self._conf    = 0.0
-        self._peak_hz = None
-        self._error   = None
+        self._label          = None
+        self._conf           = 0.0
+        self._peak_hz        = None
+        self._smoothed_probs = None
+        self._raw_probs      = None
+        self._error          = None
         try:
             import onnxruntime as ort
             opts = ort.SessionOptions()
@@ -53,10 +66,12 @@ class ModClassDecoder(Decoder):
             self._dbg(f'modclass init error: {self._error}')
 
     def stop(self) -> None:
-        self._session = None
-        self._label   = None
-        self._conf    = 0.0
-        self._peak_hz = None
+        self._session        = None
+        self._label          = None
+        self._conf           = 0.0
+        self._peak_hz        = None
+        self._smoothed_probs = None
+        self._raw_probs      = None
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
@@ -83,21 +98,39 @@ class ModClassDecoder(Decoder):
         x     /= std
         x      = x[np.newaxis]    # (1, 2, N)
 
-        logits = self._session.run(None, {'input': x})[0][0]
-        probs  = _softmax(logits)
-        idx    = int(np.argmax(probs))
-        conf   = float(probs[idx])
+        logits         = self._session.run(None, {'input': x})[0][0]
+        raw_probs      = _softmax(logits)
+        self._raw_probs = raw_probs
 
-        self._label   = _LABELS[idx] if conf >= self._threshold else None
-        self._conf    = conf
+        # Reset EMA if the peak jumped to a different signal or on first frame.
+        prev_hz = self._peak_hz
+        if (self._smoothed_probs is None
+                or prev_hz is None
+                or abs(peak_hz - prev_hz) > _RESET_HZ):
+            self._smoothed_probs = raw_probs.copy()
+        else:
+            self._smoothed_probs = (_EMA_ALPHA * raw_probs
+                                    + (1.0 - _EMA_ALPHA) * self._smoothed_probs)
+
         self._peak_hz = peak_hz
-        self._dbg(f'{peak_hz/1e6:.3f} MHz → {_LABELS[idx]} {conf:.2f}')
+
+        idx  = int(np.argmax(self._smoothed_probs))
+        conf = float(self._smoothed_probs[idx])
+
+        self._label = _LABELS[idx] if conf >= self._threshold else None
+        self._conf  = conf
+        self._dbg(f'{peak_hz/1e6:.3f} MHz → {_LABELS[idx]} {conf:.2f} '
+                  f'(raw {_LABELS[int(np.argmax(raw_probs))]} '
+                  f'{float(raw_probs.max()):.2f})')
 
         return {
-            'label':   self._label,
-            'conf':    self._conf,
-            'peak_hz': self._peak_hz,
-            'all':     {_LABELS[i]: float(probs[i]) for i in range(len(_LABELS))},
+            'label':      self._label,
+            'conf':       self._conf,
+            'peak_hz':    self._peak_hz,
+            'smoothed':   {_LABELS[i]: float(self._smoothed_probs[i])
+                           for i in range(_N_CLS)},
+            'raw':        {_LABELS[i]: float(raw_probs[i])
+                           for i in range(_N_CLS)},
         }
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
@@ -137,10 +170,11 @@ class ModClassDecoder(Decoder):
             screen_obj.addstr(y, 2, result['error'], curses.A_BOLD)
             return
 
-        label   = result.get('label')
-        conf    = result.get('conf', 0.0)
-        peak_hz = result.get('peak_hz')
-        all_p   = result.get('all', {})
+        label    = result.get('label')
+        conf     = result.get('conf', 0.0)
+        peak_hz  = result.get('peak_hz')
+        smoothed = result.get('smoothed', {})
+        raw      = result.get('raw', {})
 
         header = 'Modulation Classifier'
         screen_obj.addstr(y, (cols - len(header)) // 2, header, curses.A_BOLD)
@@ -158,26 +192,44 @@ class ModClassDecoder(Decoder):
                               self._threshold * 100))
         y += 2
 
-        if all_p:
-            screen_obj.addstr(y, 2, 'All probabilities:', curses.A_UNDERLINE)
+        # Two-column table: smoothed (stable) vs raw (per-frame)
+        if smoothed:
+            col2 = max(26, cols // 2)
+            hdr  = '  {:<8}  {:>6}  {:<20}   {:>6}'.format(
+                   'Label', 'smooth', '', 'raw')
+            try:
+                screen_obj.addstr(y, 2, hdr[:cols - 4], curses.A_UNDERLINE)
+            except curses.error:
+                pass
             y += 1
-            bar_w = min(30, cols - 20)
-            for lbl, p in sorted(all_p.items(), key=lambda kv: -kv[1]):
-                bar  = '█' * int(p * bar_w)
-                line = '  {:<8} {:5.1f}%  {}'.format(lbl, p * 100, bar)
+            bar_w = max(4, min(20, (cols - 36) // 2))
+            order = sorted(smoothed.keys(), key=lambda k: -smoothed[k])
+            for lbl in order:
+                sp   = smoothed.get(lbl, 0.0)
+                rp   = raw.get(lbl, 0.0)
+                sbar = '█' * int(sp * bar_w)
+                rbar = '█' * int(rp * bar_w)
+                line = '  {:<8} {:5.1f}%  {:<{bw}}   {:5.1f}%  {}'.format(
+                       lbl, sp * 100, sbar, rp * 100, rbar, bw=bar_w)
                 attr = curses.A_BOLD if lbl == label else 0
                 try:
                     screen_obj.addstr(y, 2, line[:cols - 4], attr)
                 except curses.error:
                     pass
                 y += 1
-                if y >= rows - 2:
+                if y >= rows - 3:
                     break
 
         y += 1
-        screen_obj.addstr(min(y, rows - 2), 2,
-                          '+/- adjust confidence threshold  (now {:.0f}%)'.format(
-                          self._threshold * 100))
+        import math
+        half_life_ms = -150 * math.log(2) / math.log(1 - _EMA_ALPHA)
+        footer = ('+/- confidence threshold ({:.0f}%)   '
+                  'smoothing α={:.2f}  half-life ~{:.0f} ms').format(
+                  self._threshold * 100, _EMA_ALPHA, half_life_ms)
+        try:
+            screen_obj.addstr(min(y, rows - 2), 2, footer[:cols - 4])
+        except curses.error:
+            pass
 
 
 # ── helpers ────────────────────────────────────────────────────────────────────
