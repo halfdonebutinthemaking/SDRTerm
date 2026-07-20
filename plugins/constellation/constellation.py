@@ -3,10 +3,11 @@ from math import gcd
 from scipy.signal import resample_poly
 from core import Decoder, AppState
 
-_DEFAULT_SYMRATE = 10_500   # sym/s
-_SYMRATE_STEP    =    500   # per keypress
-_SYMRATE_MIN     =    500
-_SYMRATE_MAX     = 200_000
+_DEFAULT_SYMRATE  = 10_500   # sym/s
+_SYMRATE_STEP_C   =    500   # coarse step (+/-)
+_SYMRATE_STEP_F   =     50   # fine step ([/])
+_SYMRATE_MIN      =    500
+_SYMRATE_MAX      = 200_000
 _TARGET_SPS      =      8   # samples per symbol after resampling
 _RRC_ALPHA       =   0.35   # roll-off factor (standard)
 _MAX_POINTS      =  4_000   # scatter buffer depth
@@ -37,7 +38,7 @@ def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
 class ConstellationDecoder(Decoder):
     name            = 'constellation'
     key             = 'c'
-    key_help        = '+/-=sym-rate  r=clear'
+    key_help        = '+/-=rate(500)  [/]=rate(50)  r=clear'
     min_sample_rate = 10_000
     realtime        = False
     bg_queue_depth  = 2
@@ -130,11 +131,19 @@ class ConstellationDecoder(Decoder):
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
         if key in (ord('+'), ord('=')):
-            self._symrate = min(_SYMRATE_MAX, self._symrate + _SYMRATE_STEP)
+            self._symrate = min(_SYMRATE_MAX, self._symrate + _SYMRATE_STEP_C)
             self._points  = []
             return True
         if key == ord('-'):
-            self._symrate = max(_SYMRATE_MIN, self._symrate - _SYMRATE_STEP)
+            self._symrate = max(_SYMRATE_MIN, self._symrate - _SYMRATE_STEP_C)
+            self._points  = []
+            return True
+        if key == ord(']'):
+            self._symrate = min(_SYMRATE_MAX, self._symrate + _SYMRATE_STEP_F)
+            self._points  = []
+            return True
+        if key == ord('['):
+            self._symrate = max(_SYMRATE_MIN, self._symrate - _SYMRATE_STEP_F)
             self._points  = []
             return True
         if key == ord('r'):
@@ -227,9 +236,9 @@ class ConstellationDecoder(Decoder):
             except curses.error:
                 pass
 
-        footer = ('+/- sym rate ({:,} sym/s, step {:,})   '
+        footer = ('+/- coarse ±{:,}   [/] fine ±{:,}   {:,} sym/s   '
                   'r=clear   RRC α={:.2f}').format(
-                  symrate, _SYMRATE_STEP, _RRC_ALPHA)
+                  _SYMRATE_STEP_C, _SYMRATE_STEP_F, symrate, _RRC_ALPHA)
         try:
             screen_obj.addstr(rows - 2, 2, footer[:cols - 4], curses.A_DIM)
         except curses.error:

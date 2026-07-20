@@ -4,14 +4,20 @@ Shows the phase-space scatter plot of the strongest signal. Use it to visually
 identify the modulation order of a digital carrier and to tune the symbol rate
 until the clusters click into focus.
 
-Requires `peak_marker` to be active before it in the pipeline.
+Requires `peak_marker` to be active before it in the pipeline, **with tracking
+mode enabled** (`r` in the peak_marker tab). In hold-off mode the peak
+frequency is only updated on detections; between updates it drifts, which
+introduces a carrier offset the plugin cannot fully correct, causing the
+clusters to smear into a ring.
 
 ## Controls
 
 | Key | Action |
 |-----|--------|
-| `+` / `=` | Increase symbol rate (+500 sym/s) |
-| `-` | Decrease symbol rate (−500 sym/s) |
+| `+` / `=` | Increase symbol rate (coarse, +500 sym/s) |
+| `-` | Decrease symbol rate (coarse, −500 sym/s) |
+| `]` | Increase symbol rate (fine, +50 sym/s) |
+| `[` | Decrease symbol rate (fine, −50 sym/s) |
 | `r` | Clear the scatter buffer |
 
 ## How to read the display
@@ -77,8 +83,10 @@ The examples below are specific to the **QPSK test signal**.  For other
 modulations the number of blobs changes (2 for BPSK, 8 for 8PSK, etc.) but
 the diagnostic logic — tight blobs vs. smeared ring — is the same for all PSK.
 
-For the QPSK test signal: four compact blobs on the diagonals, empty space
-between them, clear crosshair at the origin:
+For the QPSK test signal: four compact blobs, empty space between them, clear
+crosshair at the origin. The blobs may land on the axes (0°/90°/180°/270°)
+or on the diagonals (45°/135°/225°/315°) — both are valid QPSK; there is an
+inherent 90° rotational ambiguity and the display does not resolve it:
 
 ```
                     +Q
