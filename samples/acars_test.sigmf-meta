@@ -1,0 +1,23 @@
+{
+  "global": {
+    "core:datatype": "cf32_le",
+    "core:sample_rate": 250000,
+    "core:version": "1.0.0",
+    "core:recorder": "SDRTerm gen_acars_test.py",
+    "core:description": "Synthetic classic ACARS test.  AM/AFSK 2400 baud  mark=2400Hz space=1200Hz  SNR=20.0 dB"
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 129125000.0,
+      "core:datetime": "2026-07-20T22:41:52.570172Z"
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 3000000,
+      "core:description": "ACARS 2400 baud  4 frames"
+    }
+  ]
+}

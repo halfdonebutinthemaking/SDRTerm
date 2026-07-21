@@ -1,0 +1,24 @@
+{
+  "center_hz": 89104730.07746801,
+  "bw_hz": 250000,
+  "gain_db": 43.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": false,
+  "active_decoders": [
+    "fm",
+    "spectrum",
+    "rds"
+  ],
+  "plugin_order": [
+    "fm",
+    "nrsc5_text",
+    "peak_marker",
+    "rds",
+    "record",
+    "rtl-tcp-active",
+    "rtl-tcp-passive"
+  ]
+}
