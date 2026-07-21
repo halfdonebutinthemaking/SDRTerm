@@ -124,7 +124,6 @@ def _parse_frame(bits: list, pos: int):
     Returns dict or None.
     """
     bcs_bytes  = []
-    bcs_target = None
     text_chars = []
 
     def next_byte():
@@ -359,7 +358,6 @@ class AcarsDecoder(Decoder):
             text   = msg.get('text', '')
             bcs_ok = msg.get('bcs_ok', False)
 
-            bcs_attr = 0 if bcs_ok else curses.A_DIM
             prefix   = '[{}] {:7s} {:6s}  '.format(ts, reg, flight)
             line     = prefix + text
             if len(line) > cols - 4:
