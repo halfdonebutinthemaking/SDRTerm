@@ -18,6 +18,9 @@ clusters to smear into a ring.
 | `-` | Decrease symbol rate (coarse, −500 sym/s) |
 | `]` | Increase symbol rate (fine, +50 sym/s) |
 | `[` | Decrease symbol rate (fine, −50 sym/s) |
+| `,` | Rotate reference markers counter-clockwise |
+| `.` | Rotate reference markers clockwise |
+| `z` | Toggle absolute / differential display mode |
 | `r` | Clear the scatter buffer |
 
 ## How to read the display
@@ -186,7 +189,50 @@ precisely align with QAM.
 - **Spread spectrum (DSSS)** — chips spread the energy; the constellation looks
   like noise regardless of symbol rate tuning.
 
-## Limitations
+## EVM measurement
+
+The header shows **EVM** (Error Vector Magnitude) and an estimated **SNR**:
+
+```
+Constellation  10,500 sym/s  QPSK  21,000 bit/s  EVM 3.2%  ~30dB  4000/4000 pts
+```
+
+EVM is the RMS distance from each symbol to its nearest reference marker,
+expressed as a percentage of the nominal symbol amplitude.  Lower is better.
+The SNR estimate derives from `SNR ≈ −20 log₁₀(EVM)`.
+
+| EVM | ~SNR | Signal quality |
+|---|---|---|
+| < 5 % | > 26 dB | Excellent — usable for higher-order modulations |
+| 5–10 % | 20–26 dB | Good — adequate for QPSK/8PSK |
+| 10–25 % | 12–20 dB | Marginal — BPSK/QPSK may still decode |
+| > 25 % | < 12 dB | Poor — frame errors likely |
+
+### Rotation affects EVM accuracy
+
+Each symbol is assigned to its **nearest** reference marker before measuring
+the error distance.  If the markers are misaligned by more than half the
+angular slot spacing (> 45° for QPSK, > 22.5° for 8PSK), symbols get assigned
+to the wrong reference and EVM is artificially inflated.
+
+**Rule**: before trusting the EVM readout, use `,` / `.` to align the red `o`
+markers to the visual centre of the actual clusters.  Once aligned the EVM
+number is a genuine signal quality measurement.  Small misalignments
+(< half a slot) are self-correcting via nearest-neighbour assignment.
+
+### Radius of the reference markers
+
+Symbols are normalised to **median magnitude ≈ 1** before plotting, so for
+PSK signals (constant envelope) the cluster centres land very close to the
+unit circle and the reference markers at radius = 1 are accurate.
+
+For **QAM** (multiple amplitude levels) the median of all symbols falls
+between the inner and outer rings, placing the unit-circle references
+incorrectly for every cluster.  EVM will be systematically inflated for QAM
+signals until per-ring reference radii are supported.  The current
+implementation is accurate for any PSK/DPSK modulation order.
+
+
 
 ### Phase correction only works reliably for QPSK
 
