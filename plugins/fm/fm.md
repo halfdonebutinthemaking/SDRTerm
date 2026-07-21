@@ -2,7 +2,7 @@
 
 Demodulates wideband FM broadcast audio and plays it back in real time. Draws a cyan channel-bandwidth highlight on the spectrum or waterfall.
 
-![FM plugin tab with channel highlight](images/02_plugin_fm.png)
+![FM plugin in action](images/fm.gif)
 
 ## Controls
 

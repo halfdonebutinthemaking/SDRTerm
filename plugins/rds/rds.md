@@ -2,7 +2,9 @@
 
 Decodes RDS (Radio Data System) data from the 57 kHz subcarrier of FM broadcasts.
 
-![RDS plugin tab](images/06_rds.png) Displays PI code, PS name (station name), RadioText (song/artist), PTY (programme type), TP (traffic programme), and TA (traffic announcement) flags.
+![RDS decoder showing station name and RadioText](images/rds.gif)
+
+Displays PI code, PS name (station name), RadioText (song/artist), PTY (programme type), TP (traffic programme), and TA (traffic announcement) flags.
 
 Requires the FM plugin to be active and earlier in the pipeline.
 

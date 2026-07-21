@@ -3,8 +3,8 @@
 | Plugin | Description | Preview | Docs |
 |--------|-------------|---------|------|
 | **spectrum** | Always-active FFT display — averaged dBFS power spectrum rendered as bar chart or waterfall | | [spectrum.md](spectrum/spectrum.md) |
-| **fm** | FM broadcast audio decoder with real-time playback and channel-bandwidth highlight | | [fm.md](fm/fm.md) |
-| **rds** | RDS decoder — PS name, RadioText, PTY, PI code, TP/TA flags from the FM 57 kHz subcarrier | | [rds.md](rds/rds.md) |
+| **fm** | FM broadcast audio decoder with real-time playback and channel-bandwidth highlight | ![](fm/images/fm.gif) | [fm.md](fm/fm.md) |
+| **rds** | RDS decoder — PS name, RadioText, PTY, PI code, TP/TA flags from the FM 57 kHz subcarrier | ![](rds/images/rds.gif) | [rds.md](rds/rds.md) |
 | **nrsc5_text** | NRSC-5 HD Radio decoder for digital IBOC sidebands, pure Python/NumPy | ![](nrsc5_text/images/nrsc.gif) | [nrsc5_text.md](nrsc5_text/nrsc5_text.md) |
 | **peak_marker** | Marks the strongest signal peak; hold-off, alpha-beta Doppler tracking, and follow mode | ![](peak_marker/images/peak.gif) | [peak_marker.md](peak_marker/peak_marker.md) |
 | **modclass** | Live modulation classifier — identifies OOK, AM, FM, BPSK, QPSK, 8PSK, QAM16, FSK using an on-device neural network | ![](modclass/images/modclass.gif) | [modclass.md](modclass/modclass.md) |
