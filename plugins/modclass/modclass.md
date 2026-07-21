@@ -4,6 +4,8 @@ Identifies the modulation type of the strongest signal in the spectrum using a s
 neural network running entirely on-device.  Requires the `peak_marker` plugin to be
 active in the pipeline before it.
 
+![Modulation classifier in action](images/modclass.gif)
+
 ## Quick start
 
 Install the runtime and dataset dependencies (needed once):

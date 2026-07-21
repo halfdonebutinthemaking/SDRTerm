@@ -43,6 +43,8 @@ Then replay it:
 uv run python main.py --file samples/vdl2_test.sigmf-data --bw 250000 --f 136.9M
 ```
 
+![VDL2 decoder decoding live aircraft messages](images/vdl2.gif)
+
 ## Decoding steps
 
 1. **`v`** — switch to the VDL2 tab. Decoding starts immediately at the centre

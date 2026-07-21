@@ -88,19 +88,7 @@ crosshair at the origin. The blobs may land on the axes (0°/90°/180°/270°)
 or on the diagonals (45°/135°/225°/315°) — both are valid QPSK; there is an
 inherent 90° rotational ambiguity and the display does not resolve it:
 
-```
-                    +Q
-
-        *    │    *
-       ***   │   ***
-        *    │    *
-─────────────+──────────
-        *    │    *
-       ***   │   ***
-        *    │    *
-
-                    -Q
-```
+![BPSK constellation — tight clusters at correct symbol rate](images/constellation_bpsk.gif)
 
 ### What "wrong" looks like
 
@@ -142,6 +130,20 @@ is not PSK, or the SNR is too low (<5 dB).
 
 Rotating the symbol rate away from 10 500 sym/s in either direction causes the
 clusters to smear, confirming the tuning sensitivity.
+
+## Display modes
+
+Press `z` to toggle between **absolute** and **differential** phase display.
+
+- **Absolute** (default) — each dot is the raw recovered symbol position.
+  Requires the 4th-power carrier estimator to remove the unknown phase offset;
+  works well for QPSK, unreliable for 8PSK and above.
+- **Differential** — each dot is the *phase difference* between consecutive
+  symbols (`sym[n] × conj(sym[n−1])`).  The carrier phase cancels, so the
+  display is stable for any PSK order and works correctly for differential
+  encodings like D8PSK (VDL Mode 2).
+
+![Absolute vs differential constellation mode](images/constellation_phases.gif)
 
 ## What the constellation can identify
 
