@@ -56,8 +56,12 @@ band — set centre near 1621.25 MHz with bandwidth ≥ 2 MHz.
    FFT bin range covers each visible Iridium channel (typically ~40 bins
    per channel at 2 MSPS / 2048 FFT).
 4. **Per-channel detection** — for every channel, the mean power in its bin
-   range is compared to the local noise floor. A ratio above 8× (~9 dB)
+   range is compared to the local noise floor. A ratio above 16× (~12 dB)
    in any frame of the current chunk counts as one burst on that channel.
+   Threshold was raised from 8× after live testing showed that wire
+   antennas at 1.6 GHz see birdies/spurs at ~9 dB, causing constant false
+   positives on isolated channels. Real Iridium bursts land 15–30 dB above
+   noise so 12 dB still catches them cleanly.
 5. **Rate stats** — burst rate is updated once per second from a rolling
    accumulator. Per-channel counts use a 10-second sliding window.
 

@@ -60,8 +60,12 @@ band. Set the centre near 1621.25 MHz with bandwidth of 2 MHz or more.
    FFT, each channel covers about 40 bins.
 4. **Per-channel detection** — for each channel, the plugin gets the mean
    power in its bin range. It compares this to the local noise floor. If
-   the ratio is above 8× (about 9 dB) in any frame of the chunk, the plugin
-   counts one burst on that channel.
+   the ratio is above 16× (about 12 dB) in any frame of the chunk, the
+   plugin counts one burst on that channel. The threshold was raised from
+   8× after live tests. A wire antenna at 1.6 GHz often sees birdies or
+   spurs at about 9 dB, which caused constant false positives on single
+   channels. Real Iridium bursts are 15–30 dB above the noise floor, so
+   12 dB still catches them.
 5. **Rate stats** — the plugin updates the burst rate once per second from
    a rolling counter. The per-channel counts use a 10-second sliding window.
 

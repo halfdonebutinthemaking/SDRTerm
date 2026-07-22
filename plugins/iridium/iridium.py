@@ -44,7 +44,11 @@ def _channel_freq(chan_id: int) -> float:
 # ── detector tuning constants ────────────────────────────────────────────────
 _FFT_SIZE          = 2048        # 2 MSPS / 2048 ≈ 977 Hz/bin, ~1 ms per frame
 _NOISE_ALPHA       = 0.02        # EMA coefficient — ~50-frame time constant
-_THRESHOLD_RATIO   = 8.0         # power ratio above noise floor for detection (~9 dB)
+_THRESHOLD_RATIO   = 16.0        # power ratio above noise floor for detection (~12 dB).
+                                 # Raised from 8× (9 dB) after live testing: a wire antenna at
+                                 # 1.6 GHz often sees birdies / spurs at ~9 dB above noise, which
+                                 # produced constant false positives on one channel. Real Iridium
+                                 # bursts land 15–30 dB above noise, so 12 dB still catches them.
 _STATS_INTERVAL_S  = 1.0
 _RECENT_WIN_S      = 10.0        # rolling window for per-channel activity counts
 _MAX_RECENT_LIST   = 15          # rolling display list length
