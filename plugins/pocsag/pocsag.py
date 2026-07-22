@@ -37,6 +37,10 @@ _BATCH_CW_COUNT  = 16
 _BATCH_BIT_LEN   = _SYNC_LEN + _BATCH_CW_COUNT * 32   # 544
 _MAX_SYNC_ERRORS = 1     # 32-bit sync ⇒ 1-bit tolerance keeps noise false-matches rare
 
+# Sync codeword as a bit array (MSB first) — used by the vectorised search
+_SYNC_BITS_ARR = np.array(
+    [(_SYNC_WORD >> (31 - k)) & 1 for k in range(_SYNC_LEN)], dtype=np.uint8)
+
 # ── message-decoding constants ───────────────────────────────────────────────
 # 4-bit BCD → character map for numeric messages (bits transmitted LSB first)
 _NUMERIC_CHARSET = '0123456789SU -)('
@@ -86,14 +90,17 @@ def _bits_to_int_msb(bits: np.ndarray, offset: int, n: int) -> int:
 
 
 def _find_sync(bits: np.ndarray) -> list:
-    """Return every bit position where the sync codeword appears (≤2 errors)."""
-    positions = []
-    limit = len(bits) - _SYNC_LEN
-    for i in range(limit):
-        w = _bits_to_int_msb(bits, i, _SYNC_LEN)
-        if bin(w ^ _SYNC_WORD).count('1') <= _MAX_SYNC_ERRORS:
-            positions.append(i)
-    return positions
+    """Return every bit position where the sync codeword appears.
+
+    Vectorised: a single sliding-window compare over the whole bit array,
+    ~1000× faster than a Python loop and releases the GIL so the main
+    spectrum/waterfall thread isn't starved.
+    """
+    if len(bits) < _SYNC_LEN:
+        return []
+    windows   = np.lib.stride_tricks.sliding_window_view(bits, _SYNC_LEN)
+    n_matches = (windows == _SYNC_BITS_ARR).sum(axis=1)
+    return np.where(n_matches >= _SYNC_LEN - _MAX_SYNC_ERRORS)[0].tolist()
 
 
 def _decode_batch(bits: np.ndarray, sync_pos: int) -> list:
