@@ -92,7 +92,15 @@ class IridiumDetector(Decoder):
     # ── channel map ─────────────────────────────────────────────────────────
 
     def _rebuild_chan_map(self, state: AppState) -> None:
-        """Precompute FFT bin ranges for each Iridium channel visible in the current tuning."""
+        """Precompute FFT bin ranges for each Iridium channel visible in the current tuning.
+
+        Also resets the per-bin noise floor: after a retune, each FFT bin is
+        looking at a completely different frequency, so the stored EMA value
+        is stale. Leaving it in place would cause spurious detections or
+        missed bursts for the first ~50 frames while the EMA re-converged.
+        Setting to None triggers a fresh initialisation on the next process()
+        call, using the first chunk after retune as the noise-floor seed.
+        """
         freqs = np.linspace(-state.bw_hz / 2, state.bw_hz / 2, _FFT_SIZE) + state.center_hz
         self._chan_map = {}
         half = IRIDIUM_CHAN_SPACING / 2
@@ -105,6 +113,7 @@ class IridiumDetector(Decoder):
             bh = int(np.searchsorted(freqs, high))
             if bh > bl:
                 self._chan_map[chan_id] = (bl, bh)
+        self._noise_floor = None
         self._last_center = state.center_hz
         self._last_bw     = state.bw_hz
 

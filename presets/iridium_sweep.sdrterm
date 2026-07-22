@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "center_hz": 1621250000.0,
+  "bw_hz": 2400000,
+  "gain_db": 42.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": false,
+  "active_decoders": [
+    "spectrum",
+    "iridium",
+    "freqhop"
+  ],
+  "plugin_order": [
+    "iridium",
+    "freqhop",
+    "peak_marker",
+    "constellation",
+    "range-scan",
+    "record",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "acars",
+    "pocsag",
+    "vdl2",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {
+    "freqhop": {
+      "slots": [
+        {"freq_hz": 1617200000.0, "dwell_s": 5.0},
+        {"freq_hz": 1619300000.0, "dwell_s": 5.0},
+        {"freq_hz": 1621250000.0, "dwell_s": 5.0},
+        {"freq_hz": 1623200000.0, "dwell_s": 5.0},
+        {"freq_hz": 1625100000.0, "dwell_s": 5.0}
+      ]
+    }
+  }
+}
