@@ -35,7 +35,7 @@ _IDLE_WORD       = 0x7A89C197
 _SYNC_LEN        = 32
 _BATCH_CW_COUNT  = 16
 _BATCH_BIT_LEN   = _SYNC_LEN + _BATCH_CW_COUNT * 32   # 544
-_MAX_SYNC_ERRORS = 2
+_MAX_SYNC_ERRORS = 1     # 32-bit sync ⇒ 1-bit tolerance keeps noise false-matches rare
 
 # ── message-decoding constants ───────────────────────────────────────────────
 # 4-bit BCD → character map for numeric messages (bits transmitted LSB first)
@@ -173,21 +173,24 @@ def _decode_numeric(bits: list) -> str:
 
 
 def _finalize_msg(msg: dict) -> dict:
-    """Pick numeric or alphanumeric decoding based on function code + heuristic."""
-    bits         = msg['bits']
-    numeric_text = _decode_numeric(bits)
-    alpha_text   = _decode_alphanumeric(bits)
+    """Pick numeric or alphanumeric decoding based on function code."""
+    # Function 1 (tone A) and function 2 (tone B) are beep-only per POCSAG spec —
+    # any payload that appears after their address codeword is almost always
+    # spurious BCH-corrected noise. Drop the payload.
+    if msg['func'] in (1, 2):
+        return {
+            'ric':        msg['ric'],
+            'func':       msg['func'],
+            'mode':       'beep',
+            'text':       '',
+            'has_errors': msg['has_errors'],
+        }
 
-    # Func 3 traditionally signals alphanumeric; func 0 signals numeric.
-    # Fall back to a printability heuristic when the func code is ambiguous.
+    bits = msg['bits']
     if msg['func'] == 3:
-        text, mode = alpha_text, 'alpha'
-    elif msg['func'] == 0:
-        text, mode = numeric_text, 'numeric'
-    elif any(c.isalpha() for c in alpha_text):
-        text, mode = alpha_text, 'alpha'
-    else:
-        text, mode = numeric_text, 'numeric'
+        text, mode = _decode_alphanumeric(bits), 'alpha'
+    else:                                          # func == 0
+        text, mode = _decode_numeric(bits), 'numeric'
 
     return {
         'ric':        msg['ric'],
@@ -278,10 +281,12 @@ class PocsagDecoder(Decoder):
                             key = (msg['ric'], msg['text'][:30])
                             if key in self._seen:
                                 continue
-                            if not msg['has_errors']:
-                                self._seen.add(key)
-                                if len(self._seen) > 512:
-                                    self._seen.pop()
+                            # Always dedupe — a repeat within the 3s ring buffer
+                            # is either a real duplicate or a stable false decode.
+                            # Either way we only want to show it once.
+                            self._seen.add(key)
+                            if len(self._seen) > 512:
+                                self._seen.pop()
                             msg['ts']   = time.strftime('%H:%M:%S')
                             msg['baud'] = baud
                             self._messages.appendleft(msg)
