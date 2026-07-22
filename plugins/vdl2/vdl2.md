@@ -47,12 +47,14 @@ uv run python main.py --file samples/vdl2_test.sigmf-data --bw 250000 --f 136.9M
 
 ## Decoding steps
 
-1. **`v`** — switch to the VDL2 tab. Decoding starts immediately at the centre
-   frequency; no other plugin is required.
+1. Enable the VDL2 plugin from the plugin menu (`p`) and switch to its tab.
+   Decoding starts immediately at the centre frequency; no other plugin is
+   required.
 
 For live hardware, tune the SDR to the VDL2 channel (e.g. 136.900 MHz) with at
-least 250 kHz bandwidth, then press `v`. The decoder tolerates carrier offsets
-up to roughly ±1 kHz before the matched filter starts attenuating the signal.
+least 250 kHz bandwidth and open the VDL2 tab. The decoder tolerates carrier
+offsets up to roughly ±1 kHz before the matched filter starts attenuating the
+signal.
 
 Within a few seconds the four messages should appear in green:
 
@@ -111,7 +113,7 @@ IQ samples
 
 ## Why the constellation plugin cannot identify this signal
 
-The constellation plugin (`c`) will show an empty ring or nothing at all for VDL2.
+The constellation plugin will show an empty ring or nothing at all for VDL2.
 Two reasons:
 
 1. **peak_marker cannot detect it.** VDL2 is a wideband signal — its power is
@@ -125,7 +127,7 @@ Two reasons:
    display spins into a ring instead of 8 clusters.  An 8th-power estimator
    would be needed.
 
-Use this plugin (`v`) to decode VDL2. The constellation is suited to narrowband
+Use this plugin to decode VDL2. The constellation is suited to narrowband
 signals (FM carriers, BPSK, QPSK) where peak_marker can find a single bright bin.
 
 ## Limitations

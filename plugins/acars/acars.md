@@ -42,8 +42,8 @@ Then replay it:
 uv run python main.py --file samples/acars_test.sigmf-data --bw 250000 --f 129.125M
 ```
 
-Activate the ACARS tab with `a`. Within a few seconds four messages should
-appear in bold:
+Enable the ACARS plugin from the plugin menu (`p`) and switch to its tab.
+Within a few seconds four messages should appear in bold:
 
 ```
 [HH:MM:SS] N12345  AA0123  HELLO FROM ACARS! SDRTERM IS DECODING THIS.

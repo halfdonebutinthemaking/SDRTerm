@@ -18,7 +18,8 @@ Usage
   uv run python scripts/gen_acars_test.py [OUTPUT_BASE]
 
   uv run python main.py --file samples/acars_test.sigmf-data --bw 250000 --f 129.125M
-  Switch to ACARS tab (a) — no peak_marker needed.
+  Enable the acars plugin from the plugin menu (p) and switch to its tab.
+  No peak_marker needed.
 """
 
 import json, os, sys
@@ -263,7 +264,7 @@ def main():
     print()
     print('Replay:')
     print('  uv run python main.py --file {} --bw 250000 --f 129.125M'.format(data_path))
-    print('Then: activate acars plugin (p menu) and switch to its tab.')
+    print('Then: enable the acars plugin from the plugin menu (p) and switch to its tab.')
 
 
 if __name__ == '__main__':

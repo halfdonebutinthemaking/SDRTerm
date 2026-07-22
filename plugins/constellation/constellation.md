@@ -56,7 +56,7 @@ tight blobs.
 ## Tuning procedure
 
 1. Enable `peak_marker` and confirm the peak is locked onto the signal.
-2. Switch to the constellation tab (`c`).
+2. Switch to the constellation tab.
 3. Press `+` / `-` to sweep the symbol rate.  Watch for the scattered ring to
    resolve into distinct blobs.
 4. Once tight, read the symbol rate from the footer.  Combined with the number
@@ -77,7 +77,7 @@ uv run python main.py \
   --f 120M
 ```
 
-Enable `peak_marker` (`k`), switch to constellation (`c`), then set symbol rate
+Enable `peak_marker`, switch to the constellation tab, then set symbol rate
 to **10 500 sym/s**.
 
 ### What "right" looks like
@@ -269,7 +269,7 @@ the phase correction issue above:
 
 2. **The 4th-power correction fails for 8PSK** as described above.
 
-For VDL Mode 2 use the dedicated **VDL2 plugin** (`v`) instead, which handles
+For VDL Mode 2 use the dedicated **VDL2 plugin** instead, which handles
 wideband detection and differential decoding internally.
 
 ### Other limitations

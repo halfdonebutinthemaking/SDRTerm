@@ -42,8 +42,8 @@ Replay:
 uv run python main.py --file samples/pocsag_test.sigmf-data --bw 250000 --f 439.9875M
 ```
 
-Activate the pocsag tab (`g`).  Within a few seconds three messages should
-appear in bold:
+Enable the pocsag plugin from the plugin menu (`p`) and switch to its tab.
+Within a few seconds three messages should appear in bold:
 
 ```
 [HH:MM:SS] RIC: 100200 F0  1200bps  numeric  12345

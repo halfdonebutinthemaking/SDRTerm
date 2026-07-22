@@ -193,7 +193,7 @@ from core import Decoder, AppState
 
 class MyDecoder(Decoder):
     name            = 'mymode'          # unique ID
-    key             = 'y'               # shown in plugin menu; required for menu listing
+    key             = 'y'               # any non-empty string; presence includes the plugin in the plugin menu
     key_help        = 'o=path'          # tab-specific shortcut hints shown in footer
     min_sample_rate = 250_000           # minimum BW this decoder needs
 

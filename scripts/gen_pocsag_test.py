@@ -18,7 +18,7 @@ Usage
   uv run python scripts/gen_pocsag_test.py [OUTPUT_BASE]
 
   uv run python main.py --file samples/pocsag_test.sigmf-data --bw 250000 --f 439.9875M
-  Switch to POCSAG tab (g).
+  Enable the pocsag plugin from the plugin menu (p) and switch to its tab.
 """
 
 import json, os, sys
@@ -235,7 +235,7 @@ def main():
     print()
     print('Replay:')
     print('  uv run python main.py --file {} --bw 250000 --f 439.9875M'.format(data_path))
-    print('Then: activate pocsag plugin (p menu) and switch to its tab.')
+    print('Then: enable the pocsag plugin from the plugin menu (p) and switch to its tab.')
 
 
 if __name__ == '__main__':
