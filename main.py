@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-import os, time, curses, threading, queue
+import atexit, os, subprocess, sys, time, curses, threading, queue
 from collections import deque
 import numpy as np
 
@@ -12,6 +12,29 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 # with 0x1B).  Default is 1000 ms — noticeable lag when closing modals with
 # ESC.  25 ms is fast enough that no real terminal sequence exceeds it.
 os.environ.setdefault('ESCDELAY', '25')
+
+
+# Belt-and-suspenders terminal reset.  curses.wrapper normally restores the
+# tty via endwin(), but it can fail if a daemon worker thread writes to the
+# terminal during or after cleanup, or if a plugin's stop() prints while
+# curses is still active.  A stuck ONLCR flag then makes newlines skip the
+# carriage return, producing stair-step output in the shell after we exit.
+# `stty sane` is POSIX, idempotent, and takes microseconds — safe to run
+# on every exit whether or not curses cleaned up correctly.
+def _restore_terminal_on_exit():
+    try:
+        curses.endwin()
+    except Exception:
+        pass
+    if sys.platform != 'win32' and sys.stdout.isatty():
+        try:
+            subprocess.run(['stty', 'sane'], check=False, timeout=1.0,
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
+
+atexit.register(_restore_terminal_on_exit)
 
 from core import (
     AppState, Device, parse_freq,
