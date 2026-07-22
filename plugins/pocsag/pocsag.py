@@ -45,6 +45,21 @@ _SYNC_BITS_ARR = np.array(
 # 4-bit BCD → character map for numeric messages (bits transmitted LSB first)
 _NUMERIC_CHARSET = '0123456789SU -)('
 
+# ── noise-rejection thresholds ───────────────────────────────────────────────
+# Reject a batch if fewer than this many codewords are idle or need zero BCH
+# correction.  Real POCSAG batches are mostly idle padding + a few clean
+# address/message codewords; pure noise gets BCH-corrected into scattered
+# "valid" garbage that rarely produces clean idles.
+_MIN_CLEAN_CW    = 8    # out of 16
+
+# Alpha-message printability floor: fraction of chars that must be letters,
+# digits, or space to be considered a real message rather than noise.
+_MIN_ALPHA_RATIO = 0.60
+
+# Numeric-message digit floor: real numeric pages are mostly digits;
+# noise decodes are heavy on the punctuation entries of the BCD charset.
+_MIN_DIGIT_RATIO = 0.50
+
 # ── buffering ────────────────────────────────────────────────────────────────
 # 3 s at 50 kHz is enough to hold the longest batch (~1.1 s at 512 baud)
 # even if it starts near the end of one process() call and ends in the next.
@@ -104,9 +119,14 @@ def _find_sync(bits: np.ndarray) -> list:
 
 
 def _decode_batch(bits: np.ndarray, sync_pos: int) -> list:
-    """Decode the 16 codewords following the sync word into message dicts."""
+    """Decode the 16 codewords following the sync word into message dicts.
+
+    Returns an empty list if the batch fails the quality check (too many
+    codewords needed correction — probably noise, not a real batch).
+    """
     messages    = []
     current_msg = None
+    n_clean_cw  = 0     # idle codewords + zero-error BCH decodes
 
     for cw_i in range(_BATCH_CW_COUNT):
         cw_start = sync_pos + _SYNC_LEN + cw_i * 32
@@ -116,6 +136,7 @@ def _decode_batch(bits: np.ndarray, sync_pos: int) -> list:
 
         # Idle codewords terminate the current message and are skipped
         if bin(raw_word ^ _IDLE_WORD).count('1') <= 2:
+            n_clean_cw += 1
             if current_msg is not None:
                 messages.append(_finalize_msg(current_msg))
                 current_msg = None
@@ -126,6 +147,8 @@ def _decode_batch(bits: np.ndarray, sync_pos: int) -> list:
             if current_msg is not None:
                 current_msg['has_errors'] = True
             continue
+        if n_err == 0 and parity_ok:
+            n_clean_cw += 1
 
         indicator = (word >> 31) & 1
         if indicator == 0:
@@ -152,6 +175,12 @@ def _decode_batch(bits: np.ndarray, sync_pos: int) -> list:
 
     if current_msg is not None:
         messages.append(_finalize_msg(current_msg))
+
+    # Batch quality gate: pure-noise batches rarely produce this many idle
+    # or zero-error codewords.
+    if n_clean_cw < _MIN_CLEAN_CW:
+        return []
+
     return messages
 
 
@@ -199,11 +228,24 @@ def _finalize_msg(msg: dict) -> dict:
     else:                                          # func == 0
         text, mode = _decode_numeric(bits), 'numeric'
 
+    trimmed = text.rstrip(' \x00\x03\x04.')
+
+    # Text-quality gate: reject decoded strings that look like noise
+    if trimmed:
+        if mode == 'alpha':
+            readable = sum(1 for c in trimmed if c.isalnum() or c == ' ')
+            if readable / len(trimmed) < _MIN_ALPHA_RATIO:
+                trimmed = ''
+        else:  # numeric
+            digits = sum(1 for c in trimmed if c.isdigit())
+            if digits / len(trimmed) < _MIN_DIGIT_RATIO:
+                trimmed = ''
+
     return {
         'ric':        msg['ric'],
         'func':       msg['func'],
         'mode':       mode,
-        'text':       text.rstrip(' \x00\x03\x04.'),
+        'text':       trimmed,
         'has_errors': msg['has_errors'],
     }
 
