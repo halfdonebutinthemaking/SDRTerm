@@ -7,6 +7,12 @@ import numpy as np
 # default dyld search path. Set it before rtlsdr triggers dlopen().
 os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 
+# ncurses waits ESCDELAY ms after receiving 0x1B to disambiguate a standalone
+# ESC keypress from the start of an escape sequence (arrow keys etc all begin
+# with 0x1B).  Default is 1000 ms — noticeable lag when closing modals with
+# ESC.  25 ms is fast enough that no real terminal sequence exceeds it.
+os.environ.setdefault('ESCDELAY', '25')
+
 from core import (
     AppState, Device, parse_freq,
     FFT_BINS, N_AVG, REFRESH_S, READ_MAX,
