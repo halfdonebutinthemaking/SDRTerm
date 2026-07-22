@@ -477,6 +477,59 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 
 ---
 
+## Troubleshooting
+
+### Stair-step output in the shell after you quit SDRTerm
+
+If your shell shows `ls` or other commands with each new line going to
+the right, and not back to column 0, the terminal is in a bad state. Here
+is an example:
+
+```
+LICENSE             __pycache__         data                fix_venv.py
+                                                                                    README.md           core.py
+                                                                                                                    devices/
+```
+
+This happens when the terminal `ONLCR` output flag is off. The flag tells
+the terminal to move to column 0 on a new line. curses turns the flag off
+when SDRTerm starts. It turns the flag on again when SDRTerm exits. Some
+exit paths do not do the "on again" step. Then the shell inherits the
+bad state.
+
+**Fix it in the current shell**: type `stty sane`. This command puts the
+terminal back to safe defaults. It is safe to run any time. You can also
+open a new shell.
+
+**How SDRTerm helps**: SDRTerm has code in `main.py` that runs `stty sane`
+on all exit paths. This includes a normal quit, an exception, Ctrl+C, or
+`sys.exit`. The code cannot run if the interpreter crashes hard, or if
+you kill the app with `os._exit()`. In that case, run `stty sane` in the
+shell.
+
+### The signal has no sound, or the tab shows nothing
+
+Common causes, most likely first:
+- **Gain is too low**: press `g` to open the gain modal, then set a
+  higher value. A small antenna with no LNA often needs 40 dB or more
+  on VHF and UHF.
+- **Wrong frequency**: use `range-scan` on the band. Find the real
+  carrier before you tune by hand.
+- **Bandwidth is too small**: some signals need 250 kHz or more (VDL2,
+  POCSAG). Check the status bar.
+- **Wrong antenna**: a small VHF antenna does not work well on UHF, and
+  the other way round.
+
+### `librtlsdr` errors when the app starts (macOS)
+
+If `pyrtlsdr` fails with "librtlsdr not found":
+- Make sure `librtlsdr` is installed with Homebrew: `brew install librtlsdr`
+- On Apple Silicon, `main.py` sets `DYLD_LIBRARY_PATH=/opt/homebrew/lib`
+  before the import. If the error still happens, check that the library
+  is there: `ls /opt/homebrew/lib/librtlsdr*`.
+
+---
+
 ## Project structure
 
 ```

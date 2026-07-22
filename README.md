@@ -475,6 +475,59 @@ os.environ.setdefault('DYLD_LIBRARY_PATH', '/opt/homebrew/lib')
 
 ---
 
+## Troubleshooting
+
+### Terminal shows stair-step output after quitting SDRTerm
+
+If after quitting the app your shell shows `ls` or other commands with each
+new line stepping to the right instead of returning to column 0 — for example:
+
+```
+LICENSE             __pycache__         data                fix_venv.py
+                                                                                    README.md           core.py
+                                                                                                                    devices/
+```
+
+then the terminal's `ONLCR` output flag has been left off. This means `\n`
+moves the cursor down without also returning to column 0. curses turns
+`ONLCR` off during normal operation and restores it on exit, but the
+restore can fail if a plugin's `stop()` writes to the terminal while
+curses is still active, or if a daemon worker thread interferes with
+`endwin()` at shutdown.
+
+**Fix in the current shell**: run `stty sane`. This restores the terminal
+to POSIX defaults (idempotent — safe to run any time). Alternatively,
+open a new shell.
+
+**Prevention**: SDRTerm registers an `atexit` handler in `main.py` that
+runs `stty sane` on every exit path (normal quit, uncaught exception,
+Ctrl+C, `sys.exit`). If you still see the stair-step after quitting the
+app, either that handler did not run — which happens with `os._exit()`
+or a hard interpreter crash — or another program left the terminal in
+that state. `stty sane` always fixes it manually.
+
+### Signal is inaudible or shows nothing
+
+Common causes, in order of likelihood:
+- **Gain too low**: press `g` for the gain modal and increase manually.
+  With a small antenna and no LNA, VHF/UHF signals often need 40 dB+.
+- **Wrong tune frequency**: use `range-scan` across the expected band to
+  find the real carrier before you tune manually.
+- **Bandwidth too small**: wideband signals (VDL2, POCSAG) need at least
+  250 kHz. Check the status bar.
+- **Antenna mismatch**: a small VHF antenna does not receive UHF well
+  and vice versa.
+
+### `librtlsdr` errors on start (macOS)
+
+If pyrtlsdr fails with "librtlsdr not found":
+- Make sure Homebrew's `librtlsdr` is installed: `brew install librtlsdr`
+- On Apple Silicon, `main.py` sets `DYLD_LIBRARY_PATH=/opt/homebrew/lib`
+  before the import. If you get the error anyway, check that `librtlsdr`
+  is installed at that path with `ls /opt/homebrew/lib/librtlsdr*`.
+
+---
+
 ## Project structure
 
 ```
