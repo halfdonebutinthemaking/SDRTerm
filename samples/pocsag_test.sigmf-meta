@@ -1,0 +1,23 @@
+{
+  "global": {
+    "core:datatype": "cf32_le",
+    "core:sample_rate": 250000,
+    "core:version": "1.0.0",
+    "core:recorder": "SDRTerm gen_pocsag_test.py",
+    "core:description": "Synthetic POCSAG 2-FSK 1200 baud \u00b14500Hz SNR=20.0 dB"
+  },
+  "captures": [
+    {
+      "core:sample_start": 0,
+      "core:frequency": 439987500.0,
+      "core:datetime": "2026-07-22T01:46:18.971050Z"
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 3000000,
+      "core:description": "POCSAG 2-FSK 1200 baud  3 messages"
+    }
+  ]
+}

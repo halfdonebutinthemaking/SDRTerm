@@ -16,3 +16,4 @@
 | **vdl2** | VDL Mode 2 decoder — D8PSK 10,500 sym/s, HDLC/AVLC frames, ACARS text; tune to a VDL2 channel at 250 kHz bandwidth and press `v` | ![](vdl2/images/vdl2.gif) | [vdl2.md](vdl2/vdl2.md) |
 | **freqhop** | Frequency hopper — maintain a saved list of frequencies with per-slot dwell times; cycles automatically so you can monitor multiple airband channels | ![](freqhop/images/freqhop.gif) | [freqhop.md](freqhop/freqhop.md) |
 | **acars** | Classic ACARS decoder — AM/AFSK 2400 baud, mark=2400 Hz / space=1200 Hz; decodes aircraft registration, flight ID, and message text with BCS integrity check | | [acars.md](acars/acars.md) |
+| **pocsag** | POCSAG paging decoder — direct 2-FSK, auto-detects 512/1200/2400 baud, BCH(31,21) error correction, decodes numeric and alphanumeric messages with RIC | | [pocsag.md](pocsag/pocsag.md) |
