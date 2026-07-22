@@ -44,11 +44,13 @@ def _channel_freq(chan_id: int) -> float:
 # ── detector tuning constants ────────────────────────────────────────────────
 _FFT_SIZE          = 2048        # 2 MSPS / 2048 ≈ 977 Hz/bin, ~1 ms per frame
 _NOISE_ALPHA       = 0.02        # EMA coefficient — ~50-frame time constant
-_THRESHOLD_RATIO   = 16.0        # power ratio above noise floor for detection (~12 dB).
-                                 # Raised from 8× (9 dB) after live testing: a wire antenna at
-                                 # 1.6 GHz often sees birdies / spurs at ~9 dB above noise, which
-                                 # produced constant false positives on one channel. Real Iridium
-                                 # bursts land 15–30 dB above noise, so 12 dB still catches them.
+_DEFAULT_THRESH_DB = 12.0        # detection threshold in dB above local noise floor.
+                                 # 12 dB (16× power) filters out most birdies/spurs while still
+                                 # catching real Iridium bursts (typically 15–30 dB above noise).
+                                 # Tunable at runtime with +/- in the plugin tab.
+_MIN_THRESH_DB     = 3.0         # 2× power
+_MAX_THRESH_DB     = 30.0        # 1000× power
+_THRESH_STEP_DB    = 3.0         # +3 dB = 2× ratio per step
 _STATS_INTERVAL_S  = 1.0
 _RECENT_WIN_S      = 10.0        # rolling window for per-channel activity counts
 _MAX_RECENT_LIST   = 15          # rolling display list length
@@ -57,7 +59,7 @@ _MAX_RECENT_LIST   = 15          # rolling display list length
 class IridiumDetector(Decoder):
     name            = 'iridium'
     key             = 'i'
-    key_help        = 'r=clear'
+    key_help        = '+/-=threshold  r=clear'
     min_sample_rate = 2_000_000
     realtime        = False
     bg_queue_depth  = 2
@@ -75,10 +77,13 @@ class IridiumDetector(Decoder):
         self._last_stats    = 0.0
         self._last_center   = 0.0
         self._last_bw       = 0
+        self._threshold_db  = _DEFAULT_THRESH_DB    # tunable at runtime via +/-
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
     def start(self, state: AppState) -> None:
+        # threshold_db intentionally NOT reset — persists across start/stop
+        # so users don't lose their tuned setting when toggling the plugin.
         self._noise_floor   = None
         self._chan_map      = {}
         self._chan_bursts   = {}
@@ -91,7 +96,13 @@ class IridiumDetector(Decoder):
         self._last_bw       = 0
 
     def stop(self) -> None:
-        self.start(None)
+        self._noise_floor   = None
+        self._chan_map      = {}
+        self._chan_bursts   = {}
+        self._recent_bursts.clear()
+        self._total_bursts  = 0
+        self._burst_rate    = 0.0
+        self._accum_bursts  = 0
 
     # ── channel map ─────────────────────────────────────────────────────────
 
@@ -148,12 +159,13 @@ class IridiumDetector(Decoder):
 
         # Per-channel power vs its own noise floor; one detection per channel per chunk
         now = time.monotonic()
+        thresh_ratio = 10.0 ** (self._threshold_db / 10.0)
         for chan_id, (bl, bh) in self._chan_map.items():
             chan_pow = powers[:, bl:bh].mean(axis=1)
             chan_nf  = float(self._noise_floor[bl:bh].mean())
             if chan_nf < 1e-30:
                 continue
-            hot = chan_pow > (chan_nf * _THRESHOLD_RATIO)
+            hot = chan_pow > (chan_nf * thresh_ratio)
             if not hot.any():
                 continue
             peak_idx = int(np.argmax(chan_pow))
@@ -192,6 +204,7 @@ class IridiumDetector(Decoder):
             'recent_bursts':   list(self._recent_bursts),
             'n_visible_chans': len(self._chan_map),
             'in_band':         self._is_in_band(state),
+            'threshold_db':    self._threshold_db,
         }
 
     def _is_in_band(self, state: AppState) -> bool:
@@ -204,6 +217,12 @@ class IridiumDetector(Decoder):
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
         if key == ord('r'):
             self.start(state)
+            return True
+        if key in (ord('+'), ord('=')):
+            self._threshold_db = min(_MAX_THRESH_DB, self._threshold_db + _THRESH_STEP_DB)
+            return True
+        if key == ord('-'):
+            self._threshold_db = max(_MIN_THRESH_DB, self._threshold_db - _THRESH_STEP_DB)
             return True
         return False
 
@@ -238,13 +257,16 @@ class IridiumDetector(Decoder):
                 pass
             return
 
-        n_vis    = result.get('n_visible_chans', 0)
-        coverage = 100.0 * n_vis / IRIDIUM_CHAN_COUNT
+        n_vis     = result.get('n_visible_chans', 0)
+        coverage  = 100.0 * n_vis / IRIDIUM_CHAN_COUNT
+        thresh_db = result.get('threshold_db', _DEFAULT_THRESH_DB)
         stats = ('Coverage: {}/{} channels ({:.0f}%)   |   '
-                 'Total bursts: {}   |   Rate: {:.1f}/s').format(
+                 'Total bursts: {}   |   Rate: {:.1f}/s   |   '
+                 'Threshold: {:.0f} dB').format(
                  n_vis, IRIDIUM_CHAN_COUNT, coverage,
                  result.get('total_bursts', 0),
-                 result.get('burst_rate', 0.0))
+                 result.get('burst_rate', 0.0),
+                 thresh_db)
         try:
             screen_obj.addstr(y, 2, stats[:cols - 4])
         except curses.error:
@@ -308,7 +330,8 @@ class IridiumDetector(Decoder):
     # ── persistence ────────────────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {}
+        return {'threshold_db': self._threshold_db}
 
     def load_state(self, d: dict) -> None:
-        pass
+        v = float(d.get('threshold_db', _DEFAULT_THRESH_DB))
+        self._threshold_db = max(_MIN_THRESH_DB, min(_MAX_THRESH_DB, v))

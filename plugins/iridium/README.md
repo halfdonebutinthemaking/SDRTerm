@@ -26,7 +26,13 @@ downlink.
 
 | Key | Action |
 |---|---|
+| `+` / `=` | Raise detection threshold (+3 dB, up to 30 dB) |
+| `-` | Lower detection threshold (−3 dB, down to 3 dB) |
 | `r` | Clear counters and rebuild noise floor |
+
+The current threshold in dB is shown on the header line and is saved
+with the plugin state, so it survives preset save/load and plugin
+restart.
 
 ## What you see
 
@@ -56,12 +62,13 @@ band — set centre near 1621.25 MHz with bandwidth ≥ 2 MHz.
    FFT bin range covers each visible Iridium channel (typically ~40 bins
    per channel at 2 MSPS / 2048 FFT).
 4. **Per-channel detection** — for every channel, the mean power in its bin
-   range is compared to the local noise floor. A ratio above 16× (~12 dB)
-   in any frame of the current chunk counts as one burst on that channel.
-   Threshold was raised from 8× after live testing showed that wire
-   antennas at 1.6 GHz see birdies/spurs at ~9 dB, causing constant false
-   positives on isolated channels. Real Iridium bursts land 15–30 dB above
-   noise so 12 dB still catches them cleanly.
+   range is compared to the local noise floor. A ratio above the current
+   threshold (default 12 dB = 16× power) in any frame of the current chunk
+   counts as one burst on that channel. Real Iridium bursts typically land
+   15–30 dB above noise, so 12 dB catches them while rejecting most
+   birdies and spurs. Use `+` / `-` in the tab to raise or lower the
+   threshold if you see too many false positives (typical: raise to 15 dB
+   in a spur-heavy environment) or want to catch weaker bursts.
 5. **Rate stats** — burst rate is updated once per second from a rolling
    accumulator. Per-channel counts use a 10-second sliding window.
 
