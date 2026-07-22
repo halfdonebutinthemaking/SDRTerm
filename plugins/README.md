@@ -2,7 +2,7 @@
 
 | Plugin | Description | Preview | Docs |
 |--------|-------------|---------|------|
-| **spectrum** | Always-active FFT display — averaged dBFS power spectrum rendered as bar chart or waterfall | | [spectrum.md](spectrum/spectrum.md) |
+| **spectrum** | Always-active FFT display — averaged dBFS power spectrum rendered as bar chart or waterfall | ![](../images/running.gif) ![](../images/waterfall.gif) | [spectrum.md](spectrum/spectrum.md) |
 | **fm** | FM broadcast audio decoder with real-time playback and channel-bandwidth highlight | ![](fm/images/fm.gif) | [fm.md](fm/fm.md) |
 | **rds** | RDS decoder — PS name, RadioText, PTY, PI code, TP/TA flags from the FM 57 kHz subcarrier | ![](rds/images/rds.gif) | [rds.md](rds/rds.md) |
 | **nrsc5_text** | NRSC-5 HD Radio decoder for digital IBOC sidebands, pure Python/NumPy | ![](nrsc5_text/images/nrsc.gif) | [nrsc5_text.md](nrsc5_text/nrsc5_text.md) |
