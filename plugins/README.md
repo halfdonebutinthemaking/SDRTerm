@@ -17,6 +17,7 @@
 | **freqhop** | Frequency hopper — maintain a saved list of frequencies with per-slot dwell times; cycles automatically so you can monitor multiple airband channels | ![](freqhop/images/freqhop.gif) | [Docs](freqhop/) | [STE100](freqhop/freqhop_ASD-STE100.md) |
 | **acars** | Classic ACARS decoder — AM/AFSK 2400 baud, mark=2400 Hz / space=1200 Hz; decodes aircraft registration, flight ID, and message text with BCS integrity check | | [Docs](acars/) | [STE100](acars/acars_ASD-STE100.md) |
 | **pocsag** | POCSAG paging decoder — direct 2-FSK, auto-detects 512/1200/2400 baud, BCH(31,21) error correction, decodes numeric and alphanumeric messages with RIC | | [Docs](pocsag/) | [STE100](pocsag/pocsag_ASD-STE100.md) |
+| **iridium** | Iridium L-band burst detector (Stage 1, detect-only) — 1616–1626.5 MHz satellite downlink, 252 channels @ 41.667 kHz; shows live per-channel activity to answer "does my antenna hear Iridium?" | | [Docs](iridium/) | [STE100](iridium/iridium_ASD-STE100.md) |
 
 Each plugin folder has a `README.md` that GitHub renders automatically when
 you navigate into the folder. A simplified-English version rewritten in

@@ -29,7 +29,7 @@ class TestDiscovery:
         keys = [p.key for p in registry.values() if p.key]
         assert len(keys) == len(set(keys)), 'duplicate plugin activation keys'
 
-    _FULL_VIEW_PLUGINS = {'range-scan', 'constellation', 'vdl2', 'freqhop', 'modclass', 'acars', 'pocsag'}
+    _FULL_VIEW_PLUGINS = {'range-scan', 'constellation', 'vdl2', 'freqhop', 'modclass', 'acars', 'pocsag', 'iridium'}
 
     def test_known_full_view_plugins(self, registry):
         for name in self._FULL_VIEW_PLUGINS:
