@@ -115,6 +115,72 @@ score. No live TUI SDR tool currently does this.
 
 ---
 
+## 6. xPSK Signal Generator (HackRF TX plugin)
+
+**Status:** Not started
+**Dependencies:** Existing HackRF device driver (`devices/hackrf.py`). HackRF
+runs as full-duplex-capable RX/TX hardware but SDRTerm currently only uses
+its RX path.
+
+A plugin that turns SDRTerm into a configurable digital signal generator.
+Takes a payload (text, hex, or file) and transmits it live through the
+HackRF using a chosen modulation, symbol rate, and carrier frequency. The
+offline `scripts/gen_*_test.py` helpers already prove the DSP works —
+this plugin would move that DSP inline and feed a HackRF instead of a
+SigMF file. A key use case is validating other SDRTerm decoders end-to-end
+on real RF without needing an active real-world transmitter (e.g.
+transmit a synthetic ACARS burst on 129.125 MHz into a dummy load,
+receive it on an RTL-SDR next to the HackRF, confirm the ACARS decoder
+recovers the message).
+
+### What it would do
+
+- Modulations supported: OOK, 2-FSK, MSK/GMSK, BPSK, QPSK, 8PSK, DBPSK,
+  DQPSK, D8PSK, 16-QAM. All the modulation classes SDRTerm can already
+  identify and decode.
+- Payload sources: literal text, hex string, file bytes, or a repeating
+  pattern (useful for BER testing and receiver tuning).
+- Configurable parameters per transmission:
+  - Modulation type + differential/absolute
+  - Symbol rate (100 sym/s – 5 Msym/s)
+  - Carrier frequency (offset from HackRF centre)
+  - Pulse shape (rectangular, raised cosine, RRC) + roll-off α
+  - Samples per symbol (upsampling ratio for pulse shaping)
+  - TX gain (HackRF IF gain 0–47 dB in 1 dB steps)
+  - Preamble / sync word / trailer bits
+  - Continuous loop vs single-shot
+- Full-view tab shows current TX state, payload preview, and a live
+  waveform / constellation of what's being transmitted.
+
+### Key design points
+
+- HackRF `read_samples_async` currently pulls RX samples in a background
+  thread. Add a matching TX path using `hackrf_start_tx_async` (already
+  in libhackrf; needs a Python wrapper).
+- RX and TX cannot run simultaneously on HackRF — the plugin must
+  disable RX-based decoders (or the SDR loop temporarily) while
+  transmitting. State machine: `idle → prepare → transmitting → cool_down → idle`.
+- Modulation DSP is straightforward — same pattern as the existing test
+  signal generators. Precompute the full IQ buffer for short payloads,
+  or use a rolling generator for long/looping transmissions.
+- **Legal / safety notice must be prominent.** Transmitting on most
+  frequencies requires a licence in most jurisdictions. Plugin should:
+  - Show a bright warning on first activation
+  - Refuse to transmit above a configurable maximum TX gain (default: low)
+  - Require an explicit confirm keystroke before each transmission
+  - Save "acknowledged legal notice" flag in the preset so returning
+    users are not spammed
+- File output as a fallback: same DSP, write to SigMF instead of TX. Useful
+  when the HackRF is not present, and makes the plugin usable as a
+  general-purpose test-vector generator (obsoleting most of the current
+  `scripts/gen_*_test.py` files).
+- Loopback test mode: if both a HackRF (TX) and an RTL-SDR (RX) are
+  attached, the plugin could offer a self-test that transmits a known
+  payload and asks the paired decoder plugin (ACARS, POCSAG, VDL2, etc.)
+  to verify recovery — a real end-to-end regression test.
+
+---
+
 ## 3. RF Environment Monitor / Anomaly Logger
 
 **Status:** Not started  
