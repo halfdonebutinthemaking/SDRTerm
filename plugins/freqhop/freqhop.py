@@ -25,6 +25,7 @@ class FreqHop(Decoder):
         self._slot_idx     = 0    # which slot is currently being listened to
         self._hop_start    = 0.0  # monotonic time when we tuned to current slot
         self._saved_center = 0.0  # restored when hopping stops
+        self._color_ready  = False
 
     def start(self, state: AppState) -> None:
         self._active    = False
@@ -163,6 +164,13 @@ class FreqHop(Decoder):
         if not result:
             return
 
+        if not self._color_ready and curses.has_colors():
+            try:
+                curses.init_pair(3, curses.COLOR_GREEN, -1)
+                self._color_ready = True
+            except Exception:
+                pass
+
         active    = result.get('active', False)
         slots     = result.get('slots', [])
         slot_idx  = result.get('slot_idx', 0)
@@ -210,15 +218,14 @@ class FreqHop(Decoder):
             line   = ' {} {:>2}  {:>16}  {:>6.1f}s  '.format(
                 marker, abs_i + 1, fmt_freq(slot['freq_hz']), slot['dwell_s'])
 
-            if abs_i == cursor:
-                attr = curses.A_REVERSE
-            elif is_cur:
+            attr = curses.A_NORMAL
+            if is_cur:
                 try:
                     attr = curses.color_pair(3) | curses.A_BOLD   # green = active slot
                 except Exception:
                     attr = curses.A_BOLD
-            else:
-                attr = curses.A_NORMAL
+            if abs_i == cursor:
+                attr |= curses.A_REVERSE
 
             try:
                 screen_obj.addstr(3 + i, 2, line[:cols - 3], attr)
