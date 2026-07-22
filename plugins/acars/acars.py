@@ -10,6 +10,7 @@ ACARS frame structure:
   + FlightID(6) + STX + text + ETX + BCS(2 chars) + DEL
 """
 
+import math
 import time
 from collections import deque
 
@@ -45,9 +46,20 @@ _MAX_FRAMES = 64
 # 3 s guarantees any frame that has fully arrived is decodable in one pass.
 _AUDIO_BUF_MAX = _AUDIO_SR * 3   # 36 000 samples
 
-# ── resampling ratio: 250000 → 12000 = 6/125 ─────────────────────────────────
-_AUDIO_UP   = 6
-_AUDIO_DOWN = 125
+# Intermediate IQ bandwidth for the anti-alias stage before AM envelope
+# detection.  Wide enough to tolerate ± few kHz of tuning offset, narrow
+# enough to reject adjacent airband channels (25 kHz spacing) and stronger
+# voice signals elsewhere in the source bandwidth.
+_IQ_STAGE_SR = 50_000
+
+# Resample ratio (source_sr → _AUDIO_SR) is computed at runtime from state.bw_hz
+# so recordings at higher sample rates (e.g. SDRUno WAV at 2 MHz) still decode.
+
+
+def _resample_ratio(source_sr: int, target_sr: int = _AUDIO_SR):
+    """Return (up, down) so scipy.signal.resample_poly maps source_sr → target_sr."""
+    g = math.gcd(int(target_sr), int(source_sr))
+    return int(target_sr) // g, int(source_sr) // g
 
 
 def _add_parity(byte: int) -> int:
@@ -265,12 +277,20 @@ class AcarsDecoder(Decoder):
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
 
-        # ── AM demodulation ──────────────────────────────────────────────────
-        audio = np.abs(samples).astype(np.float32)
-        audio -= float(np.mean(audio))     # remove DC (carrier)
+        # ── Stage 1: bandwidth-limit IQ to ~50 kHz around tuning centre ──────
+        # Wide enough to keep the ACARS carrier even with a few kHz of
+        # tuning offset, narrow enough to reject adjacent airband channels
+        # and stronger signals elsewhere in a wide-band source recording.
+        up1, down1 = _resample_ratio(state.bw_hz, _IQ_STAGE_SR)
+        iq_narrow  = resample_poly(samples, up1, down1).astype(np.complex64)
 
-        # ── Resample IQ_SR → AUDIO_SR and accumulate ─────────────────────────
-        audio_12k = resample_poly(audio, _AUDIO_UP, _AUDIO_DOWN).astype(np.float32)
+        # ── Stage 2: AM envelope on the narrow-band IQ ───────────────────────
+        audio = np.abs(iq_narrow).astype(np.float32)
+        audio -= float(np.mean(audio))    # remove DC (carrier)
+
+        # ── Stage 3: resample envelope to AUDIO_SR for the FSK correlators ───
+        up2, down2 = _resample_ratio(_IQ_STAGE_SR, _AUDIO_SR)
+        audio_12k  = resample_poly(audio, up2, down2).astype(np.float32)
         self._audio_buf = np.concatenate([self._audio_buf, audio_12k])
         if len(self._audio_buf) > _AUDIO_BUF_MAX:
             self._audio_buf = self._audio_buf[-_AUDIO_BUF_MAX:]
