@@ -20,7 +20,7 @@ subcarrier). For the newer digital replacement, see the **vdl2** plugin.
 | Space (bit 0) | 1 200 Hz |
 | Bit rate | 2 400 bps |
 | Character format | 7-bit ASCII, ODD parity in bit 7, LSB first |
-| Minimum bandwidth | 250 000 Hz |
+| Minimum bandwidth | 250 000 Hz (wider recordings — for example a 2 MHz SDRUno WAV — also decode; the plugin resamples them automatically) |
 | Primary US frequency | 129.125 MHz |
 | Secondary US frequencies | 130.025, 130.450, 131.125, 131.550 MHz |
 
@@ -64,51 +64,75 @@ Line styles:
 
 ## How it works
 
-1. **AM demodulation** — `|IQ|` computes the envelope of the AM signal.
-   This recovers the AFSK audio. Per-chunk DC removal strips the carrier
-   offset.
-2. **Resampling** — the plugin resamples the audio from the SDR
-   bandwidth (250 kHz) to 12 000 Hz. It uses a polyphase FIR filter
-   (`resample_poly`, ratio 6/125). At 12 000 Hz there are exactly 5
-   samples per bit. This makes clock recovery simpler.
+1. **Shift to tuned frequency** — for file replay the IQ is fixed at
+   the recording's centre frequency. But `state.center_hz` follows user
+   tuning. A complex mixer shifts the tuned channel to DC. This makes
+   the rest of the pipeline see only the wanted signal. For a live SDR
+   the hardware is already tuned, so the shift does nothing.
+2. **Two-stage bandwidth reduction** — `resample_poly` down-filters the
+   IQ to 50 kHz around DC (Stage 1). This anti-aliases and rejects
+   adjacent airband channels and any stronger signals elsewhere in a
+   wide-band recording. `|IQ|` is then taken on the narrow-band signal
+   (Stage 2). This makes sure that only the target channel's amplitude
+   modulation contributes to the envelope. Then the envelope is
+   resampled to 12 000 Hz (Stage 3). At 12 000 Hz there are exactly 5
+   samples per bit. This makes clock recovery simpler. The resample
+   ratios are computed at run time from `state.bw_hz`. So recordings
+   at 250 kHz, 2 MHz, and 2.048 MHz all decode.
 3. **Ring buffer** — the plugin keeps 3 seconds of 12 kHz audio across
-   processing calls. This is needed because a single IQ chunk (~65 ms at
-   250 kHz) is shorter than a typical ACARS frame (~300 ms). So frame
-   detection runs on the buffer rather than individual chunks.
-4. **Non-coherent FSK demodulation** — the plugin multiplies the audio
+   processing calls. This is needed because a single IQ chunk is
+   shorter than a typical ACARS frame (~300 ms). So frame detection
+   runs on the buffer rather than individual chunks.
+4. **HPF + AGC** — a 300 Hz 4-th order Butterworth high-pass filter
+   removes DC and slow burst-envelope shape. Without this, low-frequency
+   energy leaks asymmetrically into the FSK correlator's 1200-Hz arm
+   and biases every decision. Short-term AGC then normalises the
+   envelope audio by its 20-ms RMS. The AGC is gated at 1.5× the running
+   median. This makes sure that quiet stretches do not get amplified
+   into spurious symbols.
+5. **Non-coherent FSK demodulation** — the plugin multiplies the audio
    by complex sinusoids at the mark (2 400 Hz) and space (1 200 Hz)
    frequencies. A moving-average filter (length = 1 bit period = 5
    samples) integrates each product. The magnitude difference
    `|mark| − |space|` gives a decision variable. Positive means mark
    (1). Negative means space (0).
-5. **Clock recovery** — the decoder does not use a tracking loop. It
+6. **Clock recovery** — the decoder does not use a tracking loop. It
    tries all 5 possible sampling phases (0–4 samples offset within a bit
    period). It runs the full frame search on each phase. The plugin
    deduplicates duplicate frames from different phases by
    `(reg, flight, text[:20])`.
-6. **Sync detection** — the plugin searches the bit stream for the
+7. **Adaptive-threshold bit slicer** — bits are sliced against a 20-bit
+   running mean of the decision signal rather than a hard zero. This
+   tolerates any residual DC drift on `|mark| − |space|`. Such drift
+   is common on weak signals when the two arms have unequal noise
+   energies. Without this the plugin forces every bit to the same value.
+8. **Sync detection** — the plugin searches the bit stream for the
    24-bit pattern `SYN SYN SOH` (0x16 0x16 0x01, LSB-first). It permits
    up to 1 bit error.
-7. **Frame parsing** — after a sync is found, the decoder reads the
+9. **Frame parsing** — after a sync is found, the decoder reads the
    fixed-length header (Mode + Reg(7) + Type/Block/Seq(3) + FlightID(6)
    + STX). It then adds text bytes until ETX is found (max 220 chars).
    Then it reads the 2-char BCS.
-8. **BCS check** — the Block Check Sequence is the XOR of all
-   parity-inclusive bytes from Mode through ETX. It is encoded as two
-   ASCII hex nibble chars (+0x30 offset). Frames with a passing BCS
-   show in bold. Failures show dim.
+10. **BCS check** — the Block Check Sequence is the XOR of all
+    parity-inclusive bytes from Mode through ETX. It is encoded as two
+    ASCII hex nibble chars (+0x30 offset). Frames with a passing BCS
+    show in bold. Failures show dim.
 
 ## Decode chain
 
 ```
-IQ samples (250 kHz)
-  → |IQ| envelope  (AM demod)
-  → DC removal
-  → resample_poly(6, 125)  →  12 000 Hz audio
+IQ samples (any rate: 250 kHz, 2 MHz, …)
+  → shift to state.center_hz  (file replay only)
+  → resample_poly → 50 kHz IQ  (Stage 1: anti-alias + adjacent-channel reject)
+  → |IQ| envelope + DC removal  (Stage 2: AM demod on the narrow channel)
+  → resample_poly → 12 000 Hz audio  (Stage 3)
   → ring buffer (3 s)
+  → HPF 300 Hz  (Butterworth, 4th order)
+  → AGC (20 ms RMS normalisation, gated at 1.5× median)
   → multiply by e^(j2πf_mark·t) and e^(j2πf_space·t)
   → moving-average integration (5 taps)
   → |mark| − |space|  (decision variable)
+  → adaptive threshold: 20-bit running mean
   → sample at 5 phases × every 5 samples
   → search for SYN SYN SOH (≤ 1 bit error)
   → parse header + text + BCS
@@ -117,9 +141,6 @@ IQ samples (250 kHz)
 
 ## Limitations
 
-- **No carrier tracking**: the AM demodulator uses `|IQ|`. This does not
-  care about carrier frequency. Frequency offsets have no effect on
-  decoding.
 - **No symbol timing loop**: clock recovery is brute-force (5 phases).
   This works for short bursts. But it would drift on very long
   transmissions.
@@ -130,3 +151,8 @@ IQ samples (250 kHz)
   decode of the same message will show as a separate entry.
 - The dedup cache (512 entries, keyed on confirmed BCS-OK frames) resets
   when the plugin stops.
+- **Low-SNR ACARS**: the envelope + non-coherent-FSK approach starts
+  to fail around 6 dB envelope SNR. Signals visible above the noise
+  on a spectrum display can still fail to decode if the burst envelope
+  is only 2–3× the quiet-channel RMS. A proper matched filter and
+  clock-recovery loop would be needed to close that gap.
