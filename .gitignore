@@ -18,6 +18,9 @@ sdrterm_*.wav
 sdrterm_*.sigmf-data
 sdrterm_*.sigmf-meta
 
+# Third-party IQ recordings dropped into samples/ for local testing
+samples/SDRuno_*.wav
+
 # SDRTerm user presets (root-level only; presets/ directory is versioned)
 *.sdrterm
 !presets/*.sdrterm
