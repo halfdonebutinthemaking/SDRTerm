@@ -15,7 +15,14 @@ import time
 from collections import deque
 
 import numpy as np
-from scipy.signal import resample_poly
+from scipy.signal import resample_poly, butter, sosfilt
+
+# HPF at 300 Hz on the 12 kHz envelope audio: strips DC + slow burst-shape
+# variation.  Otherwise the boxcar FSK correlator leaks low-frequency energy
+# more into the 1200-Hz (space) arm than the 2400-Hz (mark) arm — because
+# space is inside the correlator's passband while mark sits at its first
+# null — biasing decision toward SPACE on weak signals.
+_HPF_SOS = butter(4, 300, 'hp', fs=12_000, output='sos')
 
 from core import Decoder, AppState
 
@@ -108,8 +115,20 @@ def _fsk_demod(audio: np.ndarray) -> np.ndarray:
 
 
 def _sample_bits(decision: np.ndarray, phase: int) -> list:
-    """Sample decision signal at _SPB intervals starting at `phase`."""
-    return [1 if decision[i] > 0 else 0
+    """
+    Sample decision signal at _SPB intervals starting at `phase`.
+    Uses an adaptive threshold (running mean over ~20 bits) rather than
+    a hard zero so a slow DC drift on the decision signal — common on
+    weak signals when |mark_env| and |space_env| have unequal noise
+    energies — doesn't force every bit to the same value.
+    """
+    win = _SPB * 20   # 100 samples ≈ 8 ms at 12 kHz
+    if len(decision) < win * 2:
+        return [1 if decision[i] > 0 else 0
+                for i in range(phase, len(decision), _SPB)]
+    kernel = np.ones(win, dtype=np.float32) / win
+    thr = np.convolve(decision, kernel, mode='same')
+    return [1 if decision[i] > thr[i] else 0
             for i in range(phase, len(decision), _SPB)]
 
 
@@ -277,6 +296,18 @@ class AcarsDecoder(Decoder):
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
 
+        # ── Stage 0: shift to tuned frequency ────────────────────────────────
+        # For live SDR the hardware is already tuned so the ACARS carrier is
+        # at DC and offset == 0.  For a file-replay device the IQ is fixed at
+        # its recorded centre (_file_center_hz) while state.center_hz follows
+        # user tuning — shift so the tuned channel lands at DC.
+        file_center = getattr(sdr, '_file_center_hz', None)
+        if file_center is not None:
+            offset_hz = state.center_hz - file_center
+            if abs(offset_hz) > 1.0:
+                t = np.arange(len(samples), dtype=np.float32) / state.bw_hz
+                samples = (samples * np.exp(-2j * np.pi * offset_hz * t)).astype(np.complex64)
+
         # ── Stage 1: bandwidth-limit IQ to ~50 kHz around tuning centre ──────
         # Wide enough to keep the ACARS carrier even with a few kHz of
         # tuning offset, narrow enough to reject adjacent airband channels
@@ -299,8 +330,22 @@ class AcarsDecoder(Decoder):
         if len(self._audio_buf) < _AUDIO_SR // 2:
             return {'messages': list(self._messages), 'n_frames': len(self._messages)}
 
-        # ── FSK decision signal on the full ring buffer ───────────────────────
-        decision = _fsk_demod(self._audio_buf)
+        # ── HPF + AGC on the ring buffer before FSK demod ────────────────────
+        # HPF removes DC + slow burst-envelope shape that otherwise biases the
+        # FSK correlator's decision.  AGC normalises by short-term RMS with a
+        # floor so quiet stretches (pure noise) don't get amplified into
+        # spurious symbols; the FSK correlator's balance is what carries the
+        # bit information, not absolute audio level.
+        audio_bp   = sosfilt(_HPF_SOS, self._audio_buf).astype(np.float32)
+        win_agc    = _AUDIO_SR // 50    # 20 ms
+        kern_agc   = np.ones(win_agc, dtype=np.float32) / win_agc
+        rms_local  = np.sqrt(np.convolve(audio_bp * audio_bp, kern_agc, mode='same') + 1e-20)
+        # Gate: gain = 1/rms when rms is comfortably above noise floor, else 1.
+        rms_floor  = max(float(np.median(rms_local)) * 1.5, 1e-6)
+        gain       = np.where(rms_local > rms_floor, 1.0 / rms_local, 1.0).astype(np.float32)
+        audio_agc  = (audio_bp * gain).astype(np.float32)
+
+        decision = _fsk_demod(audio_agc)
 
         # ── Try all 5 clock phases, collect unique frames ─────────────────────
         new_count = 0
