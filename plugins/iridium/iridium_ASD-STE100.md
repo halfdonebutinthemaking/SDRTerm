@@ -52,6 +52,8 @@ The tab has three parts:
 If the status line shows `[IR band?]`, the tuning is not inside the Iridium
 band. Set the centre near 1621.25 MHz with bandwidth of 2 MHz or more.
 
+![Iridium burst detector during a satellite pass](images/iridium.gif)
+
 ## How it works
 
 1. **Sliding FFT** — a 2048-point FFT with a Hann window runs on every IQ
