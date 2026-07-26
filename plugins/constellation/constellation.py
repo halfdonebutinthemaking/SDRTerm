@@ -18,6 +18,14 @@ _M_OPTIONS       = [2, 4, 8, 16]
 _REF_ANGLE_STEP  = 5.0        # degrees per keypress
 _MOD_NAMES       = {2: 'BPSK', 4: 'QPSK', 8: '8PSK', 16: '16PSK'}
 
+# Burst-gate parameters.  A chunk counts as "in burst" if its mean IQ power
+# is _BURST_SNR_DB above the running noise-floor estimate.  The noise floor
+# pulls down fast toward quiet chunks (α = _NF_ALPHA_DN) and drifts up very
+# slowly during activity (× _NF_DECAY_UP per chunk) so bursts don't bias it.
+_BURST_SNR_DB    =    6.0
+_NF_ALPHA_DN     =    0.3
+_NF_DECAY_UP     =    1.0002
+
 
 def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
     """Root-raised cosine FIR coefficients."""
@@ -42,7 +50,7 @@ def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
 class ConstellationDecoder(Decoder):
     name            = 'constellation'
     key             = 'c'
-    key_help        = '+/-=rate(500)  [/]=rate(50)  m=M  ,/.=rotate  z=diff  r=clear'
+    key_help        = '+/-=rate(500)  [/]=rate(50)  m=M  ,/.=rotate  z=diff  b=gate  r=clear'
     min_sample_rate = 10_000
     realtime        = False
     bg_queue_depth  = 2
@@ -58,28 +66,68 @@ class ConstellationDecoder(Decoder):
         self._m              = 4    # reference constellation size (QPSK default)
         self._ref_angle      = 0.0  # rotation of reference markers in degrees
         self._differential   = False
+        self._gating         = False  # burst-gate scatter accumulation on/off
+        self._noise_floor    = None   # running noise-floor (linear power)
+        self._burst_active   = False  # last-chunk gate decision (for display)
 
     def start(self, state: AppState) -> None:
         self._points     = []
         self._n_total    = 0
         self._carrier_phase = 0.0
         self._phase_ref  = None
+        self._noise_floor = None
+        self._burst_active = False
 
     def stop(self) -> None:
         self._points     = []
         self._n_total    = 0
         self._carrier_phase = 0.0
         self._phase_ref  = None
+        self._noise_floor = None
+        self._burst_active = False
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
         peak    = (results or {}).get('peak_marker', {})
         peak_hz = peak.get('peak_hz', state.center_hz)
 
-        # Mix to baseband — accumulate carrier phase so the phasor is continuous even
-        # when offset_hz shifts between chunks (alpha-beta tracker moves peak_hz).
         offset_hz           = peak_hz - state.center_hz
         n                   = len(samples)
+
+        # ── Burst gate (optional) ─────────────────────────────────────────
+        # Track a running noise floor and mark the chunk as "in burst" when
+        # its mean IQ power is _BURST_SNR_DB above that floor.  When gating
+        # is on and the chunk isn't in a burst, we advance the carrier phase
+        # accumulator across the gap and skip point accumulation — the
+        # existing scatter is preserved so the last good picture stays on
+        # screen while the signal is silent.  Useful for Iridium, ACARS,
+        # POCSAG, ADS-B, etc.  Off by default because continuous signals
+        # (broadcast QPSK, VDL2 heavy traffic) don't need it.
+        chunk_pow = float(np.mean(np.abs(samples) ** 2))
+        if self._noise_floor is None:
+            self._noise_floor = chunk_pow
+        elif chunk_pow < self._noise_floor:
+            self._noise_floor = (_NF_ALPHA_DN * chunk_pow
+                                 + (1.0 - _NF_ALPHA_DN) * self._noise_floor)
+        else:
+            self._noise_floor *= _NF_DECAY_UP
+        burst_thr = self._noise_floor * (10.0 ** (_BURST_SNR_DB / 10.0))
+        self._burst_active = chunk_pow > burst_thr
+
+        if self._gating and not self._burst_active:
+            self._carrier_phase = (
+                self._carrier_phase + 2 * np.pi * offset_hz * n / state.bw_hz
+            ) % (2 * np.pi)
+            return {'symrate':      self._symrate,
+                    'n_points':     len(self._points),
+                    'n_total':      self._n_total,
+                    'm':            self._m,
+                    'differential': self._differential,
+                    'gating':       True,
+                    'burst_active': False}
+
+        # Mix to baseband — accumulate carrier phase so the phasor is continuous even
+        # when offset_hz shifts between chunks (alpha-beta tracker moves peak_hz).
         t_local             = np.arange(n) / state.bw_hz
         baseband            = (samples * np.exp(
             -1j * (self._carrier_phase + 2 * np.pi * offset_hz * t_local)
@@ -170,6 +218,8 @@ class ConstellationDecoder(Decoder):
             'n_total':      self._n_total,
             'm':            self._m,
             'differential': self._differential,
+            'gating':       self._gating,
+            'burst_active': self._burst_active,
         }
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
@@ -219,6 +269,13 @@ class ConstellationDecoder(Decoder):
             self._phase_ref     = None
             self._carrier_phase = 0.0
             return True
+        if key == ord('b'):
+            self._gating = not self._gating
+            # Reset noise-floor estimate so the tracker starts fresh; keep
+            # existing scatter points so the picture doesn't blank when the
+            # gate first engages.
+            self._noise_floor = None
+            return True
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
@@ -232,13 +289,14 @@ class ConstellationDecoder(Decoder):
 
     def save_state(self) -> dict:
         return {'symrate': self._symrate, 'm': self._m, 'ref_angle': self._ref_angle,
-                'differential': self._differential}
+                'differential': self._differential, 'gating': self._gating}
 
     def load_state(self, d: dict) -> None:
         self._symrate      = int(d.get('symrate', _DEFAULT_SYMRATE))
         self._m            = int(d.get('m', 4))
         self._ref_angle    = float(d.get('ref_angle', 0.0))
         self._differential = bool(d.get('differential', False))
+        self._gating       = bool(d.get('gating', False))
 
     def draw_full(self, screen_obj, state: AppState, result: dict,
                   rows: int, cols: int) -> None:
@@ -284,8 +342,12 @@ class ConstellationDecoder(Decoder):
             evm_attr = curses.A_BOLD
 
         diff_str = '  [DIFF]' if result.get('differential') else ''
-        h_left  = 'Constellation  {:,} sym/s  {}  {:,} bit/s{}'.format(
-            symrate, _MOD_NAMES.get(m, '{}PSK'.format(m)), bitrate, diff_str)
+        if result.get('gating'):
+            gate_str = '  [GATE·ON]' if result.get('burst_active') else '  [GATE·waiting]'
+        else:
+            gate_str = ''
+        h_left  = 'Constellation  {:,} sym/s  {}  {:,} bit/s{}{}'.format(
+            symrate, _MOD_NAMES.get(m, '{}PSK'.format(m)), bitrate, diff_str, gate_str)
         h_right = '   {}/{} pts'.format(n_pts, _MAX_POINTS)
         h_total = h_left + evm_str + h_right
         hx      = max(0, (cols - len(h_total)) // 2)
@@ -401,10 +463,11 @@ class ConstellationDecoder(Decoder):
 
         # ── Footer ─────────────────────────────────────────────────────────
         footer = ('+/- coarse ±{:,}   [/] fine ±{:,}   {:,} sym/s   '
-                  'm={} ({})   ,/.=rotate {:.0f}°   z={}   r=clear').format(
+                  'm={} ({})   ,/.=rotate {:.0f}°   z={}   b={}   r=clear').format(
                   _SYMRATE_STEP_C, _SYMRATE_STEP_F, symrate,
                   m, _MOD_NAMES.get(m, '{}PSK'.format(m)), self._ref_angle,
-                  'DIFF' if result.get('differential') else 'abs')
+                  'DIFF' if result.get('differential') else 'abs',
+                  'GATE'  if result.get('gating')       else 'off')
         try:
             screen_obj.addstr(rows - 2, 2, footer[:cols - 4], curses.A_DIM)
         except curses.error:

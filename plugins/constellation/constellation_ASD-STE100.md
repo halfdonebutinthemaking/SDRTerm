@@ -23,6 +23,7 @@ plugin cannot fully correct. The clusters then smear into a ring.
 | `,` | Turn reference markers counter-clockwise |
 | `.` | Turn reference markers clockwise |
 | `z` | Change between absolute and differential display mode |
+| `b` | Change burst gate on / off (add symbols only during detected bursts) |
 | `r` | Clear the scatter buffer |
 
 ## How to read the display
@@ -155,6 +156,25 @@ display.
   correctly for differential encodings like D8PSK (VDL Mode 2).
 
 ![Absolute vs differential constellation mode](images/constellation_phases.gif)
+
+## Burst gate
+
+Press `b` to change a burst-only accumulation mode. When on, the plugin
+adds symbols to the scatter buffer only when the mean IQ power of the
+current chunk is more than 6 dB above the running noise floor. Noisy
+periods between bursts are ignored. The last good picture stays on
+screen rather than being replaced by noise.
+
+The header shows `[GATE·ON]` during an active burst and
+`[GATE·waiting]` between bursts. The noise floor tracks slowly. It
+falls fast on quiet chunks and drifts up very slowly during activity.
+This makes sure that bursts do not inflate the floor.
+
+The gate is off by default. Continuous signals (broadcast QPSK, heavy
+VDL Mode 2 traffic) do not need it. Turn it on for bursty signals —
+Iridium (~20 ms bursts with long gaps), classic ACARS, POCSAG, ADS-B —
+where the noise between bursts would otherwise fill the 4000-point
+scatter buffer.
 
 ## What the constellation can identify
 
