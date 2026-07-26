@@ -48,9 +48,10 @@ _NUMERIC_CHARSET = '0123456789SU -)('
 # ── noise-rejection thresholds ───────────────────────────────────────────────
 # Reject a batch if fewer than this many codewords are idle or need zero BCH
 # correction.  Real POCSAG batches are mostly idle padding + a few clean
-# address/message codewords; pure noise gets BCH-corrected into scattered
-# "valid" garbage that rarely produces clean idles.
-_MIN_CLEAN_CW    = 8    # out of 16
+# address/message codewords (typical: 12–15 clean out of 16 for short
+# messages).  Pure noise gets BCH-corrected into scattered "valid" garbage
+# and only rarely produces this many clean codewords in a single batch.
+_MIN_CLEAN_CW    = 12   # out of 16
 
 # Alpha-message printability floor: fraction of chars that must be letters,
 # digits, or space to be considered a real message rather than noise.
@@ -65,6 +66,14 @@ _MIN_DIGIT_RATIO = 0.50
 # even if it starts near the end of one process() call and ends in the next.
 _AUDIO_BUF_MAX   = _AUDIO_SR * 3
 _MAX_MESSAGES    = 128
+
+# Dedup key length.  A single message is often found at several sync-position
+# / clock-phase candidates within the 3 s ring buffer, each catching a
+# different number of message codewords → same start but different length
+# (e.g. "HELLO FROM SDR" and "HELLO FROM SDRTERM POCSAG DECODER").  Keying
+# dedup on the first _DEDUP_PREFIX_LEN chars collapses those partials so
+# only the longest recovered text is displayed per (RIC, prefix).
+_DEDUP_PREFIX_LEN = 8
 
 
 # ── FM demod + bit slicing ───────────────────────────────────────────────────
@@ -263,7 +272,10 @@ class PocsagDecoder(Decoder):
 
     def __init__(self):
         self._messages  = deque(maxlen=_MAX_MESSAGES)
-        self._seen      = set()
+        # _seen maps (ric, text[:_DEDUP_PREFIX_LEN]) → the msg dict already in
+        # _messages.  Lets us upgrade a shorter partial in place when a
+        # longer decode of the same message arrives later in the same buffer.
+        self._seen      = {}
         self._audio_buf = np.empty(0, dtype=np.float32)
 
     def start(self, state: AppState) -> None:
@@ -327,15 +339,25 @@ class PocsagDecoder(Decoder):
                         for msg in _decode_batch(bits, sync_pos):
                             if not msg['text']:
                                 continue
-                            key = (msg['ric'], msg['text'][:30])
-                            if key in self._seen:
+                            # Short messages that already needed BCH correction
+                            # are almost always noise-decoded — real short pages
+                            # come in clean because they use only 1–2 codewords.
+                            if msg['has_errors'] and len(msg['text']) < 6:
                                 continue
-                            # Always dedupe — a repeat within the 3s ring buffer
-                            # is either a real duplicate or a stable false decode.
-                            # Either way we only want to show it once.
-                            self._seen.add(key)
+                            key = (msg['ric'], msg['text'][:_DEDUP_PREFIX_LEN])
+                            existing = self._seen.get(key)
+                            if existing is not None:
+                                # Same (RIC, prefix) already shown — replace its
+                                # text if this decode recovered more of it.
+                                # Otherwise skip the duplicate.
+                                if len(msg['text']) > len(existing['text']):
+                                    existing['text']       = msg['text']
+                                    existing['has_errors'] = msg['has_errors']
+                                continue
+                            self._seen[key] = msg
                             if len(self._seen) > 512:
-                                self._seen.pop()
+                                # Drop the oldest key so the map doesn't grow forever
+                                self._seen.pop(next(iter(self._seen)))
                             msg['ts']   = time.strftime('%H:%M:%S')
                             msg['baud'] = baud
                             self._messages.appendleft(msg)
