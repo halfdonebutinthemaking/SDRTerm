@@ -149,8 +149,14 @@ class IridiumDetector(Decoder):
         specs    = np.fft.fftshift(np.fft.fft(windowed, axis=1), axes=1)
         powers   = specs.real ** 2 + specs.imag ** 2
 
-        # Update per-bin noise floor as an EMA of the chunk-averaged spectrum
-        avg = powers.mean(axis=0)
+        # Update per-bin noise floor as an EMA of the chunk-*median* spectrum.
+        # Median across frames rejects burst outliers — Iridium bursts are
+        # short (~1-8 frames at 1 ms/frame) and sparse, so within any chunk
+        # most frames per bin are noise and the median lands on the true
+        # noise level.  Using mean() here would let real bursts inflate the
+        # floor, which then compresses the reported burst SNR down toward
+        # the detection threshold (an "everything at threshold" symptom).
+        avg = np.median(powers, axis=0)
         if self._noise_floor is None or len(self._noise_floor) != _FFT_SIZE:
             self._noise_floor = avg.copy()
         else:
