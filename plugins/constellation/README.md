@@ -165,6 +165,62 @@ traffic) don't need it.  Turn it on for anything bursty — Iridium (~20 ms
 bursts with long gaps), classic ACARS, POCSAG, ADS-B — where the noise
 between bursts would otherwise dominate the 4000-point scatter buffer.
 
+## Case study: Iridium DQPSK
+
+Iridium downlinks in the L-band (1616.0 – 1626.5 MHz) are the canonical
+"why the burst gate exists" example.  A healthy Iridium constellation is
+also a useful reference for what a real DQPSK signal actually looks like
+in this plugin — it's not a textbook four-corner square, and understanding
+why is instructive.
+
+**Settings the plot needs to be right:**
+
+| Setting | Value | Reason |
+|---|---|---|
+| Symbol rate | **25 000 sym/s** | Iridium's baud rate — off by even a few hundred and the matched filter samples between symbols, smearing everything into a diamond shape |
+| Modulation (`m`) | **4** (QPSK) | Iridium symbols are one of four phase positions |
+| Absolute / diff (`z`) | **DIFF** | Iridium is *differential* QPSK — the information is in the *change* of phase between consecutive symbols, not the absolute phase.  Absolute mode's 4th-power carrier estimator will rotate every burst independently and produce a smeared ring |
+| Burst gate (`b`) | **ON** | Iridium bursts occupy < 10 % of airtime.  Without gating, the 4000-point buffer is 90 %+ noise between bursts |
+
+Tune to a channel that's actively showing bursts in the iridium plugin
+tab (any of the top few by count is fine).
+
+**What you should see:**
+
+- A **bright cluster near (+1, 0)** — the `+I` position.  Iridium bursts
+  start with a long unmodulated preamble tone.  In differential mode, no
+  phase change between consecutive symbols means the differential
+  product `sym × conj(sym)` lands at `(+1, 0)`.  This cluster is usually
+  the densest region of the plot because preambles are longer than the
+  data payload that follows.
+- A **weaker lobe near (−1, 0)** — the `−I` position.  This is the
+  180° phase-reversal cluster from data symbols that transition to the
+  opposite constellation point.
+- **Two lobes above and below the +I cluster**, roughly at `(0, +1)`
+  and `(0, −1)` — these are the ±90° transitions (data symbols moving
+  to an adjacent QPSK position).  They're usually less dense than +I
+  and −I because random data hits all four positions, but preamble
+  bias tilts the weight toward 0° transitions.
+
+**What you should NOT expect:**
+
+- **Four tight snap-together clusters.**  The lobes are visibly present
+  but always somewhat smeared, because the peak-marker's carrier
+  estimate has a few hundred Hz of residual error.  At 25 kbaud that
+  translates to a per-symbol phase rotation of a few degrees, which
+  spreads each cluster along an arc.
+- **Equal density in all four lobes.**  Preamble dominates, so `+I` is
+  always the brightest.  Data-payload symbols land in the other three
+  more sparsely.
+- **Anything meaningful with the gate off** or at the wrong symrate —
+  see the [Burst gate](#burst-gate) section.
+
+If your plot shows all four lobes with the +I cluster being the
+brightest, the receive chain is working: antenna → LNA (if used) →
+front-end gain → symbol timing → carrier tracking are all doing their
+job.  Further cleanup would require a tight-lock frequency-locked loop
+in the constellation plugin (not currently implemented).
+
 ## What the constellation can identify
 
 ### Modulation family and order
