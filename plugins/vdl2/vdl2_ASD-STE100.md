@@ -122,11 +122,14 @@ IQ samples
 The constellation plugin will show an empty ring or nothing at all for
 VDL2. Two reasons:
 
-1. **peak_marker cannot detect it.** VDL2 is a wideband signal. The RRC
+1. **No dominant carrier tone.** VDL2 is a wideband signal. The RRC
    pulse shaper spreads its power across ~17 kHz. Each FFT bin holds only
    about 1/140th of the total power. This puts it at or below the
-   per-bin noise floor. peak_marker finds no bright spike. So the
-   constellation gets no symbols.
+   per-bin noise floor. The constellation plugin's internal M-th-power
+   carrier estimator sees only a diffuse cluster in the 8th-power
+   spectrum, not a sharp tone. So it cannot lock. In practice this is
+   correct — VDL2 sits at DC when you tune to it, and the estimator
+   falls back to offset = 0 when it is unlocked.
 
 2. **The phase correction fails for 8PSK.** The constellation uses a
    4th-power estimator (`mean(symbols⁴)`). For 8PSK the 4th power gives
@@ -135,8 +138,7 @@ VDL2. Two reasons:
    clusters. You need an 8th-power estimator.
 
 Use this plugin to decode VDL2. The constellation is suited to
-narrowband signals (FM carriers, BPSK, QPSK). For those signals,
-peak_marker can find a single bright bin.
+narrowband signals (FM carriers, BPSK, QPSK).
 
 ## Limitations
 - **No symbol timing recovery**: the decoder samples at fixed offsets.

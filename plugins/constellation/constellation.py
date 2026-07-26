@@ -26,6 +26,20 @@ _BURST_SNR_DB    =    6.0
 _NF_ALPHA_DN     =    0.3
 _NF_DECAY_UP     =    1.0002
 
+# Carrier-recovery parameters (self-contained, no peak_marker dependency).
+# The estimator raises IQ to the M-th power to strip M-PSK modulation, then
+# finds the FFT peak in a search window around DC and divides by M to get
+# the carrier offset.  Search window ±_CARRIER_SEARCH_HZ around DC catches
+# LEO Doppler on Iridium (±40 kHz worst case) while rejecting adjacent
+# channels.  Peak must be _CARRIER_LOCK_DB above the search-window median
+# to count as a lock; otherwise offset stays at 0.  Continuous mode smooths
+# with an EMA (α = _CARRIER_EMA); gated mode resets on each burst edge
+# so per-burst Doppler jumps are tracked cleanly.
+_CARRIER_SEARCH_HZ =  30_000
+_CARRIER_LOCK_DB   =     12.0   # peak must beat median by this much
+_CARRIER_EMA       =      0.15  # α for continuous smoothing
+_CARRIER_FFT_N     =    4096
+
 
 def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
     """Root-raised cosine FIR coefficients."""
@@ -69,6 +83,9 @@ class ConstellationDecoder(Decoder):
         self._gating         = False  # burst-gate scatter accumulation on/off
         self._noise_floor    = None   # running noise-floor (linear power)
         self._burst_active   = False  # last-chunk gate decision (for display)
+        self._carrier_est_hz = 0.0    # internal carrier-offset estimate (Hz)
+        self._carrier_locked = False  # whether the estimator has a lock
+        self._prev_gate_open = False  # last-chunk burst_active — for edge detect
 
     def start(self, state: AppState) -> None:
         self._points     = []
@@ -77,6 +94,9 @@ class ConstellationDecoder(Decoder):
         self._phase_ref  = None
         self._noise_floor = None
         self._burst_active = False
+        self._carrier_est_hz = 0.0
+        self._carrier_locked = False
+        self._prev_gate_open = False
 
     def stop(self) -> None:
         self._points     = []
@@ -85,14 +105,45 @@ class ConstellationDecoder(Decoder):
         self._phase_ref  = None
         self._noise_floor = None
         self._burst_active = False
+        self._carrier_est_hz = 0.0
+        self._carrier_locked = False
+        self._prev_gate_open = False
+
+    def _estimate_carrier_offset(self, samples: np.ndarray, sample_rate: int
+                                 ) -> tuple:
+        """
+        Estimate carrier offset (Hz) from an IQ chunk using the M-th-power
+        method (M = self._m).  Returns (offset_hz, locked).  `locked` is
+        True only when the M-th-power FFT peak sits _CARRIER_LOCK_DB above
+        the search-window median — otherwise callers should treat the
+        returned offset as unreliable and prefer 0 (assume signal at DC).
+        """
+        m       = max(2, int(self._m))
+        n       = min(len(samples), _CARRIER_FFT_N)
+        if n < 64:
+            return 0.0, False
+        s       = samples[:n].astype(np.complex128)
+        s_pow   = s ** m
+        spec    = np.fft.fftshift(np.fft.fft(s_pow))
+        freqs   = np.fft.fftshift(np.fft.fftfreq(n, 1.0 / sample_rate))
+        # Search window in the M-th-power domain is M × the carrier-domain window.
+        window_hz = m * _CARRIER_SEARCH_HZ
+        mask      = np.abs(freqs) < window_hz
+        if not mask.any():
+            return 0.0, False
+        power        = spec.real ** 2 + spec.imag ** 2
+        masked_power = np.where(mask, power, 0.0)
+        peak_idx     = int(np.argmax(masked_power))
+        peak_pow     = float(power[peak_idx])
+        median_pow   = float(np.median(power[mask]))
+        if median_pow <= 0.0 or peak_pow < median_pow * (10.0 ** (_CARRIER_LOCK_DB / 10.0)):
+            return 0.0, False
+        # Convert from M-th-power domain back to carrier offset.
+        return float(freqs[peak_idx]) / m, True
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
-        peak    = (results or {}).get('peak_marker', {})
-        peak_hz = peak.get('peak_hz', state.center_hz)
-
-        offset_hz           = peak_hz - state.center_hz
-        n                   = len(samples)
+        n = len(samples)
 
         # ── Burst gate (optional) ─────────────────────────────────────────
         # Track a running noise floor and mark the chunk as "in burst" when
@@ -115,9 +166,12 @@ class ConstellationDecoder(Decoder):
         self._burst_active = chunk_pow > burst_thr
 
         if self._gating and not self._burst_active:
+            # Advance phase bookkeeping across the silent gap using the last
+            # known carrier estimate — don't touch the estimate itself.
             self._carrier_phase = (
-                self._carrier_phase + 2 * np.pi * offset_hz * n / state.bw_hz
+                self._carrier_phase + 2 * np.pi * self._carrier_est_hz * n / state.bw_hz
             ) % (2 * np.pi)
+            self._prev_gate_open = False
             return {'symrate':      self._symrate,
                     'n_points':     len(self._points),
                     'n_total':      self._n_total,
@@ -126,8 +180,28 @@ class ConstellationDecoder(Decoder):
                     'gating':       True,
                     'burst_active': False}
 
-        # Mix to baseband — accumulate carrier phase so the phasor is continuous even
-        # when offset_hz shifts between chunks (alpha-beta tracker moves peak_hz).
+        # ── Carrier estimate ─────────────────────────────────────────────
+        # M-th-power FFT to strip modulation and locate the carrier.  On a
+        # burst edge (gate transitions off→on) reset to the fresh estimate
+        # so per-burst Doppler jumps track cleanly.  In continuous mode we
+        # EMA-smooth for stability.  If the estimator has no confident
+        # lock (weak signal, off-tuned, or wrong m), we keep the previous
+        # value — a stale-but-close estimate beats yanking to 0.
+        gate_edge          = (self._gating and self._burst_active
+                              and not self._prev_gate_open)
+        self._prev_gate_open = self._burst_active
+        new_est, locked    = self._estimate_carrier_offset(samples, int(state.bw_hz))
+        if locked:
+            if gate_edge:
+                self._carrier_est_hz = new_est
+            else:
+                self._carrier_est_hz = ((1.0 - _CARRIER_EMA) * self._carrier_est_hz
+                                        + _CARRIER_EMA * new_est)
+        self._carrier_locked = locked
+        offset_hz            = self._carrier_est_hz
+
+        # Mix to baseband — accumulate carrier phase so the phasor is continuous
+        # even when offset_hz shifts between chunks (per-burst Doppler jumps).
         t_local             = np.arange(n) / state.bw_hz
         baseband            = (samples * np.exp(
             -1j * (self._carrier_phase + 2 * np.pi * offset_hz * t_local)
@@ -213,13 +287,15 @@ class ConstellationDecoder(Decoder):
             self._points = self._points[-_MAX_POINTS:]
 
         return {
-            'symrate':      self._symrate,
-            'n_points':     len(self._points),
-            'n_total':      self._n_total,
-            'm':            self._m,
-            'differential': self._differential,
-            'gating':       self._gating,
-            'burst_active': self._burst_active,
+            'symrate':          self._symrate,
+            'n_points':         len(self._points),
+            'n_total':          self._n_total,
+            'm':                self._m,
+            'differential':     self._differential,
+            'gating':           self._gating,
+            'burst_active':     self._burst_active,
+            'carrier_est_hz':   self._carrier_est_hz,
+            'carrier_locked':   self._carrier_locked,
         }
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
@@ -346,8 +422,13 @@ class ConstellationDecoder(Decoder):
             gate_str = '  [GATE·ON]' if result.get('burst_active') else '  [GATE·waiting]'
         else:
             gate_str = ''
-        h_left  = 'Constellation  {:,} sym/s  {}  {:,} bit/s{}{}'.format(
-            symrate, _MOD_NAMES.get(m, '{}PSK'.format(m)), bitrate, diff_str, gate_str)
+        if result.get('carrier_locked'):
+            car_str = '  [CAR {:+.0f} Hz]'.format(result.get('carrier_est_hz', 0.0))
+        else:
+            car_str = ''
+        h_left  = 'Constellation  {:,} sym/s  {}  {:,} bit/s{}{}{}'.format(
+            symrate, _MOD_NAMES.get(m, '{}PSK'.format(m)),
+            bitrate, diff_str, gate_str, car_str)
         h_right = '   {}/{} pts'.format(n_pts, _MAX_POINTS)
         h_total = h_left + evm_str + h_right
         hx      = max(0, (cols - len(h_total)) // 2)

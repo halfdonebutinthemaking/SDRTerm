@@ -1,14 +1,13 @@
 # constellation — IQ Constellation Display
 
-Shows the phase-space scatter plot of the strongest signal. Use it to visually
+Shows the phase-space scatter plot of the tuned signal. Use it to visually
 identify the modulation order of a digital carrier and to tune the symbol rate
 until the clusters click into focus.
 
-Requires `peak_marker` to be active before it in the pipeline, **with tracking
-mode enabled** (`r` in the peak_marker tab). In hold-off mode the peak
-frequency is only updated on detections; between updates it drifts, which
-introduces a carrier offset the plugin cannot fully correct, causing the
-clusters to smear into a ring.
+Self-contained — an internal **M-th-power carrier estimator** finds the carrier
+offset within ±30 kHz of `state.center_hz` on each chunk (or per burst when
+the burst gate is on), so no external tracking plugin is needed.  Just tune
+close to the target signal and the plugin locks on.
 
 ## Controls
 
@@ -43,8 +42,15 @@ tight blobs.
 
 ## How it works
 
-1. `peak_marker` supplies the carrier frequency.
-2. The carrier is mixed to DC and the result is resampled to exactly
+1. **Internal carrier estimator** — raise the IQ chunk to the M-th power (M =
+   currently-selected constellation size), take an FFT, find the peak inside
+   a ±30 kHz search window around DC, divide by M to recover the carrier
+   offset.  In continuous mode the estimate is EMA-smoothed across chunks;
+   in burst-gated mode it resets on every burst edge so per-burst Doppler
+   jumps (Iridium ±40 kHz LEO Doppler) are tracked cleanly.  Only accepts a
+   lock when the peak beats the search-window median by 12 dB; otherwise it
+   holds the previous estimate.  Header shows `[CAR ±NNN Hz]` when locked.
+2. The estimated carrier is mixed to DC and the result is resampled to exactly
    8 samples per symbol using rational resampling (`resample_poly`).
 3. A matched root-raised-cosine filter (α = 0.35) removes inter-symbol
    interference — the same filter shape used on the transmit side of most
@@ -56,11 +62,13 @@ tight blobs.
 
 ## Tuning procedure
 
-1. Enable `peak_marker` and confirm the peak is locked onto the signal.
+1. Tune to the target signal (or close — the estimator handles ±30 kHz).
 2. Switch to the constellation tab.
-3. Press `+` / `-` to sweep the symbol rate.  Watch for the scattered ring to
+3. Press `m` until the reference cluster count matches your target (BPSK/QPSK/
+   8PSK/16PSK).  For bursty signals also press `b` to enable the burst gate.
+4. Press `+` / `-` to sweep the symbol rate.  Watch for the scattered ring to
    resolve into distinct blobs.
-4. Once tight, read the symbol rate from the footer.  Combined with the number
+5. Once tight, read the symbol rate from the footer.  Combined with the number
    of visible clusters this identifies the modulation (e.g. 4 clusters at
    10 500 sym/s → QPSK at VDL Mode 2 rate).
 
@@ -78,8 +86,7 @@ uv run python main.py \
   --f 120M
 ```
 
-Enable `peak_marker`, switch to the constellation tab, then set symbol rate
-to **10 500 sym/s**.
+Switch to the constellation tab and set symbol rate to **10 500 sym/s**.
 
 ### What "right" looks like
 
@@ -129,8 +136,10 @@ cluster duplicates into an inner and outer ring:
 ```
 
 **Carrier not locked / wrong signal** — a flat cloud of noise with no
-structure at all means `peak_marker` is not tracking the signal, the signal
-is not PSK, or the SNR is too low (<5 dB).
+structure at all means the internal M-th-power carrier estimator can't find
+a lock (header will not show `[CAR …]`).  That happens when the signal is
+not PSK, the SNR is too low (< ~3 dB), the tuning is more than 30 kHz off
+the carrier, or the selected `m` doesn't match the actual modulation order.
 
 Rotating the symbol rate away from 10 500 sym/s in either direction causes the
 clusters to smear, confirming the tuning sensitivity.
@@ -205,10 +214,10 @@ tab (any of the top few by count is fine).
 **What you should NOT expect:**
 
 - **Four tight snap-together clusters.**  The lobes are visibly present
-  but always somewhat smeared, because the peak-marker's carrier
-  estimate has a few hundred Hz of residual error.  At 25 kbaud that
-  translates to a per-symbol phase rotation of a few degrees, which
-  spreads each cluster along an arc.
+  but always somewhat smeared, because the internal carrier estimator
+  has a few hundred Hz of residual error (FFT bin width limit).  At
+  25 kbaud that translates to a per-symbol phase rotation of a few
+  degrees, which spreads each cluster along an arc.
 - **Equal density in all four lobes.**  Preamble dominates, so `+I` is
   always the brightest.  Data-payload symbols land in the other three
   more sparsely.
@@ -334,11 +343,13 @@ requiring a separate ambiguity resolver.
 VDL Mode 2 uses **differential** 8PSK, which has two additional problems beyond
 the phase correction issue above:
 
-1. **peak_marker cannot find the carrier.** D8PSK is wideband — its power is
-   spread across ~17 kHz by the RRC pulse-shaping filter.  Each FFT bin carries
-   only 1/140th of the total power, putting individual bins at or below the noise
-   floor.  `peak_marker` finds nothing to lock onto, so no symbols reach the
-   constellation at all.
+1. **No dominant carrier tone to find.** D8PSK is wideband — its power is
+   spread across ~17 kHz by the RRC pulse-shaping filter.  Even the internal
+   M-th-power estimator sees only a diffuse cluster in the 8th-power spectrum
+   rather than a sharp tone, so lock-in is unreliable.  In practice VDL Mode 2
+   works because the signal *is* already at DC when you tune to it — no
+   carrier recovery needed.  Turn burst gate off; the estimator will fall
+   back to offset = 0 when unlocked, which is exactly right.
 
 2. **The 4th-power correction fails for 8PSK** as described above.
 

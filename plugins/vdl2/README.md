@@ -116,10 +116,13 @@ IQ samples
 The constellation plugin will show an empty ring or nothing at all for VDL2.
 Two reasons:
 
-1. **peak_marker cannot detect it.** VDL2 is a wideband signal — its power is
+1. **No dominant carrier tone.** VDL2 is a wideband signal — its power is
    spread across ~17 kHz by the RRC pulse shaper.  Each FFT bin holds only
    ~1/140th of the total power, putting it at or below the per-bin noise floor.
-   peak_marker finds no bright spike, so the constellation receives no symbols.
+   The constellation plugin's internal M-th-power carrier estimator sees only
+   a diffuse cluster in the 8th-power spectrum rather than a sharp tone, so
+   it doesn't lock.  In practice this is fine — VDL2 sits at DC when you tune
+   to it, and the estimator falls back to offset = 0 when unlocked.
 
 2. **The phase correction fails for 8PSK.** The constellation uses a 4th-power
    estimator (`mean(symbols⁴)`).  For 8PSK the 4th power produces only {+1, −1};
