@@ -429,14 +429,22 @@ class ConstellationDecoder(Decoder):
         h_left  = 'Constellation  {:,} sym/s  {}  {:,} bit/s{}{}{}'.format(
             symrate, _MOD_NAMES.get(m, '{}PSK'.format(m)),
             bitrate, diff_str, gate_str, car_str)
-        h_right = '   {}/{} pts'.format(n_pts, _MAX_POINTS)
-        h_total = h_left + evm_str + h_right
-        hx      = max(0, (cols - len(h_total)) // 2)
+        h_right = '{}/{} pts'.format(n_pts, _MAX_POINTS)
+        # Fixed left-anchored layout so header doesn't jitter as evm_str /
+        # car_str widths change frame-to-frame (which would shift a centred
+        # header left/right and, if h_total ever exceeds cols, silently drop
+        # trailing writes via the surrounding except-curses.error clause).
+        LX = 2
         try:
-            screen_obj.addstr(1, hx, h_left, curses.A_BOLD)
+            screen_obj.addstr(1, LX, h_left, curses.A_BOLD)
             if evm_str:
-                screen_obj.addstr(1, hx + len(h_left), evm_str, evm_attr)
-            screen_obj.addstr(1, hx + len(h_left) + len(evm_str), h_right, curses.A_BOLD)
+                screen_obj.addstr(1, LX + len(h_left), evm_str, evm_attr)
+            # Right side (pts) anchored to the right edge, independent of
+            # h_left / evm_str widths.  If it can't fit, drop it silently
+            # rather than aborting the whole line.
+            rx = max(LX + len(h_left) + len(evm_str) + 3, cols - len(h_right) - 2)
+            if rx + len(h_right) < cols:
+                screen_obj.addstr(1, rx, h_right, curses.A_BOLD)
         except curses.error:
             pass
 
