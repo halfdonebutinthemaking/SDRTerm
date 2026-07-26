@@ -1,8 +1,9 @@
 {
   "version": 1,
+  "_comment": "Use Gain 18 when using an LNA",
   "center_hz": 1621250000.0,
   "bw_hz": 2400000,
-  "gain_db": 42.0,
+  "gain_db": 18.0,
   "gain_auto": false,
   "iq_corr": true,
   "fm_bw_hz": 100000,
