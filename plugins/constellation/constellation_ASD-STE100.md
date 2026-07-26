@@ -24,6 +24,7 @@ locks on.
 | `.` | Turn reference markers clockwise |
 | `z` | Change between absolute and differential display mode |
 | `b` | Change burst gate on / off (add symbols only during detected bursts) |
+| `l` | Change carrier-lock estimator on / off. Off forces offset = 0 (the plugin then assumes the signal is at DC). |
 | `r` | Clear the scatter buffer |
 
 ## How to read the display

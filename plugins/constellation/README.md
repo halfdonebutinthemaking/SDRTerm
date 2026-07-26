@@ -21,6 +21,7 @@ close to the target signal and the plugin locks on.
 | `.` | Rotate reference markers clockwise |
 | `z` | Toggle absolute / differential display mode |
 | `b` | Toggle burst gate (only accumulate symbols during detected bursts) |
+| `l` | Toggle carrier-lock estimator on/off — off forces offset = 0 (assume signal at DC) |
 | `r` | Clear the scatter buffer |
 
 ## How to read the display

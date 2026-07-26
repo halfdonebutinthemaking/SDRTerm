@@ -64,7 +64,7 @@ def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
 class ConstellationDecoder(Decoder):
     name            = 'constellation'
     key             = 'c'
-    key_help        = '+/-=rate(500)  [/]=rate(50)  m=M  ,/.=rotate  z=diff  b=gate  r=clear'
+    key_help        = '+/-=rate(500)  [/]=rate(50)  m=M  ,/.=rotate  z=diff  b=gate  l=lock  r=clear'
     min_sample_rate = 10_000
     realtime        = False
     bg_queue_depth  = 2
@@ -83,6 +83,7 @@ class ConstellationDecoder(Decoder):
         self._gating         = False  # burst-gate scatter accumulation on/off
         self._noise_floor    = None   # running noise-floor (linear power)
         self._burst_active   = False  # last-chunk gate decision (for display)
+        self._carrier_lock_on = True  # user toggle: carrier estimator on/off
         self._carrier_est_hz = 0.0    # internal carrier-offset estimate (Hz)
         self._carrier_locked = False  # whether the estimator has a lock
         self._prev_gate_open = False  # last-chunk burst_active — for edge detect
@@ -187,18 +188,26 @@ class ConstellationDecoder(Decoder):
         # EMA-smooth for stability.  If the estimator has no confident
         # lock (weak signal, off-tuned, or wrong m), we keep the previous
         # value — a stale-but-close estimate beats yanking to 0.
+        #
+        # User can disable the estimator with `l` (e.g. for D8PSK / VDL2
+        # where no clean tone exists, or when the signal is known to be at
+        # DC already and estimator jitter would only smear the constellation).
         gate_edge          = (self._gating and self._burst_active
                               and not self._prev_gate_open)
         self._prev_gate_open = self._burst_active
-        new_est, locked    = self._estimate_carrier_offset(samples, int(state.bw_hz))
-        if locked:
-            if gate_edge:
-                self._carrier_est_hz = new_est
-            else:
-                self._carrier_est_hz = ((1.0 - _CARRIER_EMA) * self._carrier_est_hz
-                                        + _CARRIER_EMA * new_est)
-        self._carrier_locked = locked
-        offset_hz            = self._carrier_est_hz
+        if self._carrier_lock_on:
+            new_est, locked = self._estimate_carrier_offset(samples, int(state.bw_hz))
+            if locked:
+                if gate_edge:
+                    self._carrier_est_hz = new_est
+                else:
+                    self._carrier_est_hz = ((1.0 - _CARRIER_EMA) * self._carrier_est_hz
+                                            + _CARRIER_EMA * new_est)
+            self._carrier_locked = locked
+        else:
+            self._carrier_est_hz = 0.0
+            self._carrier_locked = False
+        offset_hz = self._carrier_est_hz
 
         # Mix to baseband — accumulate carrier phase so the phasor is continuous
         # even when offset_hz shifts between chunks (per-burst Doppler jumps).
@@ -296,6 +305,7 @@ class ConstellationDecoder(Decoder):
             'burst_active':     self._burst_active,
             'carrier_est_hz':   self._carrier_est_hz,
             'carrier_locked':   self._carrier_locked,
+            'carrier_lock_on':  self._carrier_lock_on,
         }
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
@@ -352,6 +362,11 @@ class ConstellationDecoder(Decoder):
             # gate first engages.
             self._noise_floor = None
             return True
+        if key == ord('l'):
+            self._carrier_lock_on = not self._carrier_lock_on
+            self._carrier_est_hz  = 0.0
+            self._carrier_locked  = False
+            return True
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
@@ -365,14 +380,16 @@ class ConstellationDecoder(Decoder):
 
     def save_state(self) -> dict:
         return {'symrate': self._symrate, 'm': self._m, 'ref_angle': self._ref_angle,
-                'differential': self._differential, 'gating': self._gating}
+                'differential': self._differential, 'gating': self._gating,
+                'carrier_lock_on': self._carrier_lock_on}
 
     def load_state(self, d: dict) -> None:
-        self._symrate      = int(d.get('symrate', _DEFAULT_SYMRATE))
-        self._m            = int(d.get('m', 4))
-        self._ref_angle    = float(d.get('ref_angle', 0.0))
-        self._differential = bool(d.get('differential', False))
-        self._gating       = bool(d.get('gating', False))
+        self._symrate         = int(d.get('symrate', _DEFAULT_SYMRATE))
+        self._m               = int(d.get('m', 4))
+        self._ref_angle       = float(d.get('ref_angle', 0.0))
+        self._differential    = bool(d.get('differential', False))
+        self._gating          = bool(d.get('gating', False))
+        self._carrier_lock_on = bool(d.get('carrier_lock_on', True))
 
     def draw_full(self, screen_obj, state: AppState, result: dict,
                   rows: int, cols: int) -> None:
@@ -417,15 +434,22 @@ class ConstellationDecoder(Decoder):
         except Exception:
             evm_attr = curses.A_BOLD
 
-        diff_str = '  [DIFF]' if result.get('differential') else ''
+        # Optional-indicator fields — padded to fixed widths so h_left
+        # never changes length frame-to-frame.  Otherwise the EVM column
+        # (which sits at LX + len(h_left)) visibly shifts as indicators
+        # toggle on and off.
+        diff_str = '  [DIFF] ' if result.get('differential') else '         '     #  9 chars
         if result.get('gating'):
-            gate_str = '  [GATE·ON]' if result.get('burst_active') else '  [GATE·waiting]'
+            gate_str = ('  [GATE·ON]     ' if result.get('burst_active')
+                        else '  [GATE·waiting]')                                  # 16 chars
         else:
-            gate_str = ''
-        if result.get('carrier_locked'):
-            car_str = '  [CAR {:+.0f} Hz]'.format(result.get('carrier_est_hz', 0.0))
+            gate_str = '                '                                         # 16 chars
+        if not result.get('carrier_lock_on', True):
+            car_str = '  [CAR OFF]      '                                         # 17 chars
+        elif result.get('carrier_locked'):
+            car_str = '  [CAR {:+6.0f} Hz]'.format(result.get('carrier_est_hz', 0.0))  # 17 chars
         else:
-            car_str = ''
+            car_str = '                 '                                         # 17 chars
         h_left  = 'Constellation  {:,} sym/s  {}  {:,} bit/s{}{}{}'.format(
             symrate, _MOD_NAMES.get(m, '{}PSK'.format(m)),
             bitrate, diff_str, gate_str, car_str)
@@ -552,11 +576,12 @@ class ConstellationDecoder(Decoder):
 
         # ── Footer ─────────────────────────────────────────────────────────
         footer = ('+/- coarse ±{:,}   [/] fine ±{:,}   {:,} sym/s   '
-                  'm={} ({})   ,/.=rotate {:.0f}°   z={}   b={}   r=clear').format(
+                  'm={} ({})   ,/.=rotate {:.0f}°   z={}   b={}   l={}   r=clear').format(
                   _SYMRATE_STEP_C, _SYMRATE_STEP_F, symrate,
                   m, _MOD_NAMES.get(m, '{}PSK'.format(m)), self._ref_angle,
                   'DIFF' if result.get('differential') else 'abs',
-                  'GATE'  if result.get('gating')       else 'off')
+                  'GATE'  if result.get('gating')       else 'off',
+                  'ON'    if result.get('carrier_lock_on', True) else 'OFF')
         try:
             screen_obj.addstr(rows - 2, 2, footer[:cols - 4], curses.A_DIM)
         except curses.error:
