@@ -267,10 +267,23 @@ class ConstellationDecoder(Decoder):
                 )
             matched = (matched * np.exp(-1j * correction)).astype(np.complex64)
 
-        # Sample at symbol centres, accounting for RRC filter delay
-        delay  = len(rrc_taps) // 2
-        offset = delay % _TARGET_SPS + _TARGET_SPS // 2
-        syms   = matched[offset::_TARGET_SPS]
+        # Sample at symbol centres.  Pick the phase (0..TARGET_SPS-1) whose
+        # samples have the highest mean magnitude — at TARGET_SPS = 8 that's
+        # 8 candidate slices to compare, cheap and stateless.  Sampling
+        # exactly at symbol centres gives |s| ≈ 1 (RRC pulse peak); sampling
+        # at zero-crossings gives |s| ≈ 0.  Picking the max-magnitude phase
+        # per chunk provides a cheap alternative to a proper Gardner/M&M
+        # timing-recovery loop and — critically — automatically adapts to
+        # whichever phase the file / hardware sample stream happens to land
+        # on (previously hard-coded to `_TARGET_SPS // 2`, which was
+        # exactly the zero-crossing for signals aligned to sample 0).
+        best_off, best_mag = 0, -1.0
+        for phase in range(_TARGET_SPS):
+            cand   = matched[phase::_TARGET_SPS]
+            magsum = float(np.mean(np.abs(cand))) if len(cand) else 0.0
+            if magsum > best_mag:
+                best_mag, best_off = magsum, phase
+        syms = matched[best_off::_TARGET_SPS]
 
         if len(syms) == 0:
             return {'symrate': self._symrate, 'n_points': len(self._points),
