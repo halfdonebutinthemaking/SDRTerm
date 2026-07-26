@@ -2,30 +2,35 @@
 """
 Generate a synthetic QPSK test signal for verifying the constellation plugin.
 
-Signal parameters
-─────────────────
+Signal parameters (defaults)
+────────────────────────────
   Modulation  : QPSK (π/4-offset, Gray-coded)
   Symbol rate : 10 500 sym/s   (matches VDL Mode 2 for later use)
   Pulse shape : Root-raised cosine, α = 0.35
   Sample rate : 250 000 Hz
   Carrier     : centred at 0 Hz offset (no Doppler, no tuning error)
-  SNR         : 20 dB
+  SNR         : 20 dB   (override with --snr for a cleaner reference)
   Duration    : 10 s
 
 Usage
 ─────
-  uv run python scripts/gen_constellation_test.py [OUTPUT_BASE]
+  # Default 20 dB SNR reference (matches the tracked sample file):
+  uv run python scripts/gen_constellation_test.py
+
+  # Clean high-SNR variant for verifying green EVM (< 10 %):
+  uv run python scripts/gen_constellation_test.py \
+      --snr 35 --duration 5 \
+      --output-base samples/constellation_test_clean
 
   # Replay in SDRTerm:
   uv run python main.py --file samples/constellation_test.sigmf-data \
       --bw 250000 --f 120M
 
-  Enable peak_marker (k), then constellation (c).
-  Set symbol rate to 10 500 sym/s — four tight clusters should appear.
+  In the app, enable the constellation plugin (c) and set 10 500 sym/s.
 """
+import argparse
 import json
 import os
-import sys
 import numpy as np
 from datetime import datetime, timezone
 from scipy.signal import resample_poly
@@ -37,9 +42,7 @@ SYMBOL_RATE = 10_500       # sym/s
 # 10 500 sym/s instead of the rounded 250 000/24 = 10 416.7 sym/s.
 _GEN_SPS    = 24
 _GEN_SR     = SYMBOL_RATE * _GEN_SPS   # 252 000 Hz
-DURATION    = 10.0
 CENTER_HZ   = 120_000_000.0
-SNR_DB      = 20.0
 RRC_ALPHA   = 0.35
 
 QPSK_SYMBOLS = np.exp(1j * (np.pi / 4 + np.pi / 2 * np.arange(4)))
@@ -65,10 +68,23 @@ def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
 
 
 def main():
-    out_base = sys.argv[1] if len(sys.argv) > 1 else 'samples/constellation_test'
-    n_out    = int(SR * DURATION)          # samples at 250 000 Hz
-    n_gen    = int(_GEN_SR * DURATION) + _GEN_SPS * 8  # a few extra symbols
-    rng      = np.random.default_rng(0)
+    ap = argparse.ArgumentParser(description='Generate QPSK constellation test signal')
+    ap.add_argument('--snr',         type=float, default=20.0,
+                    help='signal SNR in dB (default: 20)')
+    ap.add_argument('--duration',    type=float, default=10.0,
+                    help='signal duration in seconds (default: 10)')
+    ap.add_argument('--output-base', default='samples/constellation_test',
+                    help='output path prefix (default: samples/constellation_test)')
+    ap.add_argument('--seed', type=int, default=0,
+                    help='RNG seed for reproducibility (default: 0)')
+    args = ap.parse_args()
+
+    out_base = args.output_base
+    snr_db   = args.snr
+    duration = args.duration
+    n_out    = int(SR * duration)              # samples at 250 000 Hz
+    n_gen    = int(_GEN_SR * duration) + _GEN_SPS * 8  # a few extra symbols
+    rng      = np.random.default_rng(args.seed)
 
     # Random QPSK symbols, upsample to 252 000 Hz with impulse train
     n_sym    = n_gen // _GEN_SPS + 4
@@ -85,7 +101,7 @@ def main():
 
     # AWGN at target SNR
     sig_pwr   = np.mean(np.abs(resampled) ** 2)
-    noise_amp = np.sqrt(sig_pwr / (2.0 * 10 ** (SNR_DB / 10.0)))
+    noise_amp = np.sqrt(sig_pwr / (2.0 * 10 ** (snr_db / 10.0)))
     noise     = noise_amp * (rng.standard_normal(n_out) + 1j * rng.standard_normal(n_out))
     iq        = (resampled + noise).astype(np.complex64)
 
@@ -101,7 +117,7 @@ def main():
             'core:description': (
                 'Synthetic QPSK test. '
                 'Symbol rate {} sym/s, RRC α={}, SNR {} dB.'.format(
-                    SYMBOL_RATE, RRC_ALPHA, SNR_DB)
+                    SYMBOL_RATE, RRC_ALPHA, snr_db)
             ),
         },
         'captures': [{
@@ -113,7 +129,7 @@ def main():
             'core:sample_start': 0,
             'core:sample_count': n_out,
             'core:description':  'QPSK {} sym/s RRC α={} SNR={}dB'.format(
-                SYMBOL_RATE, RRC_ALPHA, SNR_DB),
+                SYMBOL_RATE, RRC_ALPHA, snr_db),
         }],
     }
     meta_path = out_base + '.sigmf-meta'
@@ -124,13 +140,13 @@ def main():
     print('Wrote {} ({:.1f} MB, {} samples)'.format(data_path, size_mb, n_out))
     print('Wrote', meta_path)
     print()
-    print('Signal: QPSK  {} sym/s  RRC α={}  SNR={} dB'.format(
-        SYMBOL_RATE, RRC_ALPHA, SNR_DB))
+    print('Signal: QPSK  {} sym/s  RRC α={}  SNR={} dB  duration={} s'.format(
+        SYMBOL_RATE, RRC_ALPHA, snr_db, duration))
     print('Replay:')
     print('  uv run python main.py --file {} --bw 250000 --f 120M'.format(data_path))
     print()
-    print('Then: peak_marker (k) → constellation (c)')
-    print('      set symbol rate to {} sym/s → four tight clusters'.format(SYMBOL_RATE))
+    print('Then: constellation (c), set symbol rate to {} sym/s → four clusters'.format(
+        SYMBOL_RATE))
 
 
 if __name__ == '__main__':
