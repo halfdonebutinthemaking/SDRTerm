@@ -422,6 +422,12 @@ class ConstellationDecoder(Decoder):
         evm_str  = '  EVM {:.1f}%  ~{:.0f}dB'.format(evm_pct, snr_db) \
                    if evm_pct is not None else ''
         try:
+            # Pairs 2 and 3 are used across the app but only some plugins
+            # (peak_marker, vdl2, freqhop) init them.  Init defensively here
+            # so EVM colouring works even when the constellation tab is
+            # opened first, before any of those plugins have run.
+            curses.init_pair(2,  curses.COLOR_RED,    -1)
+            curses.init_pair(3,  curses.COLOR_GREEN,  -1)
             curses.init_pair(13, curses.COLOR_YELLOW, -1)
             if evm_pct is None:
                 evm_attr = curses.A_BOLD
