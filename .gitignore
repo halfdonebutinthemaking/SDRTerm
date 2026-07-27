@@ -30,3 +30,6 @@ plugins/modclass/models/*_custom.onnx
 
 # Downloaded datasets (large binary files, not versioned)
 data/
+
+# Iridium plugin burst captures (Stage 2a) — decoded by decode_bursts.sh
+plugins/iridium/iridium_bursts/

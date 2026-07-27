@@ -41,6 +41,14 @@ def _channel_freq(chan_id: int) -> float:
     return IRIDIUM_BAND_LOW_HZ + (chan_id + 0.5) * IRIDIUM_CHAN_SPACING
 
 
+# ── burst-capture constants ──────────────────────────────────────────────────
+_BURST_WIN_MS      = 50          # ± ~25 ms around burst peak → 50 ms slice
+_IQ_RING_MS        = 120         # rolling raw-IQ history buffer, must be > _BURST_WIN_MS
+# Bursts land in `iridium_bursts/` next to this plugin (gitignored) — see
+# decode_bursts.sh for the shell watcher that consumes them.
+import os as _os
+_BURST_DIR         = _os.path.join(_os.path.dirname(__file__), 'iridium_bursts')
+
 # ── detector tuning constants ────────────────────────────────────────────────
 _FFT_SIZE          = 2048        # 2 MSPS / 2048 ≈ 977 Hz/bin, ~1 ms per frame
 _NOISE_ALPHA       = 0.02        # EMA coefficient — ~50-frame time constant
@@ -59,7 +67,7 @@ _MAX_RECENT_LIST   = 15          # rolling display list length
 class IridiumDetector(Decoder):
     name            = 'iridium'
     key             = 'i'
-    key_help        = '+/-=threshold  r=clear'
+    key_help        = '+/-=threshold  c=capture  r=clear'
     min_sample_rate = 2_000_000
     realtime        = False
     bg_queue_depth  = 2
@@ -78,12 +86,18 @@ class IridiumDetector(Decoder):
         self._last_center   = 0.0
         self._last_bw       = 0
         self._threshold_db  = _DEFAULT_THRESH_DB    # tunable at runtime via +/-
+        # Burst capture (Stage 2a) — off by default; each burst is ~800 KB
+        # of wide IQ at 2 MSPS so 100 bursts fills ~80 MB.  Toggle with 'c'.
+        self._capture_on    = False
+        self._iq_ring       = np.empty(0, dtype=np.complex64)
+        self._captured      = 0    # counter shown in the header
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
     def start(self, state: AppState) -> None:
-        # threshold_db intentionally NOT reset — persists across start/stop
-        # so users don't lose their tuned setting when toggling the plugin.
+        # threshold_db + capture_on intentionally NOT reset — persist across
+        # start/stop so users don't lose tuned settings when toggling the
+        # plugin.
         self._noise_floor   = None
         self._chan_map      = {}
         self._chan_bursts   = {}
@@ -94,6 +108,8 @@ class IridiumDetector(Decoder):
         self._last_stats    = time.monotonic()
         self._last_center   = 0.0
         self._last_bw       = 0
+        self._iq_ring       = np.empty(0, dtype=np.complex64)
+        self._captured      = 0
 
     def stop(self) -> None:
         self._noise_floor   = None
@@ -103,6 +119,7 @@ class IridiumDetector(Decoder):
         self._total_bursts  = 0
         self._burst_rate    = 0.0
         self._accum_bursts  = 0
+        self._iq_ring       = np.empty(0, dtype=np.complex64)
 
     # ── channel map ─────────────────────────────────────────────────────────
 
@@ -138,6 +155,14 @@ class IridiumDetector(Decoder):
                 results: dict = None, sdr=None) -> dict:
         if state.center_hz != self._last_center or state.bw_hz != self._last_bw:
             self._rebuild_chan_map(state)
+
+        # Rolling raw-IQ history — sized by wall time so the capture window
+        # size is independent of chunk size / SDR driver settings.
+        if self._capture_on:
+            ring_max = max(len(samples) + 1, int(state.bw_hz * _IQ_RING_MS / 1000))
+            self._iq_ring = np.concatenate([self._iq_ring, samples])
+            if len(self._iq_ring) > ring_max:
+                self._iq_ring = self._iq_ring[-ring_max:]
 
         n_frames = len(samples) // _FFT_SIZE
         if n_frames < 1 or not self._chan_map:
@@ -177,6 +202,17 @@ class IridiumDetector(Decoder):
             peak_idx = int(np.argmax(chan_pow))
             peak_db  = 10.0 * float(np.log10(chan_pow[peak_idx] / chan_nf))
             self._register_burst(chan_id, peak_db, now)
+            if self._capture_on:
+                # peak_idx is a frame index within the current chunk.  Locate
+                # the frame's centre sample in the freshly-updated ring, then
+                # cut a ±(_BURST_WIN_MS/2) window around it.
+                peak_offset_in_chunk = peak_idx * _FFT_SIZE + _FFT_SIZE // 2
+                peak_pos_in_ring     = len(self._iq_ring) - len(samples) + peak_offset_in_chunk
+                half                 = int(state.bw_hz * _BURST_WIN_MS / 1000 / 2)
+                start                = max(0, peak_pos_in_ring - half)
+                end                  = min(len(self._iq_ring), peak_pos_in_ring + half)
+                if end - start > 0:
+                    self._save_burst(self._iq_ring[start:end], state, chan_id, peak_db)
 
         # Update burst rate stat once per second
         dt = now - self._last_stats
@@ -186,6 +222,42 @@ class IridiumDetector(Decoder):
             self._last_stats   = now
 
         return self._make_result(state)
+
+    def _save_burst(self, iq: np.ndarray, state: AppState,
+                    chan_id: int, snr_db: float) -> None:
+        """Write a wide-IQ .cf32 + JSON sidecar for an external decoder to consume.
+
+        Cheap synchronous I/O is fine here: bursts are ~800 KB at 2 MSPS × 50 ms
+        and the plugin runs in a background thread — the main UI never blocks.
+        """
+        import json
+        try:
+            _os.makedirs(_BURST_DIR, exist_ok=True)
+            ts        = time.strftime('%Y-%m-%dT%H-%M-%S') + '.{:03d}'.format(
+                int((time.time() * 1000) % 1000))
+            chan_freq = _channel_freq(chan_id)
+            base      = '{}_ch{:03d}_{:+.1f}dB'.format(ts, chan_id, snr_db)
+            data_path = _os.path.join(_BURST_DIR, base + '.cf32')
+            meta_path = _os.path.join(_BURST_DIR, base + '.json')
+            iq.astype(np.complex64).tofile(data_path)
+            meta = {
+                'sample_rate':     int(state.bw_hz),
+                'tuned_center_hz': float(state.center_hz),
+                'chan_id':         int(chan_id),
+                'chan_freq_hz':    float(chan_freq),
+                'chan_offset_hz':  float(chan_freq - state.center_hz),
+                'snr_db':          float(snr_db),
+                'timestamp':       ts,
+                'n_samples':       int(len(iq)),
+                'format':          'complex64_le',
+            }
+            with open(meta_path, 'w') as f:
+                json.dump(meta, f, indent=2)
+            self._captured += 1
+        except OSError:
+            # Disk full / permission denied — silently skip; capture is a
+            # diagnostic, not critical to the detector's operation.
+            pass
 
     def _register_burst(self, chan_id: int, power_db: float, now: float) -> None:
         self._total_bursts  += 1
@@ -211,6 +283,8 @@ class IridiumDetector(Decoder):
             'n_visible_chans': len(self._chan_map),
             'in_band':         self._is_in_band(state),
             'threshold_db':    self._threshold_db,
+            'capture_on':      self._capture_on,
+            'captured':        self._captured,
         }
 
     def _is_in_band(self, state: AppState) -> bool:
@@ -229,6 +303,13 @@ class IridiumDetector(Decoder):
             return True
         if key == ord('-'):
             self._threshold_db = max(_MIN_THRESH_DB, self._threshold_db - _THRESH_STEP_DB)
+            return True
+        if key == ord('c'):
+            self._capture_on = not self._capture_on
+            if not self._capture_on:
+                # Freeing the ring buffer when capture stops keeps memory low
+                # for long sessions where capture was only used briefly.
+                self._iq_ring = np.empty(0, dtype=np.complex64)
             return True
         return False
 
@@ -266,13 +347,17 @@ class IridiumDetector(Decoder):
         n_vis     = result.get('n_visible_chans', 0)
         coverage  = 100.0 * n_vis / IRIDIUM_CHAN_COUNT
         thresh_db = result.get('threshold_db', _DEFAULT_THRESH_DB)
+        if result.get('capture_on'):
+            cap_str = '   |   Capture: ON ({} saved)'.format(result.get('captured', 0))
+        else:
+            cap_str = '   |   Capture: off'
         stats = ('Coverage: {}/{} channels ({:.0f}%)   |   '
                  'Total bursts: {}   |   Rate: {:.1f}/s   |   '
-                 'Threshold: {:.0f} dB').format(
+                 'Threshold: {:.0f} dB{}').format(
                  n_vis, IRIDIUM_CHAN_COUNT, coverage,
                  result.get('total_bursts', 0),
                  result.get('burst_rate', 0.0),
-                 thresh_db)
+                 thresh_db, cap_str)
         try:
             screen_obj.addstr(y, 2, stats[:cols - 4])
         except curses.error:
@@ -336,8 +421,10 @@ class IridiumDetector(Decoder):
     # ── persistence ────────────────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {'threshold_db': self._threshold_db}
+        return {'threshold_db': self._threshold_db,
+                'capture_on':   self._capture_on}
 
     def load_state(self, d: dict) -> None:
         v = float(d.get('threshold_db', _DEFAULT_THRESH_DB))
         self._threshold_db = max(_MIN_THRESH_DB, min(_MAX_THRESH_DB, v))
+        self._capture_on   = bool(d.get('capture_on', False))
