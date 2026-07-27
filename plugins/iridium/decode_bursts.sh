@@ -12,14 +12,13 @@
 # macOS (no inotifywait) and Linux without any extra tools.
 #
 # ── prerequisites ─────────────────────────────────────────────────────────
-#   iridium-toolkit (Python 3):
-#       git clone https://github.com/muccc/iridium-toolkit
-#       cd iridium-toolkit
-#       pip install .
-#   → provides iridium-extractor + iridium-parser.py in PATH
+#   iridium-extractor  (binary on PATH — provided by iridium-toolkit install)
+#   iridium-parser.py  (Python script from iridium-toolkit repo)
 #
-#   Adjust IRIDIUM_EXTRACTOR / IRIDIUM_PARSER below if the binaries live
-#   elsewhere on your machine.
+# ── configuration ─────────────────────────────────────────────────────────
+# Point IRIDIUM_PARSER at your iridium-parser.py.  If iridium-extractor is not
+# on PATH, set IRIDIUM_EXTRACTOR too.  DETECT_DB matches the -d flag on the
+# live pipeline (14 dB is the value the user has been running with).
 # ──────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
@@ -28,24 +27,14 @@ DIR="$(cd "$(dirname "$0")" && pwd)/iridium_bursts"
 DONE="$DIR/done"
 mkdir -p "$DIR" "$DONE"
 
-# ── external tools (edit paths if not on PATH) ─────────────────────────────
 IRIDIUM_EXTRACTOR="${IRIDIUM_EXTRACTOR:-iridium-extractor}"
-IRIDIUM_PARSER="${IRIDIUM_PARSER:-iridium-parser.py}"
-
-# Configuration template for iridium-extractor — some builds want a config
-# file rather than CLI flags.  Point EXTRACTOR_CONF at your local .conf if so.
-EXTRACTOR_CONF="${EXTRACTOR_CONF:-}"
+IRIDIUM_PARSER="${IRIDIUM_PARSER:-/Users/martin/Projects/Hardware/sdr/iridium_decode/iridium-toolkit/iridium-parser.py}"
+DETECT_DB="${DETECT_DB:-14}"
 
 # ── helpers ────────────────────────────────────────────────────────────────
-print_sidecar() {
-    local json="$1"
-    [ -f "$json" ] || return 0
-    if command -v jq >/dev/null 2>&1; then
-        jq -c '{ts: .timestamp, ch: .chan_id, freq: .chan_freq_hz,
-                snr: .snr_db, samples: .n_samples}' "$json"
-    else
-        cat "$json"
-    fi
+sidecar_field() {
+    # $1 = sidecar json path, $2 = field name — plain-python read, no jq dep.
+    python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"
 }
 
 decode_one() {
@@ -53,28 +42,34 @@ decode_one() {
     local base="${cf32%.cf32}"
     local json="${base}.json"
 
-    echo "─── $(basename "$cf32") ──────────────────────────────"
-    print_sidecar "$json"
+    if [ ! -f "$json" ]; then
+        echo "─── $(basename "$cf32") — no sidecar, skipping"
+        mv "$cf32" "$DONE/" 2>/dev/null || true
+        return
+    fi
 
-    # ── invoke iridium-toolkit here ──────────────────────────────────────
-    # Choose ONE of these depending on your iridium-toolkit build:
-    #
-    #   (a) iridium-extractor consumes wide IQ, outputs bit files piped to parser
-    #       "$IRIDIUM_EXTRACTOR" ${EXTRACTOR_CONF:+-c "$EXTRACTOR_CONF"} \
-    #           --file "$cf32" | "$IRIDIUM_PARSER"
-    #
-    #   (b) Some builds expect a raw-IQ config; check `iridium-extractor --help`
-    #
-    # For now this is a template — uncomment / adjust for your local install:
-    echo "  (decoder invocation not yet configured — edit decode_bursts.sh)"
+    local sr fc snr ch
+    sr=$(sidecar_field "$json" sample_rate)
+    fc=$(printf '%.0f' "$(sidecar_field "$json" tuned_center_hz)")
+    snr=$(sidecar_field "$json" snr_db)
+    ch=$(sidecar_field "$json" chan_id)
+
+    echo "─── $(basename "$cf32")  ch=$ch  snr=${snr}dB  fc=${fc}  sr=${sr} ──"
+
+    # Same pipeline as the live command, adapted to per-file input:
+    #   live:  iridium-extractor -d 14 <soapy.conf> | iridium-parser.py --uw-ec --harder -
+    #   file:  iridium-extractor -d 14 -f cf32_le -r SR -c FC <file> | iridium-parser.py …
+    "$IRIDIUM_EXTRACTOR" -f cf32_le -r "$sr" -c "$fc" -d "$DETECT_DB" "$cf32" 2>/dev/null \
+        | python3 -u "$IRIDIUM_PARSER" --uw-ec --harder - 2>/dev/null \
+        || true
 
     mv "$cf32" "$json" "$DONE/" 2>/dev/null || true
 }
 
 # ── main loop ──────────────────────────────────────────────────────────────
 echo "Watching $DIR for new .cf32 files (Ctrl+C to quit)..."
+echo "Extractor: $IRIDIUM_EXTRACTOR   Parser: $IRIDIUM_PARSER   -d $DETECT_DB"
 while true; do
-    # nullglob-equivalent: skip if no files match
     shopt -s nullglob
     files=("$DIR"/*.cf32)
     shopt -u nullglob
