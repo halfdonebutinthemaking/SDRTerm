@@ -89,6 +89,10 @@ def _bind(lib: ctypes.CDLL) -> None:
     lib.hackrf_set_vga_gain.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.hackrf_set_amp_enable.restype = ctypes.c_int
     lib.hackrf_set_amp_enable.argtypes = [ctypes.c_void_p, ctypes.c_uint8]
+    # hackrf_set_antenna_enable = antenna-port 3.3V DC (bias-tee), for powering
+    # active antennas / external LNAs.  Separate from the ~14 dB internal amp.
+    lib.hackrf_set_antenna_enable.restype = ctypes.c_int
+    lib.hackrf_set_antenna_enable.argtypes = [ctypes.c_void_p, ctypes.c_uint8]
     lib.hackrf_set_baseband_filter_bandwidth.restype = ctypes.c_int
     lib.hackrf_set_baseband_filter_bandwidth.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     lib.hackrf_start_rx.restype = ctypes.c_int
@@ -139,14 +143,15 @@ _FILTER_MAP = {
 
 class HackRFDevice(Device):
     name                 = 'HackRF'
-    key_help             = 'b=amp'
+    key_help             = 'b=bias-tee  B=amp'
     supported_bandwidths = _HRF_BW
     freq_min             = 1_000_000.0
     freq_max             = 6_000_000_000.0
 
     def __init__(self):
         self._dev          = None                    # hackrf_device* (opaque)
-        self._amp          = False
+        self._amp          = False                   # ~14 dB RF pre-amp
+        self._bias_tee     = False                   # 3.3 V antenna port power
         self._lna_gain     = 16                      # 0–40, 8 dB steps
         self._vga_gain     = 20                      # 0–62, 2 dB steps
         self._sample_rate  = _HRF_BW[-1]
@@ -175,6 +180,12 @@ class HackRFDevice(Device):
         lib.hackrf_set_lna_gain(handle, self._lna_gain)
         lib.hackrf_set_vga_gain(handle, self._vga_gain)
         lib.hackrf_set_amp_enable(handle, 1 if self._amp else 0)
+        try:
+            lib.hackrf_set_antenna_enable(handle, 1 if self._bias_tee else 0)
+        except OSError:
+            # Very old libhackrf builds may lack this symbol; downgrade
+            # gracefully (bias-tee just won't work on that build).
+            self._bias_tee = False
         bw = _FILTER_MAP.get(
             self._sample_rate,
             min(_FILTER_MAP.values(), key=lambda x: abs(x - self._sample_rate)))
@@ -342,6 +353,15 @@ class HackRFDevice(Device):
 
     def handle_key(self, key: int, state: 'AppState') -> bool:
         if key == ord('b'):
+            self._bias_tee = not self._bias_tee
+            if self._dev is not None:
+                try:
+                    _lib.hackrf_set_antenna_enable(
+                        self._dev, 1 if self._bias_tee else 0)
+                except OSError:
+                    self._bias_tee = False
+            return True
+        if key == ord('B'):
             self._amp = not self._amp
             if self._dev is not None:
                 try:
@@ -352,4 +372,6 @@ class HackRFDevice(Device):
         return False
 
     def status_text(self, state: 'AppState') -> str:
-        return ('[amp:on]' if self._amp else '[amp:off]') + ' '
+        return ('[bias-tee:{}] [amp:{}] '.format(
+            'on' if self._bias_tee else 'off',
+            'on' if self._amp      else 'off'))

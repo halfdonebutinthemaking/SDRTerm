@@ -30,7 +30,13 @@ The baseband filter bandwidth is set automatically when the sample rate changes.
 
 | Key | Action |
 |-----|--------|
-| `b` | Toggle RF amplifier on/off (shown as `[amp:on/off]` in footer) |
+| `b` | Toggle bias-tee (3.3 V antenna port power) on/off — shown as `[bias-tee:on/off]` in footer |
+| `B` | Toggle ~14 dB RF pre-amplifier on/off — shown as `[amp:on/off]` in footer |
+
+The bias-tee (antenna port power) is separate from the RF amp. Bias-tee feeds
+3.3 V DC up the coax to power an external LNA or active antenna; the RF amp
+is HackRF's own internal ~14 dB pre-amp between the RF frontend and the mixer.
+Both survive bandwidth changes.
 
 ## Gain
 
