@@ -369,3 +369,183 @@ def _extract_and_resample(samples, peak_hz, center_hz, bw_hz,
 - Confidence time-series shown as a small bar in the plugin tab
 - User-adjustable confidence threshold via `+`/`-` keys
 - Fine-tuning mode: `record` captures labelled IQ snippets for later re-training
+
+---
+
+## Heavy-Plugin Architecture (Stage 3 pattern for CPU-bound decoding)
+
+### The problem
+
+Several planned or in-progress plugins do work that's too heavy for the
+main SDR callback thread and too GIL-bound for a background *thread*:
+
+- **Iridium Stage 3** — full DQPSK demod + frame parsing per burst
+- **ADS-B** — DF17 Manchester decoding + Reed-Solomon + CRC per frame
+- **ACARS matched-filter** — replace the current envelope decoder with
+  a proper matched filter + Gardner timing loop
+- **NRSC-5 HD Radio** — deinterleaver + Viterbi + Reed-Solomon
+- **Heavier `modclass` models** — full CNN instead of the shipped lite
+  ONNX
+
+The existing plugin runner has two tiers:
+
+- `realtime=True` plugins run **inline in the SDR callback thread**
+  (FM, RDS, record — must be fast; if they block, samples pile up in
+  libusb and eventually drop)
+- `realtime=False` plugins run on a **per-plugin background daemon thread**
+  fed by a bounded queue (spectrum, waterfall, iridium detector,
+  peak_marker, POCSAG, ACARS, VDL2, constellation)
+
+The background-thread tier works for anything CPU-cheap enough that a
+single GIL-holding worker keeps up.  Once the work per chunk exceeds
+that (matched filtering, Viterbi, FFT-per-burst), threads stop helping
+and the plugin either drops chunks or slows down the whole UI redraw.
+
+### The concept: `HeavyPlugin` base class
+
+A third plugin tier that owns a **`multiprocessing.Pool` of worker
+processes** and pushes CPU-bound work off the main process entirely.
+
+**Base class contract (`HeavyPlugin` extends `Decoder`)**:
+
+```python
+class HeavyPlugin(Decoder):
+    realtime = False
+    n_workers = 2                  # override in subclass
+    max_pending = 4                # backpressure threshold
+
+    # Subclass overrides:
+    @staticmethod
+    def worker_task(iq_chunk, meta) -> dict:
+        """Runs in a WORKER process.  No shared state with main.
+        `iq_chunk` is a numpy array; `meta` is a picklable dict.
+        Return a small dict of results (bits, decoded frames, whatever)."""
+        raise NotImplementedError
+
+    def merge_result(self, result: dict) -> None:
+        """Runs in the MAIN process.  Fold `result` into the plugin's
+        display state (a deque of decoded frames, a counter, etc.).
+        Called from process() as results become available."""
+        raise NotImplementedError
+
+    # Base class provides:
+    #   start(state)  → spawn pool
+    #   stop()        → terminate + join workers
+    #   process(...)  → submit chunk (or drop on backpressure), poll for
+    #                   results, call merge_result for each
+```
+
+### Design points
+
+**Backpressure via drop-on-full.**  Chunks arrive at the SDR sample
+rate; workers process at whatever pace they can.  When the pool has
+`max_pending` in flight, incoming chunks are dropped (with a counter
+exposed in `status_text` so the user sees "3% dropped").  Same policy
+the spectrum plugin uses today — preserves real-time responsiveness
+over completeness.
+
+**Zero shared state.**  Workers are cold processes.  Work items are
+self-contained: an IQ chunk plus a plain-dict meta.  Results are small
+(decoded frame lists, not raw arrays).  This makes the workers
+trivially crash-safe — a rogue exception in one doesn't touch the main
+plugin's display state.
+
+**Shared-memory fast path for large IQ chunks** (optional).  Pickling
+16k complex samples through a queue costs ~15 µs per chunk which is
+fine.  For bigger stitched batches (Iridium-style multi-burst
+concatenation, ~2 s of 2 MHz IQ = 32 MB), use
+`multiprocessing.shared_memory.SharedMemory` to hand the buffer over
+by name, then reclaim.  Only worth adding when profiling shows pickle
+cost dominates.
+
+**Result polling.**  Two options:
+1. Main-thread poll in `process()` — simple, no extra threads, but
+   result latency is one process() cycle
+2. Dedicated result-consumer thread — pushes results into `merge_result`
+   as they arrive, at the cost of a lock around the display deque
+
+Option 1 first; option 2 if latency becomes visible.
+
+**Worker crash recovery.**  Pool workers that raise unhandled
+exceptions get restarted transparently by the pool.  Base class logs
+the exception via `state.flash_msg` so the user can see something went
+wrong without the plugin silently going dark.
+
+**Lifecycle discipline.**  `start()` spawns workers; `stop()` sends a
+sentinel + `pool.terminate() → pool.join(timeout=2)` before returning.
+If a worker hangs, the timeout kicks in and we move on — the plugin
+tab goes dead but the app stays responsive.
+
+### How Iridium Stage 3 uses it
+
+Concrete example — replaces the current shell-out to iridium-toolkit:
+
+```python
+class IridiumDecoderPlugin(HeavyPlugin):
+    name        = 'iridium_decode'
+    key         = 'D'
+    n_workers   = 2         # DSP is CPU-heavy, HackRF sample rate low
+    max_pending = 4
+
+    @staticmethod
+    def worker_task(iq_chunk, meta):
+        # Port the iridium-toolkit pipeline as a pure Python function:
+        #   fft_burst_tagger → cut_and_downmix → demod → bitsparser
+        bursts = detect_bursts(iq_chunk, meta['sample_rate'])
+        frames = []
+        for b in bursts:
+            bits = dqpsk_demod(b, meta['sample_rate'])
+            frame = parse_iridium_frame(bits)
+            if frame is not None:
+                frames.append(frame)
+        return {'frames': frames, 'chunk_ts': meta['ts']}
+
+    def merge_result(self, result):
+        for frame in result['frames']:
+            self._messages.appendleft(frame)
+            if len(self._messages) > _MAX_MSGS:
+                self._messages.pop()
+
+    def draw_full(self, screen_obj, state, result, rows, cols):
+        # Same shape as the acars/pocsag plugins' message-list view
+```
+
+The `iridium` (Stage 1) plugin still runs unchanged as the detector.
+Stage 3 subscribes to the same IQ stream in parallel, does the
+demod in workers, and shows decoded frames in its own tab.
+
+### Migration path for existing heavy plugins
+
+Rather than rewrite everything at once, land the base class + one
+adopter (Iridium Stage 3), then migrate opportunistically when a
+plugin runs into CPU headroom limits:
+
+1. **Ship `HeavyPlugin` base class** in `core.py` — a few dozen lines
+2. **First adopter: Iridium Stage 3** — replaces the `decode_bursts.sh`
+   shell-out with in-process demod.  Batching logic (same-slot grouping)
+   moves into the plugin itself, no external file dance
+3. **Second adopter: ACARS matched-filter mode** (optional) — the
+   current AGC + adaptive slicer works for strong signals, matched
+   filter would help weak-signal reception at the cost of more CPU
+4. **Third: any future ADS-B / NRSC-5 / heavy modclass plugin**
+
+### Non-goals
+
+- **No IPC framework replacement.**  Standard `multiprocessing.Pool` +
+  queue is enough; we're not building an actor system.
+- **No cross-plugin worker sharing.**  Each `HeavyPlugin` owns its own
+  pool.  Shared pools would introduce coupling that isn't worth the
+  memory savings for a hobbyist app.
+- **No GPU offload.**  Real-time DSP on the CPU with SIMD-heavy numpy
+  is fine at these sample rates; GPU adds an install-complexity burden
+  that hurts more than it helps.
+
+### Rough cost
+
+- `HeavyPlugin` base class: ~150 LOC + a small test that spawns
+  workers, submits a fake task, verifies result arrival, terminates
+- Iridium Stage 3 as first adopter: multi-day effort (the demod itself
+  is the hard part, not the plugin plumbing) — port + validate against
+  iridium-toolkit's output on the same input files
+- Doc pass: one section in `plugins/README.md` explaining the three
+  tiers so future contributors know which one to pick
