@@ -319,6 +319,16 @@ class HackRFDevice(Device):
         if rc != 0:
             print("HackRF: hackrf_start_rx failed with code {}".format(rc),
                   file=sys.stderr)
+            return
+        # Block until cancel_read_async() sets _stop_evt.  librtlsdr's
+        # read_samples_async() blocks in its own libusb event loop, so
+        # main.py's reader thread stays alive while RX is running; it uses
+        # `reader.is_alive()` as the signal that the device is streaming.
+        # hackrf_start_rx returns immediately, so without this wait the
+        # reader thread would exit right after start_rx, main.py would
+        # think no cleanup is needed on the next bandwidth change, and
+        # would try to reconfigure a still-streaming device — hang.
+        self._stop_evt.wait()
 
     def cancel_read_async(self) -> None:
         if self._dev is not None:
