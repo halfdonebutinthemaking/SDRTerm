@@ -151,8 +151,67 @@ Two options:
   already at the target rate are skipped.  `--backup` copies originals to
   `iridium_bursts/backup_original_rate/` first.
 
+### Batch size (BATCH_MIN)
+
+`iridium-extractor`'s FFT burst tagger uses a running noise-floor EMA that
+needs ~1-2 seconds of samples to converge before it can distinguish bursts
+from the noise floor.  A single ~100 ms burst file is entirely inside that
+warmup and produces zero detections regardless of the burst's SNR.
+
+`decode_bursts.sh` handles this by concatenating `BATCH_MIN` files (default
+20 → ~2 s of stream at 100 ms per burst) at the same `(tuned_center_hz,
+sample_rate)` before piping to the extractor.  All files in one batch
+must share the same freqhop slot; the grouper keeps them apart so the
+extractor's frequency reference stays valid across the join.
+
+Tuning guidance:
+
+- **Larger BATCH_MIN** (say 50-100) means more decoded frames per batch
+  because the extractor spends less time in warmup relative to signal
+  time, and fewer bursts fall on the seams between concatenated files.
+  Trade-off: longer per-batch latency and larger stitched temp files.
+- **Smaller BATCH_MIN** (10-15) trades decoded-frame yield for latency —
+  useful if you're iterating on threshold or capture parameters and want
+  faster feedback.
+- Bursts that land at concatenation seams get `IridiumMessage: Iridium
+  message too short` errors from the parser.  That's normal and the ratio
+  drops as BATCH_MIN grows.
+
+Override with:  `BATCH_MIN=50 ./plugins/iridium/decode_bursts.sh`
+
+### Reprocessing already-decoded files
+
+`decode_bursts.sh --reprocess` reads from `iridium_bursts/done/` instead
+of the live capture directory, runs one pass, and leaves the files where
+they are.  Handy for iterating on `BATCH_MIN`, `DETECT_DB`, or trying a
+different extractor build without recapturing.
+
+```
+# Try a bigger batch and log the results
+BATCH_MIN=100 ./plugins/iridium/decode_bursts.sh --reprocess \
+    | tee decode_pass_100.log
+
+grep -c '^IRA:' decode_pass_100.log
+```
+
 ### iridium-parser Python deps
 
-`iridium-parser.py` needs `crcmod` in whatever Python interpreter it
-runs under.  If you see `ModuleNotFoundError: No module named 'crcmod'`,
-install it:  `python3 -m pip install crcmod`.
+`iridium-parser.py` needs `crcmod`.  `decode_bursts.sh` pins the parser
+to `$IRIDIUM_PARSER_PY` (default `/opt/homebrew/bin/python3`), so install
+crcmod there rather than in your project venv:
+
+```
+/opt/homebrew/bin/python3 -m pip install --break-system-packages crcmod
+```
+
+(Or `pipx inject iridium-toolkit crcmod` if you installed the toolkit
+via pipx.)  The script's preflight check will abort loudly with the exact
+install command if crcmod isn't importable in the parser's interpreter.
+
+### Presets
+
+- `presets/iridium.sdrterm` — five-slot freqhop sweep across the whole
+  Iridium band (broad reconnaissance, captures spread thin across slots)
+- `presets/iridium_focus.sdrterm` — single 2 MHz slot at 1621.25 MHz
+  with capture pre-enabled (bursts pile up in one batch group, ideal for
+  hitting `BATCH_MIN` quickly and decoding fast)

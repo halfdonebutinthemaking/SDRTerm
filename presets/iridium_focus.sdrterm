@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "_comment": "Iridium focused-capture preset — HackRF single 2 MHz slot at 1621.25 MHz, no freqhop. Every captured burst lands in the same (tuned_center, sample_rate) group so decode_bursts.sh can build long batches quickly (batch_min=20 fills in ~5-10 s of active reception). Capture is ON by default — bursts start writing to plugins/iridium/iridium_bursts/ the moment you tune to a good sky view. For sweep coverage across all 5 freqhop slots use iridium.sdrterm instead. bw_hz=2000000 not 2400000 so bursts feed iridium-toolkit's extractor without downsampling.",
+  "center_hz": 1621250000.0,
+  "bw_hz": 2000000,
+  "gain_db": 18.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": false,
+  "active_decoders": [
+    "spectrum",
+    "iridium",
+    "peak_marker"
+  ],
+  "plugin_order": [
+    "iridium",
+    "peak_marker",
+    "constellation",
+    "spectrum",
+    "freqhop",
+    "range-scan",
+    "record",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "acars",
+    "pocsag",
+    "vdl2",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {
+    "iridium": {
+      "threshold_db": 15.0,
+      "capture_on": true
+    }
+  }
+}

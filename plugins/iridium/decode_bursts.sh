@@ -32,9 +32,41 @@
 
 set -euo pipefail
 
-DIR="$(cd "$(dirname "$0")" && pwd)/iridium_bursts"
-DONE="$DIR/done"
-TMP="$DIR/.stitch"
+# ── argument parsing ──────────────────────────────────────────────────────
+REPROCESS=0
+for arg in "$@"; do
+    case "$arg" in
+        --reprocess)
+            # One-shot mode reading from done/ instead of the live capture
+            # directory.  Useful for iterating on BATCH_MIN / DETECT_DB
+            # against an already-captured set without moving files around.
+            # Files are NOT moved on completion — done/ stays intact.
+            REPROCESS=1
+            ;;
+        -h|--help)
+            grep '^# ' "$0" | head -40
+            exit 0
+            ;;
+        *)
+            echo "Unknown argument: $arg" >&2
+            echo "Usage: $0 [--reprocess]" >&2
+            exit 2
+            ;;
+    esac
+done
+
+BASE="$(cd "$(dirname "$0")" && pwd)/iridium_bursts"
+if [ "$REPROCESS" -eq 1 ]; then
+    DIR="$BASE/done"
+    if [ ! -d "$DIR" ]; then
+        echo "ERROR: no done/ directory to reprocess ($DIR)" >&2
+        exit 1
+    fi
+else
+    DIR="$BASE"
+fi
+DONE="$BASE/done"
+TMP="$BASE/.stitch"
 mkdir -p "$DIR" "$DONE" "$TMP"
 
 IRIDIUM_EXTRACTOR="${IRIDIUM_EXTRACTOR:-iridium-extractor}"
@@ -91,10 +123,14 @@ process_batch() {
 
     rm -f "$stitched"
 
-    # Move all inputs (cf32 + json) to done/
-    for f in "$@"; do
-        mv "$f" "${f%.cf32}.json" "$DONE/" 2>/dev/null || true
-    done
+    # In reprocess mode, files stay put — user is iterating and expects the
+    # source directory to remain intact for subsequent runs with different
+    # BATCH_MIN / DETECT_DB.
+    if [ "$REPROCESS" -eq 0 ]; then
+        for f in "$@"; do
+            mv "$f" "${f%.cf32}.json" "$DONE/" 2>/dev/null || true
+        done
+    fi
 }
 
 # Emit one line per (fc, sr) group: "fc<TAB>sr<TAB>file1<TAB>file2<TAB>..."
@@ -123,13 +159,17 @@ for (fc, sr), files in groups.items():
 PY
 }
 
-echo "Watching $DIR for .cf32 files (Ctrl+C to quit)..."
+if [ "$REPROCESS" -eq 1 ]; then
+    echo "Reprocessing $DIR (source files stay put)..."
+else
+    echo "Watching $DIR for .cf32 files (Ctrl+C to quit)..."
+fi
 echo "Extractor:  $IRIDIUM_EXTRACTOR"
 echo "Parser:     $IRIDIUM_PARSER"
 echo "Parser py:  $IRIDIUM_PARSER_PY"
-echo "Config:     -d $DETECT_DB   batch_min=$BATCH_MIN   done→$DONE"
+echo "Config:     -d $DETECT_DB   batch_min=$BATCH_MIN$([ "$REPROCESS" -eq 0 ] && echo "   done→$DONE")"
 
-while true; do
+run_pass() {
     while IFS=$'\t' read -r fc sr rest; do
         [ -z "$fc" ] && continue
         IFS=$'\t' read -ra files <<< "$rest"
@@ -141,5 +181,14 @@ while true; do
             process_batch "$fc" "$sr" "${files[@]:i:BATCH_MIN}"
         done
     done < <(group_files_by_center)
-    sleep 2
-done
+}
+
+if [ "$REPROCESS" -eq 1 ]; then
+    run_pass
+    echo "Done."
+else
+    while true; do
+        run_pass
+        sleep 2
+    done
+fi
