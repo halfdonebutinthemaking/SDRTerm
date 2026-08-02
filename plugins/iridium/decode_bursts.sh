@@ -39,8 +39,33 @@ mkdir -p "$DIR" "$DONE" "$TMP"
 
 IRIDIUM_EXTRACTOR="${IRIDIUM_EXTRACTOR:-iridium-extractor}"
 IRIDIUM_PARSER="${IRIDIUM_PARSER:-/Users/martin/Projects/Hardware/sdr/iridium_decode/iridium-toolkit/iridium-parser.py}"
+# Pin the parser's Python interpreter — DO NOT let PATH pick it, because
+# users often run this from a virtualenv shell where `python3` is the venv
+# python and crcmod isn't installed there.  crcmod belongs to whichever
+# python was used to install iridium-toolkit — typically Homebrew's.
+IRIDIUM_PARSER_PY="${IRIDIUM_PARSER_PY:-/opt/homebrew/bin/python3}"
 DETECT_DB="${DETECT_DB:-14}"
 BATCH_MIN="${BATCH_MIN:-20}"
+
+# ── preflight: confirm crcmod is importable in the parser's interpreter ──
+if ! "$IRIDIUM_PARSER_PY" -c 'import crcmod' 2>/dev/null; then
+    echo "ERROR: crcmod is not importable in $IRIDIUM_PARSER_PY" >&2
+    echo "       iridium-parser.py needs it to decode frames." >&2
+    echo "       Install with:" >&2
+    echo "         $IRIDIUM_PARSER_PY -m pip install --break-system-packages crcmod" >&2
+    echo "       Or set IRIDIUM_PARSER_PY to a python that has crcmod installed." >&2
+    exit 1
+fi
+if [ ! -f "$IRIDIUM_PARSER" ]; then
+    echo "ERROR: iridium-parser.py not found at $IRIDIUM_PARSER" >&2
+    echo "       Set IRIDIUM_PARSER to its actual path." >&2
+    exit 1
+fi
+if ! command -v "$IRIDIUM_EXTRACTOR" >/dev/null 2>&1; then
+    echo "ERROR: iridium-extractor not found (checked: $IRIDIUM_EXTRACTOR)" >&2
+    echo "       Install iridium-toolkit or set IRIDIUM_EXTRACTOR." >&2
+    exit 1
+fi
 
 # Decode one batch of same-slot files.  All must share (fc, sr).
 process_batch() {
@@ -61,7 +86,7 @@ process_batch() {
     cat "$@" > "$stitched"
 
     "$IRIDIUM_EXTRACTOR" -f cf32_le -r "$sr" -c "$fc" -d "$DETECT_DB" "$stitched" 2>/dev/null \
-        | python3 -u "$IRIDIUM_PARSER" --uw-ec --harder - 2>/dev/null \
+        | "$IRIDIUM_PARSER_PY" -u "$IRIDIUM_PARSER" --uw-ec --harder - 2>/dev/null \
         || true
 
     rm -f "$stitched"
@@ -101,6 +126,7 @@ PY
 echo "Watching $DIR for .cf32 files (Ctrl+C to quit)..."
 echo "Extractor:  $IRIDIUM_EXTRACTOR"
 echo "Parser:     $IRIDIUM_PARSER"
+echo "Parser py:  $IRIDIUM_PARSER_PY"
 echo "Config:     -d $DETECT_DB   batch_min=$BATCH_MIN   done→$DONE"
 
 while true; do
