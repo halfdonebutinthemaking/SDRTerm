@@ -42,8 +42,16 @@ def _channel_freq(chan_id: int) -> float:
 
 
 # ── burst-capture constants ──────────────────────────────────────────────────
-_BURST_WIN_MS      = 50          # ± ~25 ms around burst peak → 50 ms slice
-_IQ_RING_MS        = 120         # rolling raw-IQ history buffer, must be > _BURST_WIN_MS
+# Wider window than the previous 50 ms: iridium-extractor's own burst
+# detector needs to see the full burst envelope (rise + steady + fall) plus
+# some silence around it to converge; 100 ms gives ~50 ms of post-burst
+# runway around a typical ~8 ms Iridium burst.
+_BURST_WIN_MS      = 100
+# Ring buffer holds enough history to serve the widest capture window even
+# when the burst peak sits near the end of a chunk (extraction is deferred
+# by a few chunks — see _pending_captures — to guarantee post-burst runway).
+_IQ_RING_MS        = 250
+_MAX_PENDING       = 64          # cap on unresolved detections during activity spikes
 # Bursts land in `iridium_bursts/` next to this plugin (gitignored) — see
 # decode_bursts.sh for the shell watcher that consumes them.
 import os as _os
@@ -86,11 +94,20 @@ class IridiumDetector(Decoder):
         self._last_center   = 0.0
         self._last_bw       = 0
         self._threshold_db  = _DEFAULT_THRESH_DB    # tunable at runtime via +/-
-        # Burst capture (Stage 2a) — off by default; each burst is ~800 KB
-        # of wide IQ at 2 MSPS so 100 bursts fills ~80 MB.  Toggle with 'c'.
-        self._capture_on    = False
-        self._iq_ring       = np.empty(0, dtype=np.complex64)
-        self._captured      = 0    # counter shown in the header
+        # Burst capture (Stage 2a) — off by default; each burst is ~1.6 MB
+        # of wide IQ at 2 MSPS × 100 ms.  Toggle with 'c'.
+        self._capture_on       = False
+        self._iq_ring          = np.empty(0, dtype=np.complex64)
+        self._captured         = 0    # counter shown in the header
+        # Deferred capture queue: each entry is {chan_id, snr_db, end_dist}
+        # where end_dist = distance in samples from the burst peak to the
+        # end of the ring at detection time.  Extraction is delayed until
+        # end_dist grows past the half-window (i.e., enough post-burst
+        # samples have arrived) so the saved slice has runway on BOTH sides
+        # of the burst, not just before it.  Without this, bursts detected
+        # near the end of a chunk were saved with < 5 ms of post-burst
+        # data, and iridium-extractor's own detector couldn't converge.
+        self._pending_captures = []
 
     # ── lifecycle ───────────────────────────────────────────────────────────
 
@@ -110,6 +127,7 @@ class IridiumDetector(Decoder):
         self._last_bw       = 0
         self._iq_ring       = np.empty(0, dtype=np.complex64)
         self._captured      = 0
+        self._pending_captures = []
 
     def stop(self) -> None:
         self._noise_floor   = None
@@ -120,6 +138,7 @@ class IridiumDetector(Decoder):
         self._burst_rate    = 0.0
         self._accum_bursts  = 0
         self._iq_ring       = np.empty(0, dtype=np.complex64)
+        self._pending_captures = []
 
     # ── channel map ─────────────────────────────────────────────────────────
 
@@ -164,6 +183,30 @@ class IridiumDetector(Decoder):
             if len(self._iq_ring) > ring_max:
                 self._iq_ring = self._iq_ring[-ring_max:]
 
+            # Drain any pending captures whose post-burst runway is now long
+            # enough.  Each pending's `end_dist` measures how many samples
+            # separated the burst peak from the ring end at detection time;
+            # every fresh chunk pushes that distance up by len(samples), so
+            # once end_dist ≥ half_window the ring contains equal runway
+            # before and after the peak and we can safely extract.
+            half = int(state.bw_hz * _BURST_WIN_MS / 1000 / 2)
+            still_pending = []
+            for cap in self._pending_captures:
+                cap['end_dist'] += len(samples)
+                if cap['end_dist'] > len(self._iq_ring):
+                    # Ring trimmed past this peak — data gone, drop it.
+                    continue
+                if cap['end_dist'] >= half:
+                    peak_pos = len(self._iq_ring) - cap['end_dist']
+                    start    = max(0, peak_pos - half)
+                    end      = min(len(self._iq_ring), peak_pos + half)
+                    if end - start > 0:
+                        self._save_burst(self._iq_ring[start:end], state,
+                                         cap['chan_id'], cap['snr_db'])
+                    continue
+                still_pending.append(cap)
+            self._pending_captures = still_pending[-_MAX_PENDING:]
+
         n_frames = len(samples) // _FFT_SIZE
         if n_frames < 1 or not self._chan_map:
             return self._make_result(state)
@@ -203,16 +246,18 @@ class IridiumDetector(Decoder):
             peak_db  = 10.0 * float(np.log10(chan_pow[peak_idx] / chan_nf))
             self._register_burst(chan_id, peak_db, now)
             if self._capture_on:
-                # peak_idx is a frame index within the current chunk.  Locate
-                # the frame's centre sample in the freshly-updated ring, then
-                # cut a ±(_BURST_WIN_MS/2) window around it.
+                # Enqueue instead of saving immediately.  end_dist measures
+                # how many samples separate the burst peak from the current
+                # end of the ring; each fresh chunk pushes it up until the
+                # ring contains half_window samples on both sides of the peak
+                # (extraction happens in the pending-drain loop at the top).
                 peak_offset_in_chunk = peak_idx * _FFT_SIZE + _FFT_SIZE // 2
-                peak_pos_in_ring     = len(self._iq_ring) - len(samples) + peak_offset_in_chunk
-                half                 = int(state.bw_hz * _BURST_WIN_MS / 1000 / 2)
-                start                = max(0, peak_pos_in_ring - half)
-                end                  = min(len(self._iq_ring), peak_pos_in_ring + half)
-                if end - start > 0:
-                    self._save_burst(self._iq_ring[start:end], state, chan_id, peak_db)
+                end_dist             = len(samples) - peak_offset_in_chunk
+                self._pending_captures.append({
+                    'chan_id':  chan_id,
+                    'snr_db':   peak_db,
+                    'end_dist': end_dist,
+                })
 
         # Update burst rate stat once per second
         dt = now - self._last_stats
