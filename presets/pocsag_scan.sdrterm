@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "_comment": "POCSAG scanner — DAPNET (Europe amateur pager network, 439.9875 MHz). For US commercial paging try 152–159 or 454–460 MHz instead. Uses peak_marker to auto-tune the pocsag decoder onto the actual carrier if tuning is slightly off. Increase gain if signal is weak; drop it if the RTL-SDR is overloading. With an LNA at the antenna, use gain around 18–22 dB instead of 32.",
+  "center_hz": 439987500.0,
+  "bw_hz": 250000,
+  "gain_db": 32.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": false,
+  "active_decoders": [
+    "spectrum",
+    "peak_marker",
+    "pocsag"
+  ],
+  "plugin_order": [
+    "pocsag",
+    "peak_marker",
+    "spectrum",
+    "range-scan",
+    "record",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "iridium",
+    "freqhop",
+    "constellation",
+    "acars",
+    "vdl2",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {}
+}
