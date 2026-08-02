@@ -15,6 +15,7 @@ import ctypes.util
 import platform
 import sys
 import threading
+import time
 
 import numpy as np
 from core import Device, AppState
@@ -153,6 +154,7 @@ class HackRFDevice(Device):
         self._gain         = 0.0
         self._cb_c         = None                    # keep CFUNCTYPE ref alive
         self._stop_evt     = threading.Event()
+        self._cb_running   = threading.Event()       # set while callback is inside
 
     def open(self) -> bool:
         try:
@@ -189,11 +191,30 @@ class HackRFDevice(Device):
                 _lib.hackrf_stop_rx(self._dev)
             except Exception:
                 pass
+            # hackrf_stop_rx returns before the libusb thread's in-flight
+            # callback finishes.  Wait briefly for the callback to observe
+            # _stop_evt and return, so hackrf_close() doesn't race with it.
+            for _ in range(20):        # up to ~200 ms
+                if not self._cb_running.is_set():
+                    break
+                time.sleep(0.01)
             try:
                 _lib.hackrf_close(self._dev)
             except Exception:
                 pass
             self._dev = None
+            self._cb_c = None
+
+    def reopen(self) -> None:
+        """Close and reopen — required for sample-rate changes.
+
+        Matches the rtlsdr driver's pattern (main.py calls sdr.reopen()
+        every time state.bw_hz changes).  All device state is stored as
+        instance attributes, so a fresh open() re-applies center_freq,
+        sample_rate, gains, and amp from the current values.
+        """
+        self.close()
+        self.open()
 
     # ── hardware properties ───────────────────────────────────────────────────
     @property
@@ -263,32 +284,37 @@ class HackRFDevice(Device):
             # Called from a libusb thread inside libhackrf.
             if self._stop_evt.is_set():
                 return 0
-            transfer = transfer_ptr.contents
-            n_bytes = transfer.valid_length
-            if n_bytes <= 0:
+            self._cb_running.set()
+            try:
+                transfer = transfer_ptr.contents
+                n_bytes = transfer.valid_length
+                if n_bytes <= 0:
+                    return 0
+                # HackRF delivers interleaved signed 8-bit I/Q as uint8_t*.
+                # string_at copies the buffer safely (libusb reuses the source).
+                raw = np.frombuffer(
+                    ctypes.string_at(transfer.buffer, n_bytes),
+                    dtype=np.int8,
+                )
+                samples = raw.astype(np.float32) / 128.0
+                iq = (samples[0::2] + 1j * samples[1::2]).astype(np.complex64)
+                buf.append(iq)
+                total = sum(len(c) for c in buf)
+                while total >= num_samples:
+                    chunk = np.concatenate(buf)
+                    py_cb(chunk[:num_samples], None)
+                    remaining = chunk[num_samples:]
+                    buf.clear()
+                    if len(remaining):
+                        buf.append(remaining)
+                    total = len(remaining)
                 return 0
-            # HackRF delivers interleaved signed 8-bit I/Q as uint8_t*.
-            # string_at copies the buffer safely (libusb reuses the source).
-            raw = np.frombuffer(
-                ctypes.string_at(transfer.buffer, n_bytes),
-                dtype=np.int8,
-            )
-            samples = raw.astype(np.float32) / 128.0
-            iq = (samples[0::2] + 1j * samples[1::2]).astype(np.complex64)
-            buf.append(iq)
-            total = sum(len(c) for c in buf)
-            while total >= num_samples:
-                chunk = np.concatenate(buf)
-                py_cb(chunk[:num_samples], None)
-                remaining = chunk[num_samples:]
-                buf.clear()
-                if len(remaining):
-                    buf.append(remaining)
-                total = len(remaining)
-            return 0
+            finally:
+                self._cb_running.clear()
 
         self._cb_c = _SAMPLE_BLOCK_CB(_rx_cb)   # must outlive start_rx call
         self._stop_evt.clear()
+        self._cb_running.clear()
         rc = _lib.hackrf_start_rx(self._dev, self._cb_c, None)
         if rc != 0:
             print("HackRF: hackrf_start_rx failed with code {}".format(rc),
