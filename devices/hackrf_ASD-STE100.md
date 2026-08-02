@@ -2,11 +2,17 @@
 
 # HackRF One
 
-Driver for the HackRF One through `pyhackrf` / `libhackrf`.
+Driver for the HackRF One. It uses a direct ctypes binding to `libhackrf`.
 
-**Device name:** `HackRF`  
-**Tunable range:** 1 MHz – 6 GHz  
-**Library:** `pyhackrf` (wraps `libhackrf`)
+**Device name:** `HackRF`
+**Tunable range:** 1 MHz – 6 GHz
+**Library:** `libhackrf` (loaded directly through ctypes. No Python wrapper is needed.)
+
+The driver did use `pyhackrf` and `pyhackrf2` before. Both packages hard-code
+the Linux library filename (`libhackrf.so.0`). They do not load on macOS,
+where the file is `libhackrf.dylib`. Loading `libhackrf` directly through
+ctypes prevents this problem and works on both platforms without changes to
+the environment variables or symlinks.
 
 ## Supported sample rates
 
@@ -41,6 +47,17 @@ When you set the gain to `auto` (the `a` key), the driver uses a mid-range prese
 ## Installation
 
 ```bash
-brew install hackrf      # macOS / Homebrew — installs libhackrf
-pip install pyhackrf
+# macOS
+brew install hackrf                 # installs libhackrf and hackrf_info tools
+
+# Debian / Ubuntu
+sudo apt install libhackrf0 hackrf  # runtime library and tools
+
+# Fedora
+sudo dnf install hackrf hackrf-devel
 ```
+
+You do not need a Python package. The driver loads `libhackrf` directly
+through ctypes. Make sure the library is visible with `hackrf_info` from the
+same shell before you start SDRTerm. If `hackrf_info` sees the device, the
+SDRTerm driver can see it too.

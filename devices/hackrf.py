@@ -1,17 +1,129 @@
+"""HackRF One driver — direct ctypes binding to libhackrf.
+
+Loads libhackrf natively (libhackrf.dylib on macOS from Homebrew,
+libhackrf.so.0 on Linux) with no intermediate Python wrapper.  This avoids
+the pyhackrf / pyhackrf2 problem where the wrapper hardcodes the Linux
+library filename (`libhackrf.so.0`) and fails to load on macOS.
+
+Requires the native library:
+  macOS:  brew install hackrf
+  Linux:  apt install libhackrf0     (Debian / Ubuntu)
+          dnf install hackrf-devel   (Fedora)
+"""
+import ctypes
+import ctypes.util
+import platform
+import sys
+import threading
+
 import numpy as np
 from core import Device, AppState
 
-# HackRF One tunable range and supported sample rates.
-# pyhackrf / libhackrf expose sample rates from 2 to 20 MSPS; rates below
-# 4 MSPS require the hardware's baseband filter to be set explicitly.
+
+# ── libhackrf loader ─────────────────────────────────────────────────────────
+
+def _load_libhackrf() -> ctypes.CDLL:
+    """Locate and open libhackrf across platforms.  Raises OSError if missing."""
+    candidates = []
+    if platform.system() == "Darwin":
+        candidates += [
+            "/opt/homebrew/lib/libhackrf.dylib",   # Apple Silicon Homebrew
+            "/usr/local/lib/libhackrf.dylib",      # Intel Homebrew
+            "libhackrf.dylib",                     # DYLD_LIBRARY_PATH fallback
+        ]
+    else:
+        candidates += [
+            "libhackrf.so.0",
+            "libhackrf.so",
+        ]
+    found = ctypes.util.find_library("hackrf")
+    if found:
+        candidates.append(found)
+    for path in candidates:
+        try:
+            return ctypes.CDLL(path)
+        except OSError:
+            continue
+    raise OSError(
+        "libhackrf not found. Install with:\n"
+        "  macOS:  brew install hackrf\n"
+        "  Linux:  apt install libhackrf0  or  dnf install hackrf-devel"
+    )
+
+
+# ── libhackrf struct + function bindings ─────────────────────────────────────
+
+class _HackRFTransfer(ctypes.Structure):
+    """libhackrf hackrf_transfer struct passed to the RX callback."""
+    _fields_ = [
+        ("device",         ctypes.c_void_p),
+        ("buffer",         ctypes.POINTER(ctypes.c_uint8)),
+        ("buffer_length",  ctypes.c_int),
+        ("valid_length",   ctypes.c_int),
+        ("rx_ctx",         ctypes.c_void_p),
+        ("tx_ctx",         ctypes.c_void_p),
+    ]
+
+
+_SAMPLE_BLOCK_CB = ctypes.CFUNCTYPE(ctypes.c_int, ctypes.POINTER(_HackRFTransfer))
+
+
+def _bind(lib: ctypes.CDLL) -> None:
+    """Attach restype / argtypes to libhackrf's C functions."""
+    lib.hackrf_init.restype = ctypes.c_int
+    lib.hackrf_init.argtypes = []
+    lib.hackrf_exit.restype = ctypes.c_int
+    lib.hackrf_exit.argtypes = []
+    lib.hackrf_open.restype = ctypes.c_int
+    lib.hackrf_open.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    lib.hackrf_close.restype = ctypes.c_int
+    lib.hackrf_close.argtypes = [ctypes.c_void_p]
+    lib.hackrf_set_freq.restype = ctypes.c_int
+    lib.hackrf_set_freq.argtypes = [ctypes.c_void_p, ctypes.c_uint64]
+    lib.hackrf_set_sample_rate.restype = ctypes.c_int
+    lib.hackrf_set_sample_rate.argtypes = [ctypes.c_void_p, ctypes.c_double]
+    lib.hackrf_set_lna_gain.restype = ctypes.c_int
+    lib.hackrf_set_lna_gain.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.hackrf_set_vga_gain.restype = ctypes.c_int
+    lib.hackrf_set_vga_gain.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.hackrf_set_amp_enable.restype = ctypes.c_int
+    lib.hackrf_set_amp_enable.argtypes = [ctypes.c_void_p, ctypes.c_uint8]
+    lib.hackrf_set_baseband_filter_bandwidth.restype = ctypes.c_int
+    lib.hackrf_set_baseband_filter_bandwidth.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    lib.hackrf_start_rx.restype = ctypes.c_int
+    lib.hackrf_start_rx.argtypes = [ctypes.c_void_p, _SAMPLE_BLOCK_CB, ctypes.c_void_p]
+    lib.hackrf_stop_rx.restype = ctypes.c_int
+    lib.hackrf_stop_rx.argtypes = [ctypes.c_void_p]
+
+
+# Module-level singleton — libhackrf's hackrf_init() must be called once per
+# process, and repeated loads waste time / can leak state.
+_lib: ctypes.CDLL = None    # populated on first successful _get_lib()
+
+
+def _get_lib() -> ctypes.CDLL:
+    """Return the loaded + initialised libhackrf, or raise a descriptive error."""
+    global _lib
+    if _lib is None:
+        loaded = _load_libhackrf()
+        _bind(loaded)
+        rc = loaded.hackrf_init()
+        if rc != 0:
+            raise RuntimeError("hackrf_init() failed with code {}".format(rc))
+        _lib = loaded
+    return _lib
+
+
+# ── driver ───────────────────────────────────────────────────────────────────
+
 _HRF_BW = [
     2_000_000, 4_000_000, 6_000_000, 8_000_000,
     10_000_000, 12_500_000, 16_000_000, 20_000_000,
 ]
 
-# Map from sample rate to the nearest libhackrf baseband filter bandwidth.
-# libhackrf accepts: 1.75, 2.5, 3.5, 5, 5.5, 6, 7, 8, 9, 10, 12, 14, 15,
-# 20, 24, 28 MHz.  Values are in Hz.
+# libhackrf accepts filter bandwidths of 1.75, 2.5, 3.5, 5, 5.5, 6, 7, 8, 9,
+# 10, 12, 14, 15, 20, 24, 28 MHz.  Map each supported sample rate to the
+# nearest lower-or-equal filter bandwidth.
 _FILTER_MAP = {
     2_000_000:  1_750_000,
     4_000_000:  3_500_000,
@@ -28,35 +140,57 @@ class HackRFDevice(Device):
     name                 = 'HackRF'
     key_help             = 'b=amp'
     supported_bandwidths = _HRF_BW
-    freq_min             = 1_000_000.0       # 1 MHz
-    freq_max             = 6_000_000_000.0   # 6 GHz
+    freq_min             = 1_000_000.0
+    freq_max             = 6_000_000_000.0
 
     def __init__(self):
-        self._dev          = None
+        self._dev          = None                    # hackrf_device* (opaque)
         self._amp          = False
-        self._lna_gain     = 16    # dB, 0–40 in 8 dB steps
-        self._vga_gain     = 20    # dB, 0–62 in 2 dB steps
+        self._lna_gain     = 16                      # 0–40, 8 dB steps
+        self._vga_gain     = 20                      # 0–62, 2 dB steps
         self._sample_rate  = _HRF_BW[-1]
         self._center_freq  = 100_000_000.0
         self._gain         = 0.0
+        self._cb_c         = None                    # keep CFUNCTYPE ref alive
+        self._stop_evt     = threading.Event()
 
     def open(self) -> bool:
         try:
-            import hackrf
-            self._dev = hackrf.HackRF()
-            self._dev.sample_rate = self._sample_rate
-            self._dev.center_freq = int(self._center_freq)
-            self._dev.lna_gain    = self._lna_gain
-            self._dev.vga_gain    = self._vga_gain
-            self._dev.amplifier_on = self._amp
-            return True
-        except Exception:
+            lib = _get_lib()
+        except (OSError, RuntimeError) as e:
+            print("HackRF: {}".format(e), file=sys.stderr)
             return False
+        handle = ctypes.c_void_p()
+        rc = lib.hackrf_open(ctypes.byref(handle))
+        if rc != 0:
+            print("HackRF: hackrf_open failed with code {} "
+                  "(hardware present? another process using it?)".format(rc),
+                  file=sys.stderr)
+            return False
+        self._dev = handle
+        lib.hackrf_set_sample_rate(handle, ctypes.c_double(float(self._sample_rate)))
+        lib.hackrf_set_freq(handle, ctypes.c_uint64(int(self._center_freq)))
+        lib.hackrf_set_lna_gain(handle, self._lna_gain)
+        lib.hackrf_set_vga_gain(handle, self._vga_gain)
+        lib.hackrf_set_amp_enable(handle, 1 if self._amp else 0)
+        bw = _FILTER_MAP.get(
+            self._sample_rate,
+            min(_FILTER_MAP.values(), key=lambda x: abs(x - self._sample_rate)))
+        try:
+            lib.hackrf_set_baseband_filter_bandwidth(handle, bw)
+        except OSError:
+            pass
+        return True
 
     def close(self) -> None:
-        if self._dev:
+        if self._dev is not None:
+            self._stop_evt.set()
             try:
-                self._dev.close()
+                _lib.hackrf_stop_rx(self._dev)
+            except Exception:
+                pass
+            try:
+                _lib.hackrf_close(self._dev)
             except Exception:
                 pass
             self._dev = None
@@ -69,14 +203,15 @@ class HackRFDevice(Device):
     @sample_rate.setter
     def sample_rate(self, v):
         self._sample_rate = int(v)
-        if self._dev:
-            self._dev.sample_rate = self._sample_rate
-            bw = _FILTER_MAP.get(self._sample_rate,
-                                 min(_FILTER_MAP.values(),
-                                     key=lambda x: abs(x - self._sample_rate)))
+        if self._dev is not None:
+            _lib.hackrf_set_sample_rate(self._dev,
+                                        ctypes.c_double(float(self._sample_rate)))
+            bw = _FILTER_MAP.get(
+                self._sample_rate,
+                min(_FILTER_MAP.values(), key=lambda x: abs(x - self._sample_rate)))
             try:
-                self._dev.baseband_filter_bandwidth = bw
-            except Exception:
+                _lib.hackrf_set_baseband_filter_bandwidth(self._dev, bw)
+            except OSError:
                 pass
 
     @property
@@ -86,8 +221,8 @@ class HackRFDevice(Device):
     @center_freq.setter
     def center_freq(self, v):
         self._center_freq = float(v)
-        if self._dev:
-            self._dev.center_freq = int(v)
+        if self._dev is not None:
+            _lib.hackrf_set_freq(self._dev, ctypes.c_uint64(int(v)))
 
     @property
     def gain(self):
@@ -96,67 +231,86 @@ class HackRFDevice(Device):
     @gain.setter
     def gain(self, v):
         if v == 'auto':
-            # HackRF has no hardware AGC; treat 'auto' as a mid-range preset
-            self._gain    = 0.0
+            # HackRF has no hardware AGC; treat 'auto' as a mid-range preset.
+            self._gain     = 0.0
             self._lna_gain = 24
             self._vga_gain = 30
         else:
             self._gain = float(v)
-            # Map a single dB value onto LNA + VGA.
-            # LNA covers 0–40 dB (8 dB steps), VGA covers the remainder.
+            # Map a single dB value onto LNA + VGA (LNA 0–40 in 8 dB steps,
+            # VGA 0–62 in 2 dB steps for the remainder).
             lna = min(40, max(0, round(float(v) / 8) * 8))
             vga = min(62, max(0, round((float(v) - lna) / 2) * 2))
             self._lna_gain = lna
             self._vga_gain = vga
-        if self._dev:
+        if self._dev is not None:
             try:
-                self._dev.lna_gain = self._lna_gain
-                self._dev.vga_gain = self._vga_gain
-            except Exception:
+                _lib.hackrf_set_lna_gain(self._dev, self._lna_gain)
+                _lib.hackrf_set_vga_gain(self._dev, self._vga_gain)
+            except OSError:
                 pass
 
     # ── async reader ──────────────────────────────────────────────────────────
+
     def read_samples_async(self, callback, num_samples: int) -> None:
-        if not self._dev:
+        if self._dev is None:
             return
 
         buf: list = []
+        py_cb = callback
 
-        def _rx_cb(data, _meta):
-            # libhackrf delivers interleaved signed 8-bit I/Q pairs
-            samples = data.astype(np.float32) / 128.0
+        def _rx_cb(transfer_ptr):
+            # Called from a libusb thread inside libhackrf.
+            if self._stop_evt.is_set():
+                return 0
+            transfer = transfer_ptr.contents
+            n_bytes = transfer.valid_length
+            if n_bytes <= 0:
+                return 0
+            # HackRF delivers interleaved signed 8-bit I/Q as uint8_t*.
+            # string_at copies the buffer safely (libusb reuses the source).
+            raw = np.frombuffer(
+                ctypes.string_at(transfer.buffer, n_bytes),
+                dtype=np.int8,
+            )
+            samples = raw.astype(np.float32) / 128.0
             iq = (samples[0::2] + 1j * samples[1::2]).astype(np.complex64)
             buf.append(iq)
             total = sum(len(c) for c in buf)
             while total >= num_samples:
                 chunk = np.concatenate(buf)
-                callback(chunk[:num_samples], None)
+                py_cb(chunk[:num_samples], None)
                 remaining = chunk[num_samples:]
                 buf.clear()
                 if len(remaining):
                     buf.append(remaining)
                 total = len(remaining)
+            return 0
 
-        try:
-            self._dev.start_rx(_rx_cb)
-        except Exception:
-            pass
+        self._cb_c = _SAMPLE_BLOCK_CB(_rx_cb)   # must outlive start_rx call
+        self._stop_evt.clear()
+        rc = _lib.hackrf_start_rx(self._dev, self._cb_c, None)
+        if rc != 0:
+            print("HackRF: hackrf_start_rx failed with code {}".format(rc),
+                  file=sys.stderr)
 
     def cancel_read_async(self) -> None:
-        if self._dev:
+        if self._dev is not None:
+            self._stop_evt.set()
             try:
-                self._dev.stop_rx()
+                _lib.hackrf_stop_rx(self._dev)
             except Exception:
                 pass
 
     # ── device UI hooks ───────────────────────────────────────────────────────
+
     def handle_key(self, key: int, state: 'AppState') -> bool:
         if key == ord('b'):
             self._amp = not self._amp
-            if self._dev:
+            if self._dev is not None:
                 try:
-                    self._dev.amplifier_on = self._amp
-                except Exception:
+                    _lib.hackrf_set_amp_enable(self._dev, 1 if self._amp else 0)
+                except OSError:
                     self._amp = False
             return True
         return False
