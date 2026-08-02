@@ -118,11 +118,41 @@ worthwhile. Otherwise the antenna is the bottleneck, not the software.
 
 ## Roadmap
 
-- **Stage 2** — write each detected burst as a small SigMF-annotated IQ
-  slice for offline demodulation with the iridium-toolkit.
+- **Stage 2a — burst capture (done).** Press `c` in the iridium tab to
+  dump each detected burst as a wide-IQ `.cf32` plus a `.json` sidecar
+  under `plugins/iridium/iridium_bursts/`.  Files are gitignored.
+- **Stage 2b — external decode (done).** `plugins/iridium/decode_bursts.sh`
+  polls the captures directory and pipes each burst through
+  iridium-toolkit's `iridium-extractor | iridium-parser.py`.
 - **Stage 3** — inline DQPSK demodulation with `multiprocessing.Pool`
   workers (Python threading loses to the GIL for CPU-bound demod). Emit
   raw `A:OK <ts> <freq> <bits>` lines matching iridium-toolkit's format so
   the same offline parsers work unchanged.
 
 Stage 3 is only worth building if Stage 1 shows real activity.
+
+## Capture pipeline caveats
+
+### Sample-rate constraint for iridium-toolkit
+
+`iridium-extractor` requires `sample_rate / decimation` to be an integer
+multiple of **250 kHz**.  A HackRF at 2/4/6/8/10/12.5/16/20 MHz satisfies
+this cleanly.  An RTL-SDR v3 at 2.4 MHz (its max) **does not** — no integer
+decimation lands on a 250 kHz multiple.  Captures made at incompatible
+rates will be silently rejected by the extractor (the `decode_bursts.sh`
+output shows only the sidecar-echo line and nothing else).
+
+Two options:
+- **HackRF users:** the `presets/iridium.sdrterm` preset now defaults to
+  2 000 000 Hz for exactly this reason.  Nothing to do.
+- **RTL-SDR users:** either accept that captures need conversion, or run
+  `plugins/iridium/downsample_bursts.py` to batch-resample existing
+  `.cf32` files in `iridium_bursts/` down to 2 MHz.  Idempotent — files
+  already at the target rate are skipped.  `--backup` copies originals to
+  `iridium_bursts/backup_original_rate/` first.
+
+### iridium-parser Python deps
+
+`iridium-parser.py` needs `crcmod` in whatever Python interpreter it
+runs under.  If you see `ModuleNotFoundError: No module named 'crcmod'`,
+install it:  `python3 -m pip install crcmod`.

@@ -1,7 +1,8 @@
 {
   "version": 1,
+  "_comment": "Iridium monitoring — HackRF-tuned. bw_hz is 2 000 000 (not 2 400 000) so captured bursts are compatible with iridium-extractor's decimation constraint (sample_rate must divide cleanly into multiples of 250 kHz). RTL-SDR users must accept that their captures cannot feed iridium-extractor directly and need plugins/iridium/downsample_bursts.py to convert them.",
   "center_hz": 1621250000.0,
-  "bw_hz": 2400000,
+  "bw_hz": 2000000,
   "gain_db": 18.0,
   "gain_auto": false,
   "iq_corr": true,

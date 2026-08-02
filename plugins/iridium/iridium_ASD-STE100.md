@@ -121,11 +121,44 @@ worth building. If not, the antenna is the limit, not the software.
 
 ## Roadmap
 
-- **Stage 2** — save each detected burst as a small SigMF IQ slice for
-  offline decoding with the iridium-toolkit.
+- **Stage 2a — burst capture (done).** Press `c` in the iridium tab. Each
+  detected burst is written to `plugins/iridium/iridium_bursts/` as a
+  wide-IQ `.cf32` file plus a `.json` sidecar. The files are gitignored.
+- **Stage 2b — external decode (done).** The script
+  `plugins/iridium/decode_bursts.sh` looks at the captures directory. It
+  sends each burst through iridium-toolkit's `iridium-extractor` and
+  `iridium-parser.py`.
 - **Stage 3** — inline DQPSK decode with `multiprocessing.Pool` workers
   (Python threading loses to the GIL for CPU-bound work). Emit raw
   `A:OK <ts> <freq> <bits>` lines in the same format as iridium-toolkit.
   The offline parsers then work without changes.
 
 Stage 3 is only worth building if Stage 1 shows real activity.
+
+## Capture pipeline caveats
+
+### Sample-rate constraint for iridium-toolkit
+
+`iridium-extractor` requires that `sample_rate / decimation` is an
+integer multiple of **250 kHz**. A HackRF at 2, 4, 6, 8, 10, 12.5, 16,
+or 20 MHz meets this rule. An RTL-SDR v3 at 2.4 MHz (its max) does
+**not** — no integer decimation lands on a 250 kHz multiple. Captures
+made at incompatible rates are silently rejected by the extractor. The
+`decode_bursts.sh` output then shows only the sidecar line and nothing
+else.
+
+Two options:
+- **HackRF users:** the `presets/iridium.sdrterm` preset now uses
+  2 000 000 Hz by default for this reason. Nothing to do.
+- **RTL-SDR users:** either accept that captures need conversion, or
+  run `plugins/iridium/downsample_bursts.py` to batch-resample all
+  `.cf32` files in `iridium_bursts/` down to 2 MHz. The script is
+  idempotent — files that are already at the target rate are skipped.
+  Use `--backup` to copy the originals to
+  `iridium_bursts/backup_original_rate/` before you overwrite.
+
+### iridium-parser Python dependency
+
+`iridium-parser.py` needs `crcmod` in the Python interpreter it runs
+under. If you see `ModuleNotFoundError: No module named 'crcmod'`,
+install it: `python3 -m pip install crcmod`.

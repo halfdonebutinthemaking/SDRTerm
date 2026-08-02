@@ -56,6 +56,19 @@ decode_one() {
 
     echo "─── $(basename "$cf32")  ch=$ch  snr=${snr}dB  fc=${fc}  sr=${sr} ──"
 
+    # iridium-extractor requires sample_rate / decimation to be a multiple of
+    # 250 kHz.  Detect the incompatibility BEFORE invoking the pipeline —
+    # otherwise the extractor errors and the 2>/dev/null below hides the
+    # reason, leaving the user staring at silent output.
+    if [ "$(( sr % 250000 ))" -ne 0 ]; then
+        echo "  ⚠ sample_rate ${sr} is not a multiple of 250 000 Hz —"
+        echo "    iridium-extractor will reject this file.  Run:"
+        echo "      python3 $(dirname "$0")/downsample_bursts.py"
+        echo "    to batch-convert existing captures to 2 MHz."
+        # Don't move it to done/ — the user needs to convert then retry.
+        return
+    fi
+
     # Same pipeline as the live command, adapted to per-file input:
     #   live:  iridium-extractor -d 14 <soapy.conf> | iridium-parser.py --uw-ec --harder -
     #   file:  iridium-extractor -d 14 -f cf32_le -r SR -c FC <file> | iridium-parser.py …
