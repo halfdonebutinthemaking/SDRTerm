@@ -18,6 +18,7 @@
 | **acars** | Classic ACARS decoder — AM/AFSK 2400 baud, mark=2400 Hz / space=1200 Hz; decodes aircraft registration, flight ID, and message text with BCS integrity check | | [Docs](acars/) | [STE100](acars/acars_ASD-STE100.md) |
 | **pocsag** | POCSAG paging decoder — direct 2-FSK, auto-detects 512/1200/2400 baud, BCH(31,21) error correction, decodes numeric and alphanumeric messages with RIC | | [Docs](pocsag/) | [STE100](pocsag/pocsag_ASD-STE100.md) |
 | **iridium** | Iridium L-band burst detector (Stage 1, detect-only) — 1616–1626.5 MHz satellite downlink, 252 channels @ 41.667 kHz; shows live per-channel activity to answer "does my antenna hear Iridium?" | ![](iridium/images/iridium.gif) | [Docs](iridium/) | [STE100](iridium/iridium_ASD-STE100.md) |
+| **iridium_decode** | Iridium DQPSK demodulator (Stage 3 · Phase 1) — consumes narrow-band bursts from the iridium plugin via an in-memory queue, produces raw bit strings per burst (no frame parsing yet); zero-cost when disabled, drops on backpressure, runs at `nice(10)` | | [Docs](iridium_decoder/) | [STE100](iridium_decoder/iridium_decoder_ASD-STE100.md) |
 
 Each plugin folder has a `README.md` that GitHub renders automatically when
 you navigate into the folder. A simplified-English version rewritten in

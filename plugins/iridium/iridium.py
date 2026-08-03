@@ -26,8 +26,18 @@ import time
 from collections import deque
 
 import numpy as np
+from scipy.signal import resample_poly
 
 from core import Decoder, AppState, fmt_freq
+
+# Lazy hand-off to iridium_decoder (Stage 3, in-process native demod).
+# The queue module is optional — if the decoder plugin isn't installed
+# the import fails silently and _burst_queue stays None, in which case
+# process() never does the extra narrow-band channelisation work.
+try:
+    from plugins.iridium_decoder import burst_queue as _burst_queue
+except ImportError:
+    _burst_queue = None
 
 # ── Iridium band plan ────────────────────────────────────────────────────────
 IRIDIUM_BAND_LOW_HZ  = 1_616_000_000
@@ -201,8 +211,17 @@ class IridiumDetector(Decoder):
                     start    = max(0, peak_pos - half)
                     end      = min(len(self._iq_ring), peak_pos + half)
                     if end - start > 0:
-                        self._save_burst(self._iq_ring[start:end], state,
+                        window = self._iq_ring[start:end]
+                        self._save_burst(window, state,
                                          cap['chan_id'], cap['snr_db'])
+                        # Also feed the in-process decoder if it's listening.
+                        # Narrow-band form is 400× smaller than the wide IQ
+                        # written to disk, so this is cheap enough to do
+                        # every burst even when the decoder isn't consuming
+                        # every one of them.
+                        if _burst_queue is not None and _burst_queue.has_consumers():
+                            self._push_to_decoder(window, state,
+                                                  cap['chan_id'], cap['snr_db'])
                     continue
                 still_pending.append(cap)
             self._pending_captures = still_pending[-_MAX_PENDING:]
@@ -303,6 +322,40 @@ class IridiumDetector(Decoder):
             # Disk full / permission denied — silently skip; capture is a
             # diagnostic, not critical to the detector's operation.
             pass
+
+    def _push_to_decoder(self, iq_wide: np.ndarray, state: AppState,
+                         chan_id: int, snr_db: float) -> None:
+        """Channelise a burst window (shift-to-DC + decimate to ~50 kHz)
+        and push the narrow-band result to iridium_decoder's shared queue.
+
+        Called only when iridium_decoder is active and listening — see
+        `_burst_queue.has_consumers()` guard at the call site.  Cheap
+        enough (few ms per burst) that it doesn't slow the detector
+        even during a heavy pass.
+        """
+        chan_freq = _channel_freq(chan_id)
+        offset_hz = chan_freq - state.center_hz
+        n = len(iq_wide)
+        # Shift the channel to DC
+        t  = np.arange(n, dtype=np.float32) / state.bw_hz
+        lo = np.exp(-2j * np.pi * offset_hz * t).astype(np.complex64)
+        shifted = iq_wide * lo
+        # Decimate wide → 50 kHz.  state.bw_hz is 2 000 000 in the
+        # HackRF-preferred preset; 2_000_000 / 50_000 = 40:1.  For other
+        # bw_hz values we clamp to the nearest integer factor that lands
+        # near 50 kHz output.
+        target_sr = 50_000
+        factor    = max(1, int(round(state.bw_hz / target_sr)))
+        narrow    = resample_poly(shifted, 1, factor).astype(np.complex64)
+        actual_sr = state.bw_hz // factor
+        _burst_queue.push({
+            'iq':          narrow,
+            'sample_rate': int(actual_sr),
+            'chan_id':     int(chan_id),
+            'chan_freq':   float(chan_freq),
+            'snr_db':      float(snr_db),
+            'timestamp':   time.strftime('%H:%M:%S'),
+        })
 
     def _register_burst(self, chan_id: int, power_db: float, now: float) -> None:
         self._total_bursts  += 1
