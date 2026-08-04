@@ -37,13 +37,19 @@ _TARGET_SPS     = _TARGET_SR // IRIDIUM_SYMRATE   # 8
 _RRC_ALPHA      = 0.4               # Iridium RRC roll-off (approx)
 
 # Iridium unique-word bit patterns (24 bits = 12 symbols, following the
-# 16-symbol preamble in every burst).  Values taken from gr-iridium /
-# iridium-toolkit references.  Every real burst contains one of these
-# with a small Hamming distance; the UW position also gives us the
-# frame-start offset inside the bit stream, which is needed for any
-# subsequent LCW / frame-type parsing (Phase 2b).
-_UW_DL = '001100000011000001110011'   # downlink (satellite → ground)
-_UW_UL = '110011111100111110001100'   # uplink   (ground → satellite)
+# 16-symbol preamble in every burst).  These are the exact values used
+# by iridium-toolkit's `bitsparser.py` (iridium_access / uplink_access)
+# — the differentially-Gray-decoded bit strings that a correctly-demod'd
+# burst produces.  Each is 12 symbols × 2 bits, and every pair is either
+# '00' or '11' (the UW is a BPSK-only pattern in symbol-index space:
+# only phases 0° and 180° appear).
+#
+# Prior versions of this file used slightly different constants derived
+# from a stale reference; they were off by 1 bit for DL and completely
+# different for UL.  Live UW lock rate never rose above the ~25 %
+# false-positive floor until these were corrected.
+_UW_DL = '001100000011000011110011'   # iridium_access (downlink, sat → ground)
+_UW_UL = '110011000011110011111100'   # uplink_access  (ground → sat)
 _UW_LEN = len(_UW_DL)
 
 
@@ -210,38 +216,54 @@ def _bits_to_bipolar(bits_str: str) -> np.ndarray:
     return (np.frombuffer(bits_str.encode(), dtype=np.uint8) - ord('0')).astype(np.int8) * 2 - 1
 
 
-# Precompute bipolar UW arrays and their pair-swapped variants once.
-# Pair-swap = swap the two bits of each symbol, which covers the case
-# where our high/low DQPSK bit ordering is opposite to what the UW
-# reference uses.
-def _pair_swap(bits_str: str) -> str:
-    out = list(bits_str)
-    for i in range(0, len(out) - 1, 2):
-        out[i], out[i + 1] = out[i + 1], out[i]
+# The demod chain picks its reference symbol arbitrarily, so the
+# 2-bit code we assign to each DQPSK phase-transition can be off by
+# a constant rotation from the on-air convention (00→10→11→01 in
+# cyclic-Gray order per +90° step).  Both UWs are BPSK-symmetric
+# patterns (only 00 and 11 pairs — phases 0° and 180° only), which
+# means pair-swapping the two bits of each symbol is a no-op for
+# them; the only ambiguity that matters is the 4-way phase rotation.
+#
+# We enumerate all 4 rotations of each UW and correlate against the
+# received bit stream.  The winner tells us which rotation matches
+# reality — informational for now; a persistent bias would let us
+# hardcode the correct mapping in _dqpsk_bits and drop the extra
+# variants.
+_CYCLIC = ['00', '10', '11', '01']            # cyclic Gray order per +90°
+_CYCLIC_IDX = {c: i for i, c in enumerate(_CYCLIC)}
+
+
+def _rotate_bits(bits_str: str, k: int) -> str:
+    """Rotate the 2-bit codes of `bits_str` by `k` steps in cyclic Gray
+    order (equivalent to rotating the reference phase by k·90°)."""
+    out = []
+    for i in range(0, len(bits_str), 2):
+        pair = bits_str[i:i + 2]
+        out.append(_CYCLIC[(_CYCLIC_IDX[pair] + k) % 4])
     return ''.join(out)
 
 
-_UW_VARIANTS = [
-    ('DL',      _bits_to_bipolar(_UW_DL)),
-    ('DL_swap', _bits_to_bipolar(_pair_swap(_UW_DL))),
-    ('UL',      _bits_to_bipolar(_UW_UL)),
-    ('UL_swap', _bits_to_bipolar(_pair_swap(_UW_UL))),
-]
+_UW_VARIANTS = []
+for name, pattern in (('DL', _UW_DL), ('UL', _UW_UL)):
+    for k in range(4):
+        rotated = _rotate_bits(pattern, k)
+        _UW_VARIANTS.append(('{}_r{}'.format(name, k),
+                             _bits_to_bipolar(rotated)))
 
 
 def find_uw(bits_str: str) -> dict:
     """Search for an Iridium unique-word in a bit stream.
 
     Returns a dict:
-      name    : 'DL' / 'DL_swap' / 'UL' / 'UL_swap' / 'none'
+      name    : '{DL,UL}_r{0..3}' or 'none'
       pos     : int  bit offset of best match (or -1 if no candidate)
       hd      : int  Hamming distance to the reference UW at that pos
 
-    The `_swap` variants correspond to our DQPSK high/low bit ordering
-    being opposite to whichever convention the UW reference uses; if
-    every burst matches on a _swap variant we should just flip the bit
-    order in `_dqpsk_bits`.  Small Hamming distances (≤3 out of 24) on
-    real bursts validate that the demod is producing meaningful bits.
+    _r0 = our demod's phase reference matches iridium-toolkit's; _r{k}
+    means the constellation is rotated by k·90°.  A persistent bias to
+    one rotation on real bursts means we should hardcode that mapping
+    upstream.  Small Hamming distances (≤2 out of 24) validate that
+    the demod is producing meaningful bits.
     """
     if len(bits_str) < _UW_LEN + 8:
         return {'name': 'none', 'pos': -1, 'hd': -1}

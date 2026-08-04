@@ -24,20 +24,25 @@ What still needs doing:
 ### Reading the "UW lock" percentage
 
 Random bits give Hamming distance ≈ 12 on a single 24-bit UW comparison.
-Our search covers ~5000 bit positions × 4 UW variants (~20 000 candidates
-per burst), so HD ≤ 3 shows up ~once per burst by pure chance — that's
-the false-positive floor.
+Our search covers ~5000 bit positions × 8 UW variants (2 directions ×
+4 constellation rotations = ~40 000 candidates per burst), so HD ≤ 2
+shows up in ~50 % of bursts by pure chance — that's the false-positive
+floor with rotation search enabled.
 
 A real correctly-demodulated Iridium burst produces HD 0 or 1, at most
-2 under moderate noise.  So the honest lock criterion is **HD ≤ 2**,
-and the match-rate stat means:
+2 under moderate noise, and lock is concentrated on **one specific
+rotation** (the mapping that matches our demod's phase reference to
+iridium-toolkit's convention).  The `By variant:` line shows lock counts
+per rotation — a real signal produces a large skew toward one variant.
 
-| Match rate | Interpretation |
-|---|---|
-| ~100 % | Demod chain working correctly on real Iridium |
-| 30-80 % | Demod partially working — bit ordering / timing off on some bursts |
-| < 30 % | Demod is wrong somewhere (bit order, phase mapping, sample rate) |
-| ~0 % | No real Iridium in the bursts — antenna / gain / tuning issue |
+| Match rate | Per-variant distribution | Interpretation |
+|---|---|---|
+| ~90 %+ | One variant ≫ others | Demod working, that variant is truth |
+| ~50 % | Roughly uniform across 8 | Nothing real — just false-positive floor |
+| ~30 % | Roughly uniform | Below-noise-floor; likely a bug in HD accounting |
+
+Once one variant is clearly winning we can hardcode that rotation in
+`_dqpsk_bits` and drop the extra search (cuts false-positive rate 4×).
 
 ## Design
 

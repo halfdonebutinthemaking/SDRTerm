@@ -43,7 +43,12 @@ class IridiumDecoderPlugin(Decoder):
         self._messages   = deque(maxlen=_MAX_MESSAGES)
         self._n_decoded  = 0
         self._n_dropped  = 0
-        self._n_uw_lock  = 0     # bursts with Hamming distance ≤ 3 to a UW
+        self._n_uw_lock  = 0     # bursts with Hamming distance ≤ 2 to a UW
+        # Per-variant lock counts, so it's obvious whether one particular
+        # phase rotation (DL_r0/DL_r1/…) is systematically winning — a
+        # strong single-variant bias means we should hardcode that
+        # rotation upstream and drop the extra search cost.
+        self._lock_by_variant: dict = {}
         self._worker     = None
         self._stop_evt   = threading.Event()
 
@@ -53,6 +58,7 @@ class IridiumDecoderPlugin(Decoder):
         self._messages.clear()
         self._n_decoded = 0
         self._n_uw_lock = 0
+        self._lock_by_variant.clear()
         burst_queue.reset_drop_count()
         burst_queue.register_consumer()
         self._stop_evt.clear()
@@ -122,6 +128,8 @@ class IridiumDecoderPlugin(Decoder):
             # < 30% means bit ordering / timing / phase mapping is off.
             if uw['name'] != 'none' and uw['hd'] <= 2:
                 self._n_uw_lock += 1
+                self._lock_by_variant[uw['name']] = \
+                    self._lock_by_variant.get(uw['name'], 0) + 1
 
     # ── SDRTerm plugin API ──────────────────────────────────────────────
 
@@ -133,11 +141,12 @@ class IridiumDecoderPlugin(Decoder):
         # invokes us and can refresh our result payload for the UI.
         self._n_dropped = burst_queue.drop_count()
         return {
-            'n_decoded':   self._n_decoded,
-            'n_uw_lock':   self._n_uw_lock,
-            'n_dropped':   self._n_dropped,
-            'queue_depth': burst_queue.depth(),
-            'messages':    list(self._messages),
+            'n_decoded':       self._n_decoded,
+            'n_uw_lock':       self._n_uw_lock,
+            'n_dropped':       self._n_dropped,
+            'queue_depth':     burst_queue.depth(),
+            'messages':        list(self._messages),
+            'lock_by_variant': dict(self._lock_by_variant),
         }
 
     def handle_key(self, key: int, state: AppState, sdr) -> bool:
@@ -145,6 +154,7 @@ class IridiumDecoderPlugin(Decoder):
             self._messages.clear()
             self._n_decoded = 0
             self._n_uw_lock = 0
+            self._lock_by_variant.clear()
             burst_queue.reset_drop_count()
             self._n_dropped = 0
             return True
@@ -193,6 +203,20 @@ class IridiumDecoderPlugin(Decoder):
         except curses.error:
             pass
 
+        # Per-variant breakdown (diagnostic).  If one rotation dominates
+        # by a large margin we know that's the true mapping and the
+        # others are pure false positives.
+        lbv = result.get('lock_by_variant') or {}
+        if lbv:
+            parts = ['{}:{}'.format(n, c)
+                     for n, c in sorted(lbv.items(),
+                                        key=lambda x: -x[1])]
+            variant_line = 'By variant: ' + '  '.join(parts)
+            try:
+                screen_obj.addstr(4, 2, variant_line[:cols - 4])
+            except curses.error:
+                pass
+
         if result.get('queue_depth', 0) == 0 and result.get('n_decoded', 0) == 0:
             try:
                 screen_obj.addstr(5, 2,
@@ -204,7 +228,7 @@ class IridiumDecoderPlugin(Decoder):
                 pass
             return
 
-        col_hdr = '  {:8s} {:8s} {:>6s} {:>6s} {:>4s}  {:>10s}  {}'.format(
+        col_hdr = '  {:8s} {:8s} {:>6s} {:>6s} {:>4s}  {:>13s}  {}'.format(
             'time', 'freq/MHz', 'ch', 'SNR', 'syms',
             'UW/HD/pos', 'first bits (2b/sym, MSB-first, differential)')
         try:
@@ -227,11 +251,11 @@ class IridiumDecoderPlugin(Decoder):
             else:
                 uw = m.get('uw', {'name': 'none', 'pos': -1, 'hd': -1})
                 if uw['name'] == 'none' or uw['hd'] > 6:
-                    uw_str = '     ---'
+                    uw_str = '        ---'
                 else:
-                    uw_str = '{:>3s} {:>2d}/{:>4d}'.format(
-                        uw['name'][:3], uw['hd'], uw['pos'])
-                line = '  {:8s} {:8.4f} {:>6d} {:>5.1f}dB {:>4d}  {:>10s}  {}'.format(
+                    uw_str = '{:>5s} {:>2d}/{:>4d}'.format(
+                        uw['name'][:5], uw['hd'], uw['pos'])
+                line = '  {:8s} {:8.4f} {:>6d} {:>5.1f}dB {:>4d}  {:>13s}  {}'.format(
                     m['ts'][-8:] if m['ts'] != '??' else '??:??:??',
                     m.get('chan_freq', 0.0) / 1e6,
                     m.get('chan_id', -1),

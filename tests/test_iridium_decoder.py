@@ -39,14 +39,14 @@ class TestUwCorrelator:
     def test_uw_at_zero_offset(self):
         bits = _UW_DL + '01' * 100
         r = find_uw(bits)
-        assert r['name'] == 'DL'
+        assert r['name'] == 'DL_r0'    # untransformed match
         assert r['pos']  == 0
         assert r['hd']   == 0
 
     def test_uw_at_offset(self):
         bits = '10' * 50 + _UW_DL + '01' * 50
         r = find_uw(bits)
-        assert r['name'] == 'DL'
+        assert r['name'] == 'DL_r0'
         assert r['pos']  == 100
         assert r['hd']   == 0
 
@@ -55,7 +55,7 @@ class TestUwCorrelator:
                   ('1' if _UW_DL[6] == '0' else '0') + _UW_DL[7:]
         bits = '00' * 30 + corrupt + '00' * 30
         r = find_uw(bits)
-        assert r['name'] == 'DL'
+        assert r['name'] == 'DL_r0'
         assert r['hd']   == 2
 
 
@@ -85,7 +85,7 @@ class TestEndToEnd:
         plaintext = '01000111' * 30 + _UW_DL + '00110011' * 30
         rx        = self._make_burst(plaintext, snr_db=20.0)
         result    = demod_burst(rx, _TARGET_SR)
-        assert result['uw']['name'] == 'DL'
+        assert result['uw']['name'] == 'DL_r0'
         assert result['uw']['hd']   == 0
 
     def test_uw_recovered_at_10db_snr(self):
@@ -93,7 +93,7 @@ class TestEndToEnd:
         plaintext = '01000111' * 30 + _UW_DL + '00110011' * 30
         rx        = self._make_burst(plaintext, snr_db=10.0)
         result    = demod_burst(rx, _TARGET_SR)
-        assert result['uw']['name'] in ('DL', 'DL_swap')
+        assert result['uw']['name'].startswith('DL')
         assert result['uw']['hd']   <= 2, (
             'At 10 dB SNR the UW should still be found within HD=2')
 
@@ -148,3 +148,79 @@ class TestCfoEstimator:
             f'CFO estimate off by {err:.1f} Hz (injected={cfo_hz}, '
             f'estimated={r["cfo_hz"]:.1f}) — expect ≤ 15 Hz at 20 dB SNR'
         )
+
+
+class TestIridiumToolkitConvention:
+    """Ground-truth cross-check against iridium-toolkit's on-air convention.
+
+    Previous tests used our own encoder → decoder round-trip, which is
+    self-consistent by construction and cannot catch a mismatch with
+    the actual Iridium on-air bit ordering.  Live UW lock rate was
+    stuck at the ~25 % false-positive floor for several iterations
+    because of exactly that class of bug (wrong UW constants + no
+    rotation coverage).
+
+    This test bypasses our own encoder entirely and builds the signal
+    from iridium-toolkit's convention:
+        1. bits → absolute symbol indices via inverse of de_dqpsk()
+        2. symbol indices → complex QPSK samples on the ±I/±Q axes
+        3. RRC pulse shaping
+    Then verifies our demod produces bits that the correlator finds at
+    HD ≤ 2, at *some* rotation.  A persistent bias to one rotation
+    (say _r2 always winning) is a signal to hardcode that mapping
+    upstream and drop the rotation search.
+    """
+
+    @staticmethod
+    def _iridium_bits_to_symbols(bits_str: str) -> list:
+        """Inverse of iridium-toolkit bitsparser.de_dqpsk()."""
+        imap = [0, 1, 3, 2]
+        diffs = [imap[int(bits_str[i]) * 2 + int(bits_str[i + 1])]
+                 for i in range(0, len(bits_str) - 1, 2)]
+        syms = [0]
+        for d in diffs:
+            syms.append((syms[-1] + d) % 4)
+        return syms
+
+    def _make_burst_iridium_convention(self, bits_str: str,
+                                       snr_db: float = 20.0,
+                                       seed: int = 42) -> np.ndarray:
+        from scipy.signal import fftconvolve
+        rng = np.random.default_rng(seed)
+        syms = self._iridium_bits_to_symbols(bits_str)
+        # ±I / ±Q constellation (rotated 45° from ours — irrelevant since
+        # our demod finds any rotation).  0→+1, 1→+j, 2→-1, 3→-j.
+        table = np.array([1 + 0j, 0 + 1j, -1 + 0j, 0 - 1j], dtype=np.complex64)
+        cx = table[syms]
+        up = np.zeros(len(cx) * _TARGET_SPS, dtype=np.complex64)
+        up[::_TARGET_SPS] = cx
+        tx = fftconvolve(up, _RRC_TAPS, mode='same').astype(np.complex64)
+        sig_pwr = float(np.mean(np.abs(tx) ** 2))
+        noise_pwr = sig_pwr / (10 ** (snr_db / 10))
+        noise = ((rng.standard_normal(len(tx)) + 1j * rng.standard_normal(len(tx)))
+                 * np.sqrt(noise_pwr / 2)).astype(np.complex64)
+        return (tx + noise).astype(np.complex64)
+
+    def test_downlink_uw_recovered(self):
+        rng = np.random.default_rng(0)
+        pad = lambda n: ''.join(str(int(b)) for b in rng.integers(0, 2, n))
+        plaintext = pad(120) + _UW_DL + pad(120)
+        rx = self._make_burst_iridium_convention(plaintext)
+        r  = demod_burst(rx, _TARGET_SR)
+        assert r['uw']['name'].startswith('DL'), (
+            f'Expected a DL rotation, got {r["uw"]}')
+        assert r['uw']['hd'] <= 2, (
+            f'HD too large for iridium-toolkit-encoded downlink burst: '
+            f'{r["uw"]}'
+        )
+
+    def test_uplink_uw_recovered(self):
+        from plugins.iridium_decoder.demod import _UW_UL
+        rng = np.random.default_rng(1)
+        pad = lambda n: ''.join(str(int(b)) for b in rng.integers(0, 2, n))
+        plaintext = pad(120) + _UW_UL + pad(120)
+        rx = self._make_burst_iridium_convention(plaintext)
+        r  = demod_burst(rx, _TARGET_SR)
+        assert r['uw']['name'].startswith('UL'), (
+            f'Expected a UL rotation, got {r["uw"]}')
+        assert r['uw']['hd'] <= 2
