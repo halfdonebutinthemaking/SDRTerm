@@ -98,8 +98,7 @@ The `m` key switches the full-view tab between two layouts:
 - **bits view** (default) — one line per demodulated burst: timestamp,
   frequency, direction, symbol count, confidence, SNR, and the first
   48 bits.
-- **messages view** — one line per burst, parsed by iridium-toolkit's
-  `iridium-parser.py` into typed messages:
+- **messages view** — one line per burst, parsed into typed messages:
   - `IRI` — generic Iridium radio frame
   - `VOC` — voice frame (with LCW handoff / access info)
   - `ISY` — system information (maintenance, LQI, power)
@@ -109,16 +108,15 @@ The `m` key switches the full-view tab between two layouts:
   - `IRA` — ring alert
   - `RAW` — unparsed frame (correct UW but unrecognised LCW)
 
-The plugin looks for `iridium-parser.py` in this order and spawns it
-as a persistent subprocess on first switch to message view:
-  1. `$IRIDIUM_PARSER` env var
-  2. `~/Projects/Hardware/sdr/iridium_decode/iridium-toolkit/iridium-parser.py`
-  3. `~/iridium-toolkit/iridium-parser.py`
-  4. `iridium-parser.py` in `$PATH`
+Parsing is done **in-process** using a vendored copy of iridium-
+toolkit's parser (see [`parser/`](parser/)).  No subprocess, no
+external tool install, no PATH gymnastics.  The only external
+dependency is `crcmod` (added to `pyproject.toml`); everything else
+is bundled.
 
-If not found, the message view shows a hint on where to install
-iridium-toolkit or how to point us at it via the env var.  The bits
-view always works without any external dependency.
+If `crcmod` isn't installed, messages view shows a clear error and
+suggests `uv add crcmod`.  Bits view always works without any
+external dep.
 
 ## What you see
 

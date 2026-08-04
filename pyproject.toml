@@ -9,6 +9,7 @@ dependencies = [
     "numpy",
     "scipy",
     "sounddevice",
+    "crcmod>=1.7",
 ]
 
 [dependency-groups]
