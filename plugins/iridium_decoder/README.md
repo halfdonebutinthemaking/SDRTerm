@@ -89,6 +89,36 @@ mode is a pragmatic fix while the root cause is investigated).
 | `j` | Enable / disable the plugin |
 | `r` | Clear the decoded-burst list + reset counters |
 | `b` | Toggle both-bin mode (2× decodes but 2× CPU) |
+| `m` | Toggle view: raw bits ↔ parsed messages (VOC / IRI / ISY / ...) |
+
+### Message view
+
+The `m` key switches the full-view tab between two layouts:
+
+- **bits view** (default) — one line per demodulated burst: timestamp,
+  frequency, direction, symbol count, confidence, SNR, and the first
+  48 bits.
+- **messages view** — one line per burst, parsed by iridium-toolkit's
+  `iridium-parser.py` into typed messages:
+  - `IRI` — generic Iridium radio frame
+  - `VOC` — voice frame (with LCW handoff / access info)
+  - `ISY` — system information (maintenance, LQI, power)
+  - `IU3` — uplink telemetry
+  - `IBC` — broadcast channel
+  - `IME` — Iridium Message Extended (maintenance)
+  - `IRA` — ring alert
+  - `RAW` — unparsed frame (correct UW but unrecognised LCW)
+
+The plugin looks for `iridium-parser.py` in this order and spawns it
+as a persistent subprocess on first switch to message view:
+  1. `$IRIDIUM_PARSER` env var
+  2. `~/Projects/Hardware/sdr/iridium_decode/iridium-toolkit/iridium-parser.py`
+  3. `~/iridium-toolkit/iridium-parser.py`
+  4. `iridium-parser.py` in `$PATH`
+
+If not found, the message view shows a hint on where to install
+iridium-toolkit or how to point us at it via the env var.  The bits
+view always works without any external dependency.
 
 ## What you see
 
