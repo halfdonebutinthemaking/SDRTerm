@@ -96,3 +96,55 @@ class TestEndToEnd:
         assert result['uw']['name'] in ('DL', 'DL_swap')
         assert result['uw']['hd']   <= 2, (
             'At 10 dB SNR the UW should still be found within HD=2')
+
+
+class TestCfoEstimator:
+    """The DQPSK-correct CFO estimator must recover the injected offset
+    within a few Hz, and the demod chain must recover the UW at HD=0
+    across the estimator's unambiguous range (±sym_rate/8 ≈ ±3125 Hz).
+
+    Guards against two bugs found during Phase 2a development:
+      1. Using symbols^4 (which peaks at fs/2 for DQPSK due to the
+         data-encoded ±1 flip per symbol) instead of the differential
+         product's 4th power.
+      2. Missing the 2π factor when converting radians-per-symbol back
+         to Hz.  Off by ~2π made every non-zero CFO wildly overestimated.
+    """
+
+    def _make_burst_with_cfo(self, cfo_hz: float, snr_db: float = 20.0,
+                             seed: int = 42) -> np.ndarray:
+        from scipy.signal import fftconvolve
+        rng = np.random.default_rng(seed)
+        plaintext = '01000111' * 30 + _UW_DL + '00110011' * 30
+        symbols = _bits_to_dqpsk_symbols(plaintext)
+        up = np.zeros(len(symbols) * _TARGET_SPS, dtype=np.complex64)
+        up[::_TARGET_SPS] = symbols
+        tx = fftconvolve(up, _RRC_TAPS, mode='same').astype(np.complex64)
+        # AWGN
+        sig_pwr = float(np.mean(np.abs(tx) ** 2))
+        noise_pwr = sig_pwr / (10 ** (snr_db / 10))
+        noise = ((rng.standard_normal(len(tx)) + 1j * rng.standard_normal(len(tx)))
+                 * np.sqrt(noise_pwr / 2)).astype(np.complex64)
+        # Rotate to inject CFO
+        t = np.arange(len(tx)) / _TARGET_SR
+        rotator = np.exp(2j * np.pi * cfo_hz * t).astype(np.complex64)
+        return ((tx + noise) * rotator).astype(np.complex64)
+
+    @pytest.mark.parametrize('cfo_hz', [-2500, -1500, -500, 0, 500, 1000, 2000, 3000])
+    def test_uw_recovered_across_cfo_range(self, cfo_hz):
+        rx = self._make_burst_with_cfo(cfo_hz)
+        r  = demod_burst(rx, _TARGET_SR)
+        assert r['uw']['hd'] == 0, (
+            f'CFO={cfo_hz} Hz should recover HD=0, got hd={r["uw"]["hd"]} '
+            f'(cfo_est={r["cfo_hz"]:.1f})'
+        )
+
+    @pytest.mark.parametrize('cfo_hz', [0, 100, 500, 1000, 2500])
+    def test_cfo_estimate_accurate_within_10hz(self, cfo_hz):
+        rx = self._make_burst_with_cfo(cfo_hz)
+        r  = demod_burst(rx, _TARGET_SR)
+        err = abs(r['cfo_hz'] - cfo_hz)
+        assert err < 15, (
+            f'CFO estimate off by {err:.1f} Hz (injected={cfo_hz}, '
+            f'estimated={r["cfo_hz"]:.1f}) — expect ≤ 15 Hz at 20 dB SNR'
+        )

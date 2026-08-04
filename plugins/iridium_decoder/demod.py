@@ -81,6 +81,47 @@ def _resample_to_target(iq: np.ndarray, src_sr: int) -> np.ndarray:
     return resample_poly(iq, up, down).astype(np.complex64)
 
 
+def _estimate_cfo_dqpsk(symbols: np.ndarray, sym_rate: int) -> float:
+    """Estimate carrier-frequency offset from DQPSK symbols.
+
+    For straight (non-differential) QPSK, `samples^4` cancels the π/2
+    modulation and leaves a tone at 4×CFO — the textbook trick.  It does
+    NOT work on DQPSK symbols directly, because DQPSK has data-encoded
+    phase differences BETWEEN symbols: `symbols^4` shows the ±1 flip
+    per symbol from `4·(π/4) = π mod 2π`, producing a peak at fs/2
+    regardless of CFO.  (First cut of this function hit exactly that
+    bug — constant ±3113 Hz bias on synthetic input.)
+
+    For DQPSK, take the differential product first.  It cancels constant
+    carrier phase, leaving `diff[k] = data_phase + CFO·Ts` per step.
+    Then `diff^4` gives magnitude 1 with phase `π + 4·CFO·Ts` (the π
+    from all four data phases mapping to π under ×4).  Average the
+    phasor and extract CFO from the angle.
+
+    Range: unambiguous ±sym_rate/8 (i.e. ±3125 Hz at 25 ksym/s).  Real
+    Iridium bursts after our channelisation step typically land within
+    that window (nominal-channel-centre error + Doppler + SDR crystal
+    error).  Larger CFO would need a coarse-then-fine two-stage estimator.
+    """
+    if len(symbols) < 10:
+        return 0.0
+    diff = symbols[1:].astype(np.complex128) * np.conj(symbols[:-1].astype(np.complex128))
+    # diff^4 nominally lands at -exp(j·4·CFO·Ts) — the -1 is from
+    # 4·(π/4) = π for every QPSK phase.  Average across all symbols
+    # for a noise-averaged estimate.
+    diff4 = diff ** 4
+    mean_phasor = np.mean(diff4)
+    if np.abs(mean_phasor) < 1e-9:
+        return 0.0
+    angle = np.angle(mean_phasor) - np.pi   # remove the π bias
+    # Wrap into (-π, π]
+    while angle >  np.pi: angle -= 2 * np.pi
+    while angle <= -np.pi: angle += 2 * np.pi
+    # angle = 2π · 4 · CFO · Ts  (radians per differential step)
+    # → CFO = angle · sym_rate / (8π)  (Hz)
+    return float(angle * sym_rate / (8 * np.pi))
+
+
 def _pick_best_phase(matched: np.ndarray, sps: int) -> np.ndarray:
     """Try all `sps` symbol-sampling phases, return the one with highest
     mean sample magnitude (symbol centres have the RRC peak, zero-crossings
@@ -233,7 +274,22 @@ def demod_burst(iq: np.ndarray, sample_rate: int) -> dict:
     # length; for the max-rate case (satellite pass with multiple beams)
     # every ms of demod cost matters.
     matched = fftconvolve(resampled, _RRC_TAPS, mode='same').astype(np.complex64)
-    symbols = _pick_best_phase(matched, _TARGET_SPS)
+    symbols_raw = _pick_best_phase(matched, _TARGET_SPS)
+    # CFO estimate on the SYMBOL-RATE samples (not the oversampled matched
+    # signal) so the 4th-power spectrum is dominated by clean symbol-centre
+    # points where samples^4 lands on a constant phase — see _estimate_cfo
+    # comment.  Range: ±symrate/8 ≈ ±3125 Hz; beyond that we'd need a
+    # coarse-then-fine pass.  Small residual CFO after channelisation
+    # rotates the DQPSK constellation across the burst and pushes decisions
+    # across quadrant boundaries — the exact symptom of our ~25 % UW lock
+    # rate on live data.
+    cfo_hz = _estimate_cfo_dqpsk(symbols_raw, IRIDIUM_SYMRATE)
+    if abs(cfo_hz) > 1.0:
+        t_sym = np.arange(len(symbols_raw), dtype=np.float64) / IRIDIUM_SYMRATE
+        symbols = (symbols_raw
+                   * np.exp(-2j * np.pi * cfo_hz * t_sym)).astype(np.complex64)
+    else:
+        symbols = symbols_raw
     bits = _dqpsk_bits(symbols)
 
     # Rough SNR: peak sample magnitude vs edge (first/last 10%) noise.
@@ -247,5 +303,6 @@ def demod_burst(iq: np.ndarray, sample_rate: int) -> dict:
         'bits':         bits,
         'n_symbols':    int(len(symbols)),
         'snr_rough_db': snr_db,
+        'cfo_hz':       cfo_hz,
         'uw':           find_uw(bits),
     }
