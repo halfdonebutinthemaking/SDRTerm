@@ -250,9 +250,25 @@ class IridiumDetector(Decoder):
             self._noise_floor = ((1.0 - _NOISE_ALPHA) * self._noise_floor
                                  + _NOISE_ALPHA * avg)
 
-        # Per-channel power vs its own noise floor; one detection per channel per chunk
+        # Per-channel power vs its own noise floor.  Two passes:
+        #
+        #   Pass 1 — gather every channel whose mean chunk-power exceeds
+        #   threshold, along with its peak-power sample and the frame
+        #   index of that peak.
+        #
+        #   Pass 2 — neighbour-suppression: keep only channels whose peak
+        #   power is strictly greater than both adjacent-channel peaks
+        #   (or the neighbour didn't detect at all).  A single strong
+        #   Iridium burst leaks into ±10-15 FFT bins via Hann window
+        #   sidelobes, which without this filter would register as bursts
+        #   on 20-30 adjacent channels simultaneously — overwhelming the
+        #   decoder queue and producing physically-impossible "wide burst"
+        #   detections.  Real Iridium DQPSK is ~35 kHz occupied bandwidth,
+        #   which fits inside a single 41.667 kHz channel, so a real
+        #   burst's peak-per-channel curve has exactly one local maximum.
         now = time.monotonic()
         thresh_ratio = 10.0 ** (self._threshold_db / 10.0)
+        candidates: dict = {}   # chan_id → (peak_power_linear, peak_frame_idx, peak_db)
         for chan_id, (bl, bh) in self._chan_map.items():
             chan_pow = powers[:, bl:bh].mean(axis=1)
             chan_nf  = float(self._noise_floor[bl:bh].mean())
@@ -262,14 +278,23 @@ class IridiumDetector(Decoder):
             if not hot.any():
                 continue
             peak_idx = int(np.argmax(chan_pow))
-            peak_db  = 10.0 * float(np.log10(chan_pow[peak_idx] / chan_nf))
+            peak_val = float(chan_pow[peak_idx])
+            peak_db  = 10.0 * float(np.log10(peak_val / chan_nf))
+            candidates[chan_id] = (peak_val, peak_idx, peak_db)
+
+        for chan_id, (peak_val, peak_idx, peak_db) in candidates.items():
+            left  = candidates.get(chan_id - 1)
+            right = candidates.get(chan_id + 1)
+            # Strict > on the left, >= on the right breaks ties
+            # deterministically so a plateau of equal-power neighbours
+            # (astronomically rare with float noise) doesn't emit
+            # multiple detections.
+            if left  is not None and left[0]  >  peak_val:
+                continue
+            if right is not None and right[0] >= peak_val:
+                continue
             self._register_burst(chan_id, peak_db, now)
             if self._capture_on:
-                # Enqueue instead of saving immediately.  end_dist measures
-                # how many samples separate the burst peak from the current
-                # end of the ring; each fresh chunk pushes it up until the
-                # ring contains half_window samples on both sides of the peak
-                # (extraction happens in the pending-drain loop at the top).
                 peak_offset_in_chunk = peak_idx * _FFT_SIZE + _FFT_SIZE // 2
                 end_dist             = len(samples) - peak_offset_in_chunk
                 self._pending_captures.append({

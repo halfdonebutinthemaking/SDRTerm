@@ -22,8 +22,13 @@ task-submission mechanism, not via this queue.
 """
 import queue
 
-# Bounded capacity — 256 bursts × ~4 KB narrow-band IQ = ~1 MB worst case.
-_MAX = 256
+# Bounded capacity — 512 bursts × ~4 KB narrow-band IQ = ~2 MB worst case.
+# Sized to absorb a satellite-pass spike while the decoder worker catches up
+# on a lightly-loaded machine.  If drops still happen after neighbour
+# suppression in the iridium plugin, the decoder is the actual bottleneck —
+# migrate to multiprocessing.Pool per the HeavyPlugin memo, don't just
+# grow the queue.
+_MAX = 512
 
 _q = queue.Queue(maxsize=_MAX)
 _consumers = 0            # bumped by decoder plugin on start(), decremented on stop()
