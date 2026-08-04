@@ -141,28 +141,47 @@ class BurstDownmix:
     @staticmethod
     def _rrc_taps(gain: float, fs: float, symbol_rate: float,
                   alpha: float, ntaps: int) -> np.ndarray:
-        """Root-raised-cosine matching gr::filter::firdes::root_raised_cosine."""
-        # gr's convention: 51 taps, symbol period Ts = 1/symbol_rate
-        n = np.arange(ntaps) - (ntaps - 1) / 2.0
-        t = n / fs
-        Ts = 1.0 / symbol_rate
-        h = np.zeros(ntaps, dtype=np.float64)
-        for i, ti in enumerate(t):
-            if ti == 0:
-                h[i] = 1.0 - alpha + 4 * alpha / np.pi
-            elif abs(abs(4 * alpha * ti / Ts) - 1.0) < 1e-9:
-                h[i] = (alpha / np.sqrt(2.0)) * (
-                    (1 + 2 / np.pi) * np.sin(np.pi / (4 * alpha))
-                    + (1 - 2 / np.pi) * np.cos(np.pi / (4 * alpha)))
+        """Exact port of gr::filter::firdes::root_raised_cosine.
+
+        See gnuradio/gr-filter/lib/firdes.cc:641.  Uses gr's specific
+        rational-form calculation (not the standard t-based RRC) and
+        DC-gain normalisation (not L2).  This exact formula matters —
+        subtle differences in tap magnitude directly affect symbol
+        constellation quality after matched filtering.
+        """
+        if ntaps % 2 == 0:
+            ntaps |= 1
+        spb = fs / symbol_rate  # samples per bit (=SPS)
+        taps = np.zeros(ntaps, dtype=np.float64)
+        scale = 0.0
+        for i in range(ntaps):
+            xindx = i - ntaps // 2
+            x1 = math.pi * xindx / spb
+            x2 = 4 * alpha * xindx / spb
+            x3 = x2 * x2 - 1
+            if abs(x3) >= 1e-6:
+                if i != ntaps // 2:
+                    num = (math.cos((1 + alpha) * x1) +
+                           math.sin((1 - alpha) * x1) / (4 * alpha * xindx / spb))
+                else:
+                    num = math.cos((1 + alpha) * x1) + (1 - alpha) * math.pi / (4 * alpha)
+                den = x3 * math.pi
             else:
-                num = (np.sin(np.pi * ti * (1 - alpha) / Ts)
-                       + 4 * alpha * ti / Ts * np.cos(np.pi * ti * (1 + alpha) / Ts))
-                den = np.pi * ti * (1 - (4 * alpha * ti / Ts) ** 2) / Ts
-                h[i] = num / den
-        h *= gain
-        # Normalise to unit energy (matches gr's normalisation)
-        h /= np.sqrt(np.sum(h ** 2))
-        return h.astype(np.float32)
+                if alpha == 1:
+                    taps[i] = -1.0
+                    scale += taps[i]
+                    continue
+                x3 = (1 - alpha) * x1
+                x2 = (1 + alpha) * x1
+                num = (math.sin(x2) * (1 + alpha) * math.pi -
+                       math.cos(x3) * ((1 - alpha) * math.pi * spb) / (4 * alpha * xindx) +
+                       math.sin(x3) * spb * spb / (4 * alpha * xindx * xindx))
+                den = -32 * math.pi * alpha * alpha * xindx / spb
+            taps[i] = 4 * alpha * num / den
+            scale += taps[i]
+        # DC-gain normalisation (matches gr's convention)
+        taps *= gain / scale
+        return taps.astype(np.float32)
 
     @staticmethod
     def _rc_taps(ntaps: int, alpha: float, Ts: float, Fs: float) -> np.ndarray:
