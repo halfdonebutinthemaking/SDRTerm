@@ -424,6 +424,7 @@ class IridiumDecoderPlugin(Decoder):
 
     def _draw_messages_view(self, screen_obj, result: dict, rows: int, cols: int):
         import curses
+        import re
         parsed = result.get('parsed', [])
 
         diag = 'parser: '
@@ -440,9 +441,49 @@ class IridiumDecoderPlugin(Decoder):
         except curses.error:
             pass
 
+        # ── Set up colour pairs (once) and legend ───────────────────────
+        colors = {}
+        try:
+            curses.init_pair(31, curses.COLOR_GREEN,   -1)   # data frames
+            curses.init_pair(32, curses.COLOR_CYAN,    -1)   # voice
+            curses.init_pair(33, curses.COLOR_YELLOW,  -1)   # system/broadcast
+            curses.init_pair(34, curses.COLOR_MAGENTA, -1)   # maintenance
+            curses.init_pair(35, curses.COLOR_WHITE,   -1)   # raw/unparsed
+            colors = {
+                'IRI': 31, 'IU3': 31, 'IIU': 31, 'IIQ': 31,
+                'VOC': 32, 'VO':  32,
+                'ISY': 33, 'IBC': 33, 'IRA': 33,
+                'IME': 34, 'DAQ': 34, 'IAQ': 34,
+                'RAW': 35,
+            }
+        except Exception:
+            pass
+
+        # Legend line, colour-coded so users can see the mapping directly
+        try:
+            screen_obj.addstr(5, 2, 'Legend: ')
+            legend_entries = [
+                ('IRI/IU3/IIU', 31, 'data frames'),
+                ('VOC',         32, 'voice'),
+                ('ISY/IBC/IRA', 33, 'system/broadcast'),
+                ('IME/DAQ/IAQ', 34, 'maintenance'),
+                ('RAW',         35, 'unparsed (UW ok, unknown LCW)'),
+            ]
+            x = 10   # after "Legend: "
+            for label, pair, desc in legend_entries:
+                text = '{} '.format(label)
+                if x + len(text) + len(desc) + 3 >= cols - 2:
+                    break
+                screen_obj.addstr(5, x, text, curses.color_pair(pair) if colors else 0)
+                x += len(text)
+                screen_obj.addstr(5, x, '({})  '.format(desc))
+                x += len(desc) + 4
+        except curses.error:
+            pass
+
         header = 'Parsed messages ({} shown)'.format(len(parsed))
         try:
-            screen_obj.addstr(5, 2, header[:cols - 4], curses.A_UNDERLINE)
+            screen_obj.addstr(6, 2, header[:cols - 4], curses.A_UNDERLINE)
         except curses.error:
             pass
 
@@ -452,12 +493,12 @@ class IridiumDecoderPlugin(Decoder):
                         (self._parser_error or 'Install `crcmod` '
                          '(uv add crcmod) and press m again.'))
                 try:
-                    screen_obj.addstr(7, 2, msg1[:cols - 4])
+                    screen_obj.addstr(8, 2, msg1[:cols - 4])
                 except curses.error:
                     pass
             else:
                 try:
-                    screen_obj.addstr(7, 2,
+                    screen_obj.addstr(8, 2,
                         'Waiting for parsed output.  Press m to switch '
                         'back to bits view if you want to see raw decodes '
                         'while waiting.')
@@ -465,33 +506,46 @@ class IridiumDecoderPlugin(Decoder):
                     pass
             return
 
-        # Type-code first-3-chars → curses colour, if we can init
-        colors = {}
-        try:
-            curses.init_pair(31, curses.COLOR_GREEN,   -1)   # IRI/IU3/IIU
-            curses.init_pair(32, curses.COLOR_CYAN,    -1)   # VOC voice
-            curses.init_pair(33, curses.COLOR_YELLOW,  -1)   # ISY/IBC broadcast
-            curses.init_pair(34, curses.COLOR_MAGENTA, -1)   # IME/other
-            colors = {
-                'IRI': 31, 'IU3': 31, 'IIU': 31, 'IIQ': 31,
-                'VOC': 32, 'VO':  32,
-                'ISY': 33, 'IBC': 33, 'IRA': 33,
-                'IME': 34, 'DAQ': 34, 'IAQ': 34,
-            }
-        except Exception:
-            pass
-
-        y = 6
+        # ── Print each message on 2 lines: header line + indented body ─
+        # Split after the direction indicator (" DL " or " UL ") so the
+        # LCW/payload always starts on the continuation line with a
+        # 4-space indent, keeping it visible even on narrow terminals.
+        break_re = re.compile(r'^(.*?\s(?:DL|UL))\s+(.*)$')
+        y = 7
+        indent = '    '   # 4 spaces
         for line in parsed:
             if y >= rows - 2:
                 break
             code = line[:3]
             attr = curses.color_pair(colors.get(code, 0)) if colors else 0
+            m = break_re.match(line)
+            if m:
+                head = m.group(1)
+                body = m.group(2).rstrip()
+            else:
+                head = line
+                body = ''
+            # First line: header up to direction
             try:
-                screen_obj.addstr(y, 2, line[:cols - 4], attr)
+                screen_obj.addstr(y, 2, head[:cols - 4], attr)
             except curses.error:
                 pass
             y += 1
+            # Continuation: 4-space indent, wrap if still too wide
+            if body and y < rows - 2:
+                # Body may itself be long — chop into cols-8-wide chunks
+                width = cols - 4 - len(indent)
+                if width < 20:
+                    width = max(20, cols - 4)   # very narrow terminal
+                cursor = 0
+                while cursor < len(body) and y < rows - 2:
+                    piece = body[cursor:cursor + width]
+                    try:
+                        screen_obj.addstr(y, 2, indent + piece[:cols - 4 - len(indent)], attr)
+                    except curses.error:
+                        pass
+                    cursor += width
+                    y += 1
 
     # ── state persistence ───────────────────────────────────────────────
 
