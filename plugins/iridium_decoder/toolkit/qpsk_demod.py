@@ -96,9 +96,12 @@ class QpskDemod:
                 symbols[i] = 2
             else:
                 symbols[i] = 1
-            # Confidence estimate: how far from ideal quadrant center
-            phase_deg = (math.atan2(im, r) + math.pi) * 180 / math.pi
-            offsets[i] = 45 - (phase_deg % 90)
+            # Confidence estimate: how far from ideal quadrant center.
+            # gr uses `int` for phase before modulo, giving a stepped
+            # confidence — matches gr-iridium's iridium_qpsk_demod exactly
+            # (integer truncation, then integer modulo 90).
+            phase_int = int((math.atan2(im, r) + math.pi) * 180 / math.pi)
+            offsets[i] = 45 - (phase_int % 90)
             n += 1
             # Terminate on 3 consecutive noise-level samples
             if m < max_mag / 8.0:
