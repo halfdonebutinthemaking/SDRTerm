@@ -142,6 +142,17 @@ def main(cf32_path: str):
     print(f'  narrow SR:       {sr:>9d} Hz')
     print()
 
+    # Spectrum of just the burst region — tells us if this looks like
+    # a 25 ksym/s DQPSK signal (should span ~25 kHz + roll-off) or
+    # something else (CW spur, chirp, wideband noise).
+    _burst_spectrum(narrow, sr)
+    print()
+
+    # Raw first 24 symbols of the burst body (mag/phase) — should be
+    # constant magnitude with distinct phase steps for DQPSK.
+    _raw_burst_snapshot(narrow, sr)
+    print()
+
     resampled = _resample_to_target(narrow, sr)
     matched   = fftconvolve(resampled, _RRC_TAPS, mode='same').astype(np.complex64)
     print(f'  matched full:    {len(matched)} samples '
@@ -168,12 +179,29 @@ def main(cf32_path: str):
         symbols = symbols_raw
 
     hist = _diff_angle_histogram(symbols)
-    print('  diff-angle histogram (after CFO correction):')
+    print('  diff-angle histogram (ALL {} symbols):'.format(len(symbols)))
     for bin_name, (n, pct) in hist.items():
         bar = '█' * int(pct / 2)
         print(f'    {bin_name:>5s}:  {n:>5d}  {pct:5.1f}%  {bar}')
-    print('    A healthy demod on Iridium shows peaks clustered near the')
-    print('    4 quadrant centres.  Flat ~25% each = timing/CFO broken.')
+
+    # Magnitude distribution — reveals in-burst vs out-of-burst symbols
+    mags = np.abs(symbols)
+    print()
+    print(f'  symbol magnitudes:  min={mags.min():.3f}  '
+          f'median={np.median(mags):.3f}  max={mags.max():.3f}')
+
+    # Histogram over the top-25% by magnitude (the actual burst symbols)
+    threshold = float(np.percentile(mags, 75))
+    mask = mags >= threshold
+    hi_syms = symbols[mask]
+    print(f'  in-burst symbols (top 25% by |·|, {len(hi_syms)} total):')
+    if len(hi_syms) >= 3:
+        hist_hi = _diff_angle_histogram(hi_syms)
+        for bin_name, (n, pct) in hist_hi.items():
+            bar = '█' * int(pct / 2)
+            print(f'    {bin_name:>5s}:  {n:>5d}  {pct:5.1f}%  {bar}')
+    print('    Clustered peaks here + flat above = demod is fine, trim')
+    print('    is just too wide (noise symbols dominate the aggregate).')
     print()
 
     result = demod_burst(narrow, sr)
@@ -184,7 +212,166 @@ def main(cf32_path: str):
     for hd, name, pos in _top_uw_hits(result['bits']):
         print(f'    HD={hd:2d}   {name:>7s}   pos={pos:>5d}')
     print()
+
+    # Also try a TIGHT trim centred on the true burst peak (a few symbols
+    # wide) — if this recovers the UW at low HD, the trim width in demod.py
+    # needs to shrink dramatically.
+    _try_tight_demod(matched, _TARGET_SPS)
+
+    print()
+    # Iridium-toolkit's demod.py doesn't do matched filtering — it uses
+    # adaptive zero-crossing symbol timing directly on the narrow-band
+    # signal.  Try that here: skip the RRC filter entirely and demod
+    # directly from `narrow` at 2 samples/symbol.  If this works better
+    # than the matched-filtered version we know Iridium isn't RRC-α=0.4
+    # shaped and our matched filter is the problem.
+    _try_no_rrc(narrow, sr)
+
+    print()
     print(f'  First 96 bits:   {result["bits"][:96]}')
+
+
+def _burst_spectrum(narrow: np.ndarray, sr: int):
+    """Find the burst region in the narrow-band signal and FFT it.
+    Prints a text bar chart of the spectrum from -25 to +25 kHz.
+
+    For 25 ksym/s DQPSK with typical roll-off, energy spans about
+    ±15-20 kHz.  A narrow spike near 0 Hz means a CW carrier.  Energy
+    spread wider than the whole 50 kHz window is a wideband signal
+    (LTE leak, noise burst, etc.)."""
+    power = np.abs(narrow) ** 2
+    win_syms = 100
+    win = win_syms * 2   # narrow is at ~2 SPS
+    if win >= len(narrow):
+        return
+    csum = np.cumsum(power)
+    csum0 = np.concatenate([[0.0], csum])
+    wsum = csum0[win:] - csum0[:-win]
+    start = int(np.argmax(wsum))
+    burst = narrow[start:start + win].astype(np.complex64)
+
+    # FFT and bin into a text histogram
+    N = 64
+    if len(burst) < N:
+        return
+    spec = np.abs(np.fft.fftshift(np.fft.fft(burst[:N] * np.hanning(N))))
+    freqs = np.fft.fftshift(np.fft.fftfreq(N, d=1.0 / sr))
+    peak = spec.max() + 1e-30
+    print(f'  narrow spectrum at burst peak ({len(burst)} samples '
+          f'= {1000*len(burst)/sr:.1f} ms):')
+    for i in range(len(spec)):
+        bar = '█' * int(30 * spec[i] / peak)
+        marker = ' ← 0 Hz' if abs(freqs[i]) < 100 else ''
+        print(f'    {freqs[i]/1e3:+7.2f} kHz  {bar}{marker}')
+
+
+def _raw_burst_snapshot(narrow: np.ndarray, sr: int):
+    """Print the first 24 samples of the burst body as (mag, phase_deg).
+
+    Constant-mag with 90°-step phase changes → DQPSK.  Constant mag
+    with linear phase drift → CW carrier.  Erratic mag → not the
+    modulation we think it is (or timing very wrong)."""
+    power = np.abs(narrow) ** 2
+    win = 200
+    if win >= len(narrow):
+        return
+    csum = np.cumsum(power)
+    csum0 = np.concatenate([[0.0], csum])
+    wsum = csum0[win:] - csum0[:-win]
+    start = int(np.argmax(wsum))
+    print(f'  first 24 narrow samples of burst region (from sample {start}):')
+    print('    idx    mag       phase       Δφ')
+    prev_phase = None
+    for i in range(min(24, len(narrow) - start)):
+        s = narrow[start + i]
+        mag = float(abs(s))
+        phase = float(np.angle(s) * 180 / np.pi)
+        dphi = '     -' if prev_phase is None else \
+               f'{(phase - prev_phase + 180) % 360 - 180:+7.1f}°'
+        print(f'    {i:>3d}   {mag:.4f}   {phase:+7.1f}°   {dphi}')
+        prev_phase = phase
+
+
+def _try_no_rrc(narrow: np.ndarray, sr: int):
+    """Demod without any matched filter — just decimate to symbol rate."""
+    from plugins.iridium_decoder.demod import _dqpsk_bits, find_uw
+    print('  No-RRC demod experiment (skip matched filter):')
+    # Resample narrow → 2 SPS at 25 ksym/s (i.e. 50 kHz)
+    if sr != 2 * IRIDIUM_SYMRATE:
+        target = 2 * IRIDIUM_SYMRATE
+        g = gcd(int(sr), target)
+        sig = resample_poly(narrow, target // g, sr // g).astype(np.complex64)
+    else:
+        sig = narrow
+
+    # Sliding-window energy trim on the narrow signal (~800 samples = 16 ms)
+    trim_syms = 400
+    win = trim_syms * 2
+    if win < len(sig):
+        power = np.abs(sig) ** 2
+        csum  = np.cumsum(power, dtype=np.float64)
+        csum0 = np.concatenate([[0.0], csum])
+        wsum  = csum0[win:] - csum0[:-win]
+        start = int(np.argmax(wsum))
+        sig   = sig[start:start + win]
+
+    # Try both sampling phases (even vs odd index)
+    print('    phase   bestUW    HD   pos   cfo/Hz   [top-25% diff-angle spread]')
+    for phase in (0, 1):
+        syms = sig[phase::2]
+        cfo  = _estimate_cfo_dqpsk(syms, IRIDIUM_SYMRATE)
+        if abs(cfo) > 1.0:
+            t = np.arange(len(syms), dtype=np.float64) / IRIDIUM_SYMRATE
+            syms = (syms * np.exp(-2j * np.pi * cfo * t)
+                    ).astype(np.complex64)
+        # Angle spread on top-25% by magnitude
+        mags = np.abs(syms)
+        if len(mags) >= 4:
+            thr = float(np.percentile(mags, 75))
+            hi_syms = syms[mags >= thr]
+            if len(hi_syms) >= 3:
+                hist = _diff_angle_histogram(hi_syms)
+                spread = ' '.join(f'{k.strip()}={v[1]:4.1f}%' for k, v in hist.items())
+            else:
+                spread = '(too few)'
+        else:
+            spread = '(too few)'
+        bits = _dqpsk_bits(syms)
+        r = find_uw(bits)
+        print(f'    {phase}       {r["name"]:>6s}   {r["hd"]:>3d}  pos={r["pos"]:>4d}  '
+              f'{cfo:+7.1f}   [{spread}]')
+
+
+def _try_tight_demod(matched: np.ndarray, sps: int):
+    """Demodulate a tight window around the sliding-window energy peak,
+    trying a range of window widths.  If any width recovers the UW at
+    HD ≤ 2 with one rotation clearly winning, that width is close to
+    the true burst size."""
+    from plugins.iridium_decoder.demod import (
+        _dqpsk_bits, find_uw,
+    )
+    print('  Tight-trim experiment (varying trim width):')
+    print('    width_syms   best_UW              HD   pos')
+    for width_syms in (60, 100, 150, 200, 300, 400, 600):
+        win = width_syms * sps
+        if win > len(matched):
+            continue
+        power = (matched.real ** 2 + matched.imag ** 2).astype(np.float32)
+        csum  = np.cumsum(power, dtype=np.float64)
+        csum0 = np.concatenate([[0.0], csum])
+        wsum  = csum0[win:] - csum0[:-win]
+        start = int(np.argmax(wsum))
+        slice_ = matched[start:start + win]
+        syms   = _pick_best_phase(slice_, sps)
+        cfo_hz = _estimate_cfo_dqpsk(syms, IRIDIUM_SYMRATE)
+        if abs(cfo_hz) > 1.0:
+            t_sym = np.arange(len(syms), dtype=np.float64) / IRIDIUM_SYMRATE
+            syms  = (syms * np.exp(-2j * np.pi * cfo_hz * t_sym)
+                     ).astype(np.complex64)
+        bits = _dqpsk_bits(syms)
+        r = find_uw(bits)
+        print(f'    {width_syms:>10d}   {r["name"]:>10s}   {r["hd"]:>4d}  '
+              f'pos={r["pos"]:>4d}   cfo={cfo_hz:+7.1f} Hz')
 
 
 if __name__ == '__main__':
