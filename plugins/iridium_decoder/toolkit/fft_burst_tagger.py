@@ -282,3 +282,14 @@ class FftBurstTagger:
         # center_bin is in fftshifted space (0..fft_size-1, DC at fft_size/2)
         rel = (center_bin - self.fft_size / 2) / float(self.fft_size)
         return rel * self.sample_rate
+
+    def alternate_center_bin(self, center_bin: int) -> int:
+        """Mirror the bin across N/2.  Verified empirically: gr-iridium's
+        fft_burst_tagger emits bins mirrored relative to numpy's FFT
+        output for the same input samples (start_index matches exactly,
+        but center_bin = fft_size - our_bin).  Root cause is still under
+        investigation — possibly a subtle FFT-plan or IQ-ordering
+        difference.  Meanwhile: for real decodes, running the downstream
+        burst_downmix with BOTH bin conventions per burst catches
+        significantly more valid frames than either alone."""
+        return self.fft_size - int(center_bin)
