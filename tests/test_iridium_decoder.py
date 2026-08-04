@@ -224,3 +224,31 @@ class TestIridiumToolkitConvention:
         assert r['uw']['name'].startswith('UL'), (
             f'Expected a UL rotation, got {r["uw"]}')
         assert r['uw']['hd'] <= 2
+
+    def test_burst_recovered_inside_wide_noise_window(self):
+        """Simulate the iridium plugin's ~100 ms wide window: a ~20 ms
+        burst embedded in 80 ms of noise.  Without envelope trimming,
+        symbol timing recovery gets diluted by the noise and the demod
+        produces garbage bits for most of the window — exactly the
+        failure mode that showed as a flat per-variant lock distribution
+        (~7 counts each) instead of one variant dominating."""
+        from scipy.signal import fftconvolve
+        rng = np.random.default_rng(7)
+        pad_bits = lambda n: ''.join(str(int(b)) for b in rng.integers(0, 2, n))
+        # 500-symbol burst (20 ms at 25 ksym/s), UW near the middle
+        plaintext = pad_bits(240) + _UW_DL + pad_bits(240)
+        burst_iq  = self._make_burst_iridium_convention(plaintext, snr_db=20.0)
+        # Wrap in 4× as much noise (80 ms of noise around a 20 ms burst)
+        sig_pwr   = float(np.mean(np.abs(burst_iq) ** 2))
+        noise_len = len(burst_iq) * 2
+        def noise(n):
+            return ((rng.standard_normal(n) + 1j * rng.standard_normal(n))
+                    * np.sqrt(sig_pwr / (10 ** (20.0 / 10)) / 2)).astype(np.complex64)
+        wide = np.concatenate([noise(noise_len), burst_iq, noise(noise_len)])
+        r = demod_burst(wide, _TARGET_SR)
+        assert r['uw']['name'].startswith('DL'), (
+            f'Expected DL rotation in wide-window burst, got {r["uw"]}')
+        assert r['uw']['hd'] <= 2, (
+            f'Wide-window burst not recovered — envelope trimming '
+            f'likely broken.  Got {r["uw"]}'
+        )

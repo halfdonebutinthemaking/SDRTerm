@@ -144,6 +144,63 @@ def _pick_best_phase(matched: np.ndarray, sps: int) -> np.ndarray:
     return best
 
 
+def _trim_to_burst(matched: np.ndarray, sps: int,
+                   min_len_syms: int = 200) -> np.ndarray:
+    """Trim the matched-filter output to the burst region.
+
+    The iridium plugin pushes ~100 ms windows around each detection so
+    iridium-toolkit's own extractor has enough runway before/after the
+    burst.  A real Iridium burst is ~8-20 ms; running symbol timing
+    recovery over the whole 100 ms means ~80 ms of noise dilutes the
+    signal energy and phase estimates.
+
+    Envelope-based approach:
+      1. Compute |matched|² and smooth over one symbol period
+      2. Find peak sample
+      3. Threshold at peak-10 dB, walk outward from peak to find the
+         contiguous above-threshold region
+      4. Add ±2 symbols of guard
+
+    Falls back to the full matched signal if the burst can't be located
+    (envelope roughly flat, threshold never crossed) or the resulting
+    region is shorter than `min_len_syms` symbols.  Guarantees the
+    downstream symbol timing / CFO / bit extraction sees a clean burst
+    rather than mostly-noise samples.
+    """
+    n = len(matched)
+    if n < min_len_syms * sps:
+        return matched
+    # Smooth envelope with a one-symbol boxcar (fast, no scipy dep)
+    power = (matched.real ** 2 + matched.imag ** 2).astype(np.float32)
+    # Simple boxcar via cumsum diff — O(n)
+    csum = np.cumsum(power, dtype=np.float64)
+    box  = np.zeros_like(power)
+    box[sps:] = csum[sps:] - csum[:-sps]
+    box /= float(sps)
+    peak_idx = int(np.argmax(box))
+    peak_val = float(box[peak_idx])
+    if peak_val <= 0.0:
+        return matched
+    thresh = peak_val * 0.1              # -10 dB from peak
+    # Walk left/right from peak
+    left = peak_idx
+    while left > 0 and box[left] > thresh:
+        left -= 1
+    right = peak_idx
+    while right < n - 1 and box[right] > thresh:
+        right += 1
+    guard = 2 * sps
+    left  = max(0, left - guard)
+    right = min(n, right + guard)
+    trimmed = matched[left:right]
+    if len(trimmed) < min_len_syms * sps:
+        # Burst envelope too narrow — likely a false positive from the
+        # detector or the whole window is noise; better to run on the
+        # full signal than on a sliver.
+        return matched
+    return trimmed
+
+
 # Gray-coded DQPSK phase-difference → 2-bit mapping.  Phase differences
 # are quantised into 4 bins by the sign of (real, imag) of the diff
 # product; each combination maps to a Gray-adjacent 2-bit code.
@@ -295,7 +352,12 @@ def demod_burst(iq: np.ndarray, sample_rate: int) -> dict:
     # fftconvolve is ~30% faster than np.convolve at this signal/filter
     # length; for the max-rate case (satellite pass with multiple beams)
     # every ms of demod cost matters.
-    matched = fftconvolve(resampled, _RRC_TAPS, mode='same').astype(np.complex64)
+    matched_full = fftconvolve(resampled, _RRC_TAPS, mode='same').astype(np.complex64)
+    # Trim to the burst envelope BEFORE symbol timing / CFO / demod so
+    # those don't get diluted by the ~80 ms of noise the iridium plugin
+    # pads around each ~20 ms burst.  Keep the untrimmed signal around
+    # for the SNR estimate (which needs the noise floor from the edges).
+    matched = _trim_to_burst(matched_full, _TARGET_SPS)
     symbols_raw = _pick_best_phase(matched, _TARGET_SPS)
     # CFO estimate on the SYMBOL-RATE samples (not the oversampled matched
     # signal) so the 4th-power spectrum is dominated by clean symbol-centre
@@ -315,10 +377,13 @@ def demod_burst(iq: np.ndarray, sample_rate: int) -> dict:
     bits = _dqpsk_bits(symbols)
 
     # Rough SNR: peak sample magnitude vs edge (first/last 10%) noise.
-    n = len(matched)
-    edge = np.concatenate([matched[:n // 10], matched[-n // 10:]])
+    # Use the untrimmed matched signal so the edges are actually noise,
+    # not still-inside-the-burst samples from the trimmed view.
+    n_full = len(matched_full)
+    edge = np.concatenate([matched_full[:n_full // 10],
+                           matched_full[-n_full // 10:]])
     edge_pow = float(np.mean(np.abs(edge) ** 2)) + 1e-30
-    peak_pow = float(np.max(np.abs(matched) ** 2))
+    peak_pow = float(np.max(np.abs(matched_full) ** 2))
     snr_db = 10.0 * np.log10(peak_pow / edge_pow)
 
     return {
