@@ -25,6 +25,8 @@ Report sections:
      frequency of occurrence, with sample bursts for hand-inspection
 """
 import argparse
+import glob
+import os
 import re
 import sys
 from collections import Counter, defaultdict
@@ -103,7 +105,35 @@ def _freq_band(freq_hz: int) -> str:
     return 'below-band (<1616 MHz)'
 
 
+def _expand_paths(paths: list) -> list:
+    """Expand shell-style globs.  Falls back to the literal path if the
+    caller's shell already expanded (in which case globbing an exact
+    path just returns [path])."""
+    out = []
+    for p in paths:
+        # If the path contains a glob char, use glob; otherwise pass
+        # through verbatim.  This handles the common uv-run-in-zsh case
+        # where zsh's nomatch behaviour passed the pattern literally.
+        if any(c in p for c in '*?['):
+            matches = sorted(glob.glob(p))
+            if matches:
+                out.extend(matches)
+            else:
+                print('warning: no files match {}'.format(p), file=sys.stderr)
+        elif os.path.isdir(p):
+            # If a directory is given, take all *.raw inside it
+            out.extend(sorted(glob.glob(os.path.join(p, '*.raw'))))
+        else:
+            out.append(p)
+    return out
+
+
 def analyze(paths: list, top_n: int = 15, pattern_bits: int = 32):
+    paths = _expand_paths(paths)
+    if not paths:
+        print('No input files.  Pass one or more .raw log files (or a '
+              'directory containing them).', file=sys.stderr)
+        sys.exit(2)
     parse_line = _import_parser()
 
     total = 0
