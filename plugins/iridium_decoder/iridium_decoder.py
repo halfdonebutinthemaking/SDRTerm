@@ -43,6 +43,7 @@ class IridiumDecoderPlugin(Decoder):
         self._messages   = deque(maxlen=_MAX_MESSAGES)
         self._n_decoded  = 0
         self._n_dropped  = 0
+        self._n_uw_lock  = 0     # bursts with Hamming distance ≤ 3 to a UW
         self._worker     = None
         self._stop_evt   = threading.Event()
 
@@ -51,6 +52,7 @@ class IridiumDecoderPlugin(Decoder):
     def start(self, state: AppState) -> None:
         self._messages.clear()
         self._n_decoded = 0
+        self._n_uw_lock = 0
         burst_queue.reset_drop_count()
         burst_queue.register_consumer()
         self._stop_evt.clear()
@@ -97,6 +99,7 @@ class IridiumDecoderPlugin(Decoder):
                 })
                 continue
 
+            uw = result.get('uw', {'name': 'none', 'pos': -1, 'hd': -1})
             self._messages.appendleft({
                 'ts':         burst.get('timestamp', '??'),
                 'chan_id':    burst.get('chan_id', -1),
@@ -105,9 +108,20 @@ class IridiumDecoderPlugin(Decoder):
                 'n_symbols':  result['n_symbols'],
                 'bits':       result['bits'],
                 'snr_rough':  result['snr_rough_db'],
+                'uw':         uw,
                 'error':      None,
             })
             self._n_decoded += 1
+            # DSP-quality metric.  Random bits give HD ≈ 12 on a single
+            # 24-bit comparison, but our ~5000-bit × 4-UW search space
+            # (~20 000 positions) hits HD ≤ 3 by luck about once per
+            # burst — that's the false-positive floor.  A real correctly-
+            # demodulated Iridium burst produces HD 0 or 1, occasionally
+            # 2 under moderate noise.  So HD ≤ 2 is the honest "lock"
+            # criterion: match rate ≈ 100% means demod is working;
+            # < 30% means bit ordering / timing / phase mapping is off.
+            if uw['name'] != 'none' and uw['hd'] <= 2:
+                self._n_uw_lock += 1
 
     # ── SDRTerm plugin API ──────────────────────────────────────────────
 
@@ -120,6 +134,7 @@ class IridiumDecoderPlugin(Decoder):
         self._n_dropped = burst_queue.drop_count()
         return {
             'n_decoded':   self._n_decoded,
+            'n_uw_lock':   self._n_uw_lock,
             'n_dropped':   self._n_dropped,
             'queue_depth': burst_queue.depth(),
             'messages':    list(self._messages),
@@ -129,6 +144,7 @@ class IridiumDecoderPlugin(Decoder):
         if key == ord('r'):
             self._messages.clear()
             self._n_decoded = 0
+            self._n_uw_lock = 0
             burst_queue.reset_drop_count()
             self._n_dropped = 0
             return True
@@ -164,8 +180,12 @@ class IridiumDecoderPlugin(Decoder):
         except curses.error:
             pass
 
-        stats = 'Bursts decoded: {}   Queue: {}   Dropped: {}'.format(
-            result.get('n_decoded', 0),
+        nd = result.get('n_decoded', 0)
+        nl = result.get('n_uw_lock', 0)
+        lock_pct = (100.0 * nl / nd) if nd else 0.0
+        stats = ('Bursts decoded: {}   UW lock: {} ({:.0f}%)   '
+                 'Queue: {}   Dropped: {}').format(
+            nd, nl, lock_pct,
             result.get('queue_depth', 0),
             result.get('n_dropped', 0))
         try:
@@ -184,8 +204,9 @@ class IridiumDecoderPlugin(Decoder):
                 pass
             return
 
-        col_hdr = '  {:8s} {:8s} {:>6s} {:>6s} {:>4s}  {}'.format(
-            'time', 'freq/MHz', 'ch', 'SNR', 'syms', 'first bits (2b/sym, MSB-first, differential)')
+        col_hdr = '  {:8s} {:8s} {:>6s} {:>6s} {:>4s}  {:>10s}  {}'.format(
+            'time', 'freq/MHz', 'ch', 'SNR', 'syms',
+            'UW/HD/pos', 'first bits (2b/sym, MSB-first, differential)')
         try:
             screen_obj.addstr(5, 2, col_hdr[:cols - 4], curses.A_UNDERLINE)
         except curses.error:
@@ -204,12 +225,19 @@ class IridiumDecoderPlugin(Decoder):
                     m.get('snr_db', 0.0),
                     m['error'])
             else:
-                line = '  {:8s} {:8.4f} {:>6d} {:>5.1f}dB {:>4d}  {}'.format(
+                uw = m.get('uw', {'name': 'none', 'pos': -1, 'hd': -1})
+                if uw['name'] == 'none' or uw['hd'] > 6:
+                    uw_str = '     ---'
+                else:
+                    uw_str = '{:>3s} {:>2d}/{:>4d}'.format(
+                        uw['name'][:3], uw['hd'], uw['pos'])
+                line = '  {:8s} {:8.4f} {:>6d} {:>5.1f}dB {:>4d}  {:>10s}  {}'.format(
                     m['ts'][-8:] if m['ts'] != '??' else '??:??:??',
                     m.get('chan_freq', 0.0) / 1e6,
                     m.get('chan_id', -1),
                     m.get('snr_db', 0.0),
                     m.get('n_symbols', 0),
+                    uw_str,
                     bits_shown)
             try:
                 screen_obj.addstr(y, 2, line[:cols - 4])

@@ -36,6 +36,16 @@ _TARGET_SR      = 200_000           # 8 samples per symbol at 25 ksym/s
 _TARGET_SPS     = _TARGET_SR // IRIDIUM_SYMRATE   # 8
 _RRC_ALPHA      = 0.4               # Iridium RRC roll-off (approx)
 
+# Iridium unique-word bit patterns (24 bits = 12 symbols, following the
+# 16-symbol preamble in every burst).  Values taken from gr-iridium /
+# iridium-toolkit references.  Every real burst contains one of these
+# with a small Hamming distance; the UW position also gives us the
+# frame-start offset inside the bit stream, which is needed for any
+# subsequent LCW / frame-type parsing (Phase 2b).
+_UW_DL = '001100000011000001110011'   # downlink (satellite → ground)
+_UW_UL = '110011111100111110001100'   # uplink   (ground → satellite)
+_UW_LEN = len(_UW_DL)
+
 
 def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
     """Root-raised-cosine filter coefficients."""
@@ -118,6 +128,58 @@ def _dqpsk_bits(symbols: np.ndarray) -> str:
     return ''.join('1' if b else '0' for b in out)
 
 
+def _bits_to_bipolar(bits_str: str) -> np.ndarray:
+    """Convert a '01'-string to ±1 float array for correlation."""
+    return (np.frombuffer(bits_str.encode(), dtype=np.uint8) - ord('0')).astype(np.int8) * 2 - 1
+
+
+# Precompute bipolar UW arrays and their pair-swapped variants once.
+# Pair-swap = swap the two bits of each symbol, which covers the case
+# where our high/low DQPSK bit ordering is opposite to what the UW
+# reference uses.
+def _pair_swap(bits_str: str) -> str:
+    out = list(bits_str)
+    for i in range(0, len(out) - 1, 2):
+        out[i], out[i + 1] = out[i + 1], out[i]
+    return ''.join(out)
+
+
+_UW_VARIANTS = [
+    ('DL',      _bits_to_bipolar(_UW_DL)),
+    ('DL_swap', _bits_to_bipolar(_pair_swap(_UW_DL))),
+    ('UL',      _bits_to_bipolar(_UW_UL)),
+    ('UL_swap', _bits_to_bipolar(_pair_swap(_UW_UL))),
+]
+
+
+def find_uw(bits_str: str) -> dict:
+    """Search for an Iridium unique-word in a bit stream.
+
+    Returns a dict:
+      name    : 'DL' / 'DL_swap' / 'UL' / 'UL_swap' / 'none'
+      pos     : int  bit offset of best match (or -1 if no candidate)
+      hd      : int  Hamming distance to the reference UW at that pos
+
+    The `_swap` variants correspond to our DQPSK high/low bit ordering
+    being opposite to whichever convention the UW reference uses; if
+    every burst matches on a _swap variant we should just flip the bit
+    order in `_dqpsk_bits`.  Small Hamming distances (≤3 out of 24) on
+    real bursts validate that the demod is producing meaningful bits.
+    """
+    if len(bits_str) < _UW_LEN + 8:
+        return {'name': 'none', 'pos': -1, 'hd': -1}
+    bipolar = _bits_to_bipolar(bits_str)
+    best = ('none', -1, _UW_LEN + 1)
+    for name, uw in _UW_VARIANTS:
+        # correlation ranges [-24, +24]; hamming distance = (24 - corr) / 2
+        corr = np.correlate(bipolar, uw, mode='valid')
+        pos = int(np.argmax(corr))
+        hd  = (_UW_LEN - int(corr[pos])) // 2
+        if hd < best[2]:
+            best = (name, pos, hd)
+    return {'name': best[0], 'pos': best[1], 'hd': best[2]}
+
+
 def demod_burst(iq: np.ndarray, sample_rate: int) -> dict:
     """Full pipeline on one burst.  Returns a dict of results.
 
@@ -149,4 +211,5 @@ def demod_burst(iq: np.ndarray, sample_rate: int) -> dict:
         'bits':         bits,
         'n_symbols':    int(len(symbols)),
         'snr_rough_db': snr_db,
+        'uw':           find_uw(bits),
     }

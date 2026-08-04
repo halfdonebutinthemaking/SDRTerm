@@ -6,13 +6,38 @@ pipeline, and displays the resulting bits in real time.
 
 ## Status
 
-**Phase 1** — bit extraction only.  Produces a raw 2-bits-per-symbol string
-per burst.  Frame parsing (unique-word search, IRA/IIQ/MSG classification,
-field decoding) is Phase 2, on the roadmap but not implemented yet.
+**Phase 2a** — bit extraction + unique-word correlation.  Produces a raw
+2-bits-per-symbol string per burst AND detects Iridium's fixed UW
+patterns (downlink / uplink) inside the stream, giving:
 
-Even Phase 1 output is useful as a starting point — you can compare the
-raw bits against iridium-toolkit's output on the same captures to
-validate the demod chain end-to-end, then build the parser on top.
+- Frame direction (DL vs UL)
+- Frame-start offset (needed for Phase 2b LCW parsing)
+- A live "UW lock" match-rate stat as a demod-quality indicator
+
+What still needs doing:
+
+- **Phase 2b** — LCW field parsing after the UW to classify burst type
+  (IRA / IIQ / IBC / IIP / IU3 / MSG / VOC / VDA)
+- **Phase 3** — Full field decoding (RIC extraction from IRA, message
+  body decoding from MSG, satellite/beam ID from IIQ, etc.)
+
+### Reading the "UW lock" percentage
+
+Random bits give Hamming distance ≈ 12 on a single 24-bit UW comparison.
+Our search covers ~5000 bit positions × 4 UW variants (~20 000 candidates
+per burst), so HD ≤ 3 shows up ~once per burst by pure chance — that's
+the false-positive floor.
+
+A real correctly-demodulated Iridium burst produces HD 0 or 1, at most
+2 under moderate noise.  So the honest lock criterion is **HD ≤ 2**,
+and the match-rate stat means:
+
+| Match rate | Interpretation |
+|---|---|
+| ~100 % | Demod chain working correctly on real Iridium |
+| 30-80 % | Demod partially working — bit ordering / timing off on some bursts |
+| < 30 % | Demod is wrong somewhere (bit order, phase mapping, sample rate) |
+| ~0 % | No real Iridium in the bursts — antenna / gain / tuning issue |
 
 ## Design
 
