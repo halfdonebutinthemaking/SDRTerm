@@ -1,0 +1,5 @@
+"""Iridium constants — direct port of extractor-python/iridium.py."""
+DOWNLINK = 0
+UPLINK = 1
+SYMBOLS_PER_SECOND = 25000
+UW_LENGTH = 12
