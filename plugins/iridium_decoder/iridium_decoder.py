@@ -70,7 +70,7 @@ _VIEW_MESSAGES = 1   # parsed message types via vendored parser
 class IridiumDecoderPlugin(Decoder):
     name            = 'iridium_decode'
     key             = 'j'
-    key_help        = 'r=clear  b=both-bin  m=view'
+    key_help        = 'r=clear  b=both-bin  m=view  s=save'
     min_sample_rate = 2_000_000
     realtime        = False      # runs in bg worker; process() just enqueues
     bg_queue_depth  = 8
@@ -96,6 +96,12 @@ class IridiumDecoderPlugin(Decoder):
         self._parser_error: str = None
         self._parser_lines = 0
         self._parser_ok    = 0
+        # Save-to-file state (`s` shortcut).  Every parsed line is also
+        # written to this file when it's open, so the user can save a
+        # long session for offline analysis (analyze_raw.py).
+        self._save_path: str = None
+        self._save_fp = None
+        self._save_status: str = None    # last status message shown in header
         # DSP objects — instantiated lazily in start() when we know SR
         self._tagger:  FftBurstTagger = None
         self._downmix: BurstDownmix   = None
@@ -131,6 +137,69 @@ class IridiumDecoderPlugin(Decoder):
             self._worker = None
         with self._iq_lock:
             self._iq_queue.clear()
+        self._close_save_file()
+
+    # ── save-to-file (`s` shortcut) ─────────────────────────────────────
+
+    def _toggle_save(self):
+        """Toggle a session log file open/closed.  Opening backfills the
+        current messages deque so the file contains everything since the
+        plugin started, not just what arrives after 's'."""
+        if self._save_fp is not None:
+            self._close_save_file()
+            return
+        import time as _time
+        from pathlib import Path as _Path
+        # Save under the SDRTerm project root's `iridium_logs/` dir.
+        # Directory created on first use.
+        root = _Path(__file__).resolve().parents[2] / 'iridium_logs'
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self._save_status = 'mkdir failed: {}'.format(e)
+            return
+        stamp = _time.strftime('%Y%m%d-%H%M%S')
+        path = root / 'iridium-{}.raw'.format(stamp)
+        try:
+            self._save_fp = open(path, 'w', buffering=1)  # line-buffered
+        except Exception as e:
+            self._save_status = 'open failed: {}'.format(e)
+            self._save_fp = None
+            return
+        self._save_path = str(path)
+        # Backfill: write every message we already have in memory as a
+        # RAW: line, so the log contains the whole session.
+        for m in list(self._messages)[::-1]:   # oldest first
+            self._write_raw_to_save_file(m)
+        self._save_status = 'saving to ' + self._save_path
+
+    def _close_save_file(self):
+        if self._save_fp is not None:
+            try:
+                self._save_fp.close()
+            except Exception:
+                pass
+            self._save_status = 'closed ' + (self._save_path or '?')
+            self._save_fp = None
+
+    def _write_raw_to_save_file(self, msg: dict):
+        """Serialise one PDU as a gr-iridium-compatible RAW: line."""
+        if self._save_fp is None:
+            return
+        bits_str = ''.join(str(b) for b in msg['bits'])
+        line = ("RAW: live {ts:012.4f} {freq:010d} "
+                "N:{mag:05.2f}{noise:+06.2f} I:{id:011d} "
+                "{conf:3d}% {level:.5f} {nsyms:3d} {bits}\n").format(
+            ts=msg['ts_ms'], freq=int(msg['freq_hz']),
+            mag=msg['magnitude'], noise=msg['noise'],
+            id=msg['id'], conf=msg['confidence'],
+            level=0.02, nsyms=msg['n_symbols'] - iridium.UW_LENGTH,
+            bits=bits_str)
+        try:
+            self._save_fp.write(line)
+        except Exception as e:
+            self._save_status = 'write failed: {}'.format(e)
+            self._close_save_file()
 
     # ── vendored parser (view mode 1) ───────────────────────────────────
 
@@ -294,6 +363,9 @@ class IridiumDecoderPlugin(Decoder):
         # stays live even when we're currently viewing bits).
         if self._parser_fn is not None:
             self._feed_parser(msg)
+        # Persist to session log if the user has opened one via `s`.
+        if self._save_fp is not None:
+            self._write_raw_to_save_file(msg)
 
     # ── SDRTerm plugin API ──────────────────────────────────────────────
 
@@ -333,6 +405,9 @@ class IridiumDecoderPlugin(Decoder):
             if self._view == _VIEW_MESSAGES:
                 self._ensure_parser()
             return True
+        if key == ord('s'):
+            self._toggle_save()
+            return True
         return False
 
     def status_text(self, state: AppState, result: dict) -> str:
@@ -363,12 +438,17 @@ class IridiumDecoderPlugin(Decoder):
         na = result.get('n_a_ok', 0)
         pct = (100.0 * na / nb) if nb else 0.0
         both = 'ON' if self._try_both else 'off'
+        save_note = ''
+        if self._save_fp is not None:
+            save_note = '   save: ' + (self._save_path or 'on')
+        elif self._save_status:
+            save_note = '   (' + self._save_status + ')'
         stats = ('Detected: {}   A:OK (UW): {} ({:.0f}%)   '
-                 'Queue: {}   Dropped: {}   both-bin: {}').format(
+                 'Queue: {}   Dropped: {}   both-bin: {}{}').format(
             nb, na, pct,
             result.get('queue_len', 0),
             result.get('n_dropped', 0),
-            both)
+            both, save_note)
         try:
             screen_obj.addstr(3, 2, stats[:cols - 4], curses.A_BOLD)
         except curses.error:
@@ -541,20 +621,37 @@ class IridiumDecoderPlugin(Decoder):
             except curses.error:
                 pass
             y += 1
-            # Continuation: 4-space indent, wrap if still too wide
+            # Continuation lines: 4-space indent, wrap greedily by TOKEN
+            # (words / hex bytes) so we never split a hex byte or field
+            # in the middle.  Split on spaces so tokens like `8e.9f`
+            # stay intact.
             if body and y < rows - 2:
-                # Body may itself be long — chop into cols-8-wide chunks
-                width = cols - 4 - len(indent)
-                if width < 20:
-                    width = max(20, cols - 4)   # very narrow terminal
-                cursor = 0
-                while cursor < len(body) and y < rows - 2:
-                    piece = body[cursor:cursor + width]
+                width = max(20, cols - 4 - len(indent))
+                # Tokenise while preserving whitespace as separators
+                tokens = body.split(' ')
+                lines_out = []
+                cur = ''
+                for tok in tokens:
+                    if not cur:
+                        cur = tok
+                    elif len(cur) + 1 + len(tok) <= width:
+                        cur = cur + ' ' + tok
+                    else:
+                        lines_out.append(cur)
+                        # If a single token is wider than `width`, dump it
+                        # on its own line (unavoidable) — better a long
+                        # unbroken hex string than a corrupted one.
+                        cur = tok
+                if cur:
+                    lines_out.append(cur)
+                for piece in lines_out:
+                    if y >= rows - 2:
+                        break
                     try:
-                        screen_obj.addstr(y, 2, indent + piece[:cols - 4 - len(indent)], attr)
+                        screen_obj.addstr(y, 2,
+                            (indent + piece)[:cols - 4], attr)
                     except curses.error:
                         pass
-                    cursor += width
                     y += 1
 
     # ── state persistence ───────────────────────────────────────────────
