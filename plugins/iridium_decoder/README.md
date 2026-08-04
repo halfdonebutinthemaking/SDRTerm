@@ -1,148 +1,139 @@
-# iridium_decoder — Native in-process Iridium DQPSK demodulator (Stage 3)
+# iridium_decoder — Native in-process Iridium demodulator
 
-Consumes narrow-band burst IQ from the [iridium (Stage 1)](../iridium/) plugin
-via an in-memory queue, demodulates each burst with a matched-filter DQPSK
-pipeline, and displays the resulting bits in real time.
+Runs the complete [gr-iridium](https://github.com/muccc/gr-iridium) DSP chain
+in-process on raw SDR samples, producing decoded bit streams in gr-iridium's
+`RAW:` format that can be fed directly into
+[iridium-toolkit](https://github.com/muccc/iridium-toolkit)'s
+`iridium-parser.py` for message classification (VOC, ISY, IRI, IU3, IBC, IME,
+etc.).
 
-## Status
+## Architecture
 
-**Phase 2a** — bit extraction + unique-word correlation.  Produces a raw
-2-bits-per-symbol string per burst AND detects Iridium's fixed UW
-patterns (downlink / uplink) inside the stream, giving:
+Fully independent from the [iridium (Stage 1)](../iridium/) plugin.  Both
+run on the same raw SDR sample stream but each does its own detection and
+serves a different purpose:
 
-- Frame direction (DL vs UL)
-- Frame-start offset (needed for Phase 2b LCW parsing)
-- A live "UW lock" match-rate stat as a demod-quality indicator
+- **iridium**            : burst-detection statistics, per-channel
+                           activity display, optional `c`-toggle
+                           capture-to-disk (`.cf32` + JSON sidecar for
+                           external tools).  Does NOT decode.
+- **iridium_decoder**    : end-to-end message decoding (this plugin).
+                           Runs its own port of gr-iridium's
+                           `fft_burst_tagger` — no dependency on the
+                           iridium plugin being enabled.
 
-What still needs doing:
+Any combination is valid:
+- Decoder alone → live message decodes, no on-disk captures
+- Detector alone → burst display + optional `.cf32` capture, no decoding
+- Both enabled → decoder emits messages while detector shows channel
+                 activity and (optionally) captures wide IQ to disk
 
-- **Phase 2b** — LCW field parsing after the UW to classify burst type
-  (IRA / IIQ / IBC / IIP / IU3 / MSG / VOC / VDA)
-- **Phase 3** — Full field decoding (RIC extraction from IRA, message
-  body decoding from MSG, satellite/beam ID from IIQ, etc.)
+The two plugins share no state; each maintains its own tagger, worker
+thread, and result deque.
 
-### Reading the "UW lock" percentage
-
-Random bits give Hamming distance ≈ 12 on a single 24-bit UW comparison.
-Our search covers ~5000 bit positions × 8 UW variants (2 directions ×
-4 constellation rotations = ~40 000 candidates per burst), so HD ≤ 2
-shows up in ~50 % of bursts by pure chance — that's the false-positive
-floor with rotation search enabled.
-
-A real correctly-demodulated Iridium burst produces HD 0 or 1, at most
-2 under moderate noise, and lock is concentrated on **one specific
-rotation** (the mapping that matches our demod's phase reference to
-iridium-toolkit's convention).  The `By variant:` line shows lock counts
-per rotation — a real signal produces a large skew toward one variant.
-
-| Match rate | Per-variant distribution | Interpretation |
-|---|---|---|
-| ~90 %+ | One variant ≫ others | Demod working, that variant is truth |
-| ~50 % | Roughly uniform across 8 | Nothing real — just false-positive floor |
-| ~30 % | Roughly uniform | Below-noise-floor; likely a bug in HD accounting |
-
-Once one variant is clearly winning we can hardcode that rotation in
-`_dqpsk_bits` and drop the extra search (cuts false-positive rate 4×).
-
-## Design
-
-The plugin runs on a **background thread** in the SDRTerm process
-(not a worker pool — yet).  A `multiprocessing.Pool` is on the roadmap
-under the [HeavyPlugin architecture memo](../../future_additions.md#heavy-plugin-architecture-stage-3-pattern-for-cpu-bound-decoding);
-the current threaded implementation is a smaller starting point that
-already demonstrates the end-to-end pipeline and can migrate to the
-process-pool pattern when per-burst CPU cost warrants it.
-
-**Zero-cost when the plugin isn't active.**  The iridium (Stage 1)
-plugin conditionally imports `plugins.iridium_decoder.burst_queue` and
-only channelises + pushes bursts when `has_consumers()` is True.  If
-this plugin isn't enabled, the iridium plugin does no extra work.
-
-**Drop-on-full backpressure.**  The shared queue is bounded to 256
-bursts.  If the decoder falls behind during a satellite pass, new
-bursts from the iridium plugin are dropped and a counter is exposed
-in the status line (`drop=N`).  Same policy as the spectrum plugin —
-preserves real-time responsiveness over completeness.
-
-**Cooperative CPU scheduling.**  The worker thread calls `os.nice(10)`
-at startup to nudge the OS scheduler toward yielding CPU to SDR
-callbacks, UI redraw, and the detector when they need it.  Between
-bursts it also `time.sleep(0)` to release the GIL explicitly.
-
-## Signal chain (per burst)
+## DSP chain
 
 ```
-narrow-band burst IQ (50 kHz, complex64, from iridium plugin)
-  → resample to 200 kHz (8 samples per symbol at 25 ksym/s)
-  → matched RRC filter (α = 0.4)
-  → auto-symbol-timing: pick sampling phase with max mean magnitude
-  → DQPSK bit extraction (differential phase → 2 bits per symbol,
-                          Gray-coded)
-  → append to display deque
+raw IQ (2 MHz, complex64 from SDR)
+   │
+   ▼
+FftBurstTagger        ← toolkit port of gr-iridium/lib/fft_burst_tagger_impl.cc
+   │                    per-bin adaptive noise floor + Kalman-like state,
+   │                    matches gr-iridium detection count exactly (1170/1170
+   │                    on a 30 s indoor reference capture)
+   ▼
+per-burst wide IQ slice
+   │
+   ▼
+BurstDownmix          ← toolkit port of gr-iridium/lib/burst_downmix_impl.cc
+   │                    - rough CFO shift + low-pass + decimate to 500 kHz
+   │                    - envelope-based burst start
+   │                    - squared-signal FFT for fine CFO
+   │                    - RRC matched filter
+   │                    - FFT-correlation sync-word alignment (DL vs UL)
+   ▼
+QpskDemod             ← toolkit port of gr-iridium/lib/iridium_qpsk_demod_impl.cc
+   │                    - decimate to symbol rate (sps=20)
+   │                    - first-order QPSK PLL (α = 1/5)
+   │                    - quadrant slicer + confidence
+   │                    - UW check (HD ≤ 2)
+   │                    - differential Gray decode → bits
+   ▼
+{ timestamp, freq, direction, confidence, bits, … }
 ```
+
+The port lives under [`toolkit/`](toolkit/) and is testable independently
+of the SDRTerm plugin.  See `toolkit/*.py` for the full port.
+
+## Validation
+
+Against gr-iridium's C++ `iridium-extractor` on the same 30 s RTL-SDR indoor
+capture:
+
+|                                                | Bursts | A:OK | Fully-parsed |
+|------------------------------------------------|--------|------|--------------|
+| gr-iridium C++                                 |  1170  | ~35  | 9            |
+| our port (default)                             |  1170  |  ~19 | 7            |
+| our port (both-bin mode, `b` key)              |  1170  |  35  | 13           |
+
+Detection count matches gr-iridium **exactly**.  Decode count is
+comparable, and in both-bin mode we exceed gr-iridium's parse rate
+(catches bursts on both spectrum halves — there's a subtle FFT convention
+difference between numpy and FFTW that mirrors bin indices; both-bin
+mode is a pragmatic fix while the root cause is investigated).
 
 ## Controls
 
 | Key | Action |
 |---|---|
-| `j` | Enable / disable the plugin (SDRTerm plugin menu convention) |
+| `j` | Enable / disable the plugin |
 | `r` | Clear the decoded-burst list + reset counters |
+| `b` | Toggle both-bin mode (2× decodes but 2× CPU) |
 
 ## What you see
 
-Header: total bursts decoded since enable, current queue depth, dropped
-count.
+Header shows: detected bursts, A:OK count (UW recognised), queue length,
+dropped chunks, both-bin toggle state.
 
-For each burst, one line:
-
+Per burst, one line:
 ```
-  <ts>    <freq/MHz>  <ch>  <SNR>  <n_syms>  <first 48 bits>
-  15:42:17  1622.146   147  20.3dB    2500   0100010101101100110111011101...
+  <ts/ms>  <freq/MHz>  <DL/UL>  <syms>  <conf%>  <SNR>  <first 48 bits>
 ```
 
-The bits are the raw DQPSK output — no unique-word alignment, no framing.
-Same burst decoded by iridium-toolkit would have its unique word
-recognised and the bit stream framed into an IRA/IIQ/MSG line.
-
-## Prerequisites
-
-None beyond SDRTerm's baseline (numpy, scipy).  No iridium-toolkit
-dependency — this plugin is a native replacement for the shell-out
-approach in [`../iridium/decode_bursts.sh`](../iridium/decode_bursts.sh).
+The bits are in gr-iridium's on-air convention — starting with the
+demodulated unique word (`001100000011000011110011` = DL,
+`110011000011110011111100` = UL) followed by the payload.  You can pipe
+these bits to `iridium-parser.py --uw-ec --harder -` to classify them
+into message types (VOC/ISY/IRI/IU3/IBC/IME/…).
 
 ## Loading via preset
-
-Enable both plugins together with `presets/iridium_decode.sdrterm`:
 
 ```
 uv run python main.py --preset presets/iridium_decode.sdrterm
 ```
 
-The preset tunes to 1621.25 MHz on a HackRF at 2 MHz BW, enables
-iridium (with capture on), and enables this decoder plugin.
+Enables both the iridium plugin (burst display) and iridium_decoder
+(message decoding) at 2 MHz, HackRF or RTL-SDR.
 
-## Compared with the shell-script pipeline
+## Comparison with the earlier shell-out pipeline
 
-| | `iridium/decode_bursts.sh` | `iridium_decoder` (this plugin) |
+| | External `iridium-extractor` + `iridium-parser` | `iridium_decoder` (this plugin) |
 |---|---|---|
-| Runtime | Second terminal, iridium-toolkit | In SDRTerm process |
-| Disk usage | ~1 MB per burst (wide IQ) | Zero |
-| Memory per burst | n/a | ~4 KB (narrow-band) |
-| Latency | Batch cycle (~seconds) | ~ms per burst |
-| Frame parsing | Full iridium-toolkit parser | Bits only (Phase 1) |
-| Setup | crcmod + parser paths | None |
-| Best for | Validated decodes, offline replay | Live monitoring, iterating on demod |
+| Runtime | Second terminal, C++ binary | In-process, pure Python |
+| Setup | gr-iridium install + PATH | Nothing beyond SDRTerm's deps |
+| Latency | Real-time pipe | Real-time, in-TUI |
+| Frame parsing | Full iridium-toolkit parser | Bits only — pipe to iridium-parser |
+| CPU | Native C++ (very fast) | Python (2× realtime on modest CPU) |
+| Runtime backpressure | Handled by gr-iridium | 128-chunk queue, drops on overflow |
 
-Both can run simultaneously if you want.
+Both can run simultaneously if you want the parsed output alongside the
+plugin's raw display.
 
-## Roadmap
+## CPU tuning
 
-- **Phase 2** — Unique-word correlation to align frame start, burst-type
-  classification (IRA / IIQ / IBC / IIP / IU3 / MSG / VOC / VDA), and
-  BCH error-correction where the frame format specifies it.
-- **Phase 3** — Full field parsing: RIC extraction from IRA, message
-  body decoding from MSG, satellite/beam identification from IIQ, etc.
-- **HeavyPlugin migration** — When Phase 2/3 work per burst exceeds
-  what a threaded worker can sustain on a burst-flood, move to the
-  `multiprocessing.Pool` pattern described in
-  [`../../future_additions.md`](../../future_additions.md#heavy-plugin-architecture-stage-3-pattern-for-cpu-bound-decoding).
+At 2 MHz sample rate the plugin needs to keep up with ~977 FFT frames per
+second plus O(N × 401) FIR filtering per burst.  On modest CPUs (M-series
+Mac, mid-range x86) this is ~2× realtime — should handle live streams
+comfortably.  During dense satellite passes the queue can fill; the plugin
+drops chunks rather than blocking the SDR reader.  If drops become
+persistent, disable both-bin mode (`b`) to halve per-burst CPU cost.
