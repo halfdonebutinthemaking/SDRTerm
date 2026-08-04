@@ -15,9 +15,7 @@ on.  The queue between them is zero-cost when this plugin isn't active
 (iridium plugin checks `burst_queue.has_consumers()` before doing any
 extra work).
 """
-import os
 import threading
-import time
 from collections import deque
 
 import numpy as np
@@ -29,7 +27,6 @@ from . import demod
 
 _MAX_MESSAGES = 128
 _BITS_SHOWN   = 48       # first N bits shown per burst in the list
-_YIELD_S      = 0.001    # cooperative-yield sleep between bursts
 
 
 class IridiumDecoderPlugin(Decoder):
@@ -74,19 +71,14 @@ class IridiumDecoderPlugin(Decoder):
     def _worker_loop(self) -> None:
         """Consume bursts from the shared queue and demodulate them.
 
-        Runs on a low-priority background thread.  Between bursts we
-        `sleep(0)` to yield to any higher-priority thread — the SDR
-        callback and UI redraw keep their responsiveness even during
-        a burst-flood on a satellite pass."""
-        # Best-effort process-nice bump so the OS scheduler yields us
-        # to interactive work (SDR reader, UI redraw).  A single call
-        # nudges the whole Python process; if other plugins mind, drop
-        # this and rely on the sleep-yield alone.
-        try:
-            os.nice(10)
-        except (AttributeError, PermissionError, OSError):
-            pass
-
+        Runs on a normal-priority background thread.  Numpy operations
+        release the GIL, so the SDR callback thread and UI redraw
+        continue interleaving cleanly with demod work.  No forced sleep
+        between bursts — that only caps throughput without helping
+        anyone (numpy already yields the GIL).  If real burst rate ever
+        exceeds this single-thread ceiling on a machine, the answer is
+        the HeavyPlugin multiprocessing migration described in
+        future_additions.md, not throttling this loop."""
         while not self._stop_evt.is_set():
             burst = burst_queue.pop(timeout=0.2)
             if burst is None:
@@ -116,9 +108,6 @@ class IridiumDecoderPlugin(Decoder):
                 'error':      None,
             })
             self._n_decoded += 1
-            # Cooperative yield so we don't monopolise the GIL during
-            # a burst-flood on a satellite pass.
-            time.sleep(_YIELD_S)
 
     # ── SDRTerm plugin API ──────────────────────────────────────────────
 
