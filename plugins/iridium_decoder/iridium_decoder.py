@@ -467,7 +467,7 @@ class IridiumDecoderPlugin(Decoder):
                 ('VOC',         32, 'voice'),
                 ('ISY/IBC/IRA', 33, 'system/broadcast'),
                 ('IME/DAQ/IAQ', 34, 'maintenance'),
-                ('RAW',         35, 'unparsed (UW ok, unknown LCW)'),
+                ('RAW',         35, 'unparsed'),
             ]
             x = 10   # after "Legend: "
             for label, pair, desc in legend_entries:
@@ -481,9 +481,19 @@ class IridiumDecoderPlugin(Decoder):
         except curses.error:
             pass
 
+        # Why some messages stay RAW — expands what "unparsed" means so
+        # users don't wonder if it's a bug.
+        try:
+            screen_obj.addstr(6, 2,
+                'RAW = UW recovered but LCW header couldn\'t be classified '
+                '(bit errors past BCH-EC, unknown frame type, or too-short '
+                'frame).'[:cols - 4])
+        except curses.error:
+            pass
+
         header = 'Parsed messages ({} shown)'.format(len(parsed))
         try:
-            screen_obj.addstr(6, 2, header[:cols - 4], curses.A_UNDERLINE)
+            screen_obj.addstr(7, 2, header[:cols - 4], curses.A_UNDERLINE)
         except curses.error:
             pass
 
@@ -493,12 +503,12 @@ class IridiumDecoderPlugin(Decoder):
                         (self._parser_error or 'Install `crcmod` '
                          '(uv add crcmod) and press m again.'))
                 try:
-                    screen_obj.addstr(8, 2, msg1[:cols - 4])
+                    screen_obj.addstr(9, 2, msg1[:cols - 4])
                 except curses.error:
                     pass
             else:
                 try:
-                    screen_obj.addstr(8, 2,
+                    screen_obj.addstr(9, 2,
                         'Waiting for parsed output.  Press m to switch '
                         'back to bits view if you want to see raw decodes '
                         'while waiting.')
@@ -511,7 +521,7 @@ class IridiumDecoderPlugin(Decoder):
         # LCW/payload always starts on the continuation line with a
         # 4-space indent, keeping it visible even on narrow terminals.
         break_re = re.compile(r'^(.*?\s(?:DL|UL))\s+(.*)$')
-        y = 7
+        y = 8
         indent = '    '   # 4 spaces
         for line in parsed:
             if y >= rows - 2:
