@@ -31,6 +31,46 @@ import scipy.signal as sig
 from . import iridium
 
 
+def _firdes_low_pass_2(gain: float, sample_rate: float, cutoff_freq: float,
+                       transition_width: float, attenuation_dB: float
+                       ) -> np.ndarray:
+    """Port of gnuradio's firdes::low_pass_2 — Parks-McClellan / Remez
+    equiripple FIR design.
+
+    Follows gnuradio's ntaps calculation (Kaiser formula):
+        N = (attenuation - 7.95) / (14.36 * transition/sample_rate) + 1
+    forced to be odd.
+
+    Uses scipy.signal.remez with two bands (passband + stopband).
+    """
+    # Kaiser tap-count estimate — gr uses this same formula in
+    # firdes::compute_ntaps_atten via a Kaiser-window intermediate.
+    n = int((attenuation_dB - 7.95) /
+            (14.36 * transition_width / sample_rate)) + 1
+    if n % 2 == 0:
+        n += 1
+    if n < 5:
+        n = 5
+
+    # Passband edge = cutoff, stopband edge = cutoff + transition
+    passband_edge = cutoff_freq
+    stopband_edge = cutoff_freq + transition_width
+    # Weight the stopband more heavily to hit attenuation target
+    delta_p = 0.01
+    delta_s = 10 ** (-attenuation_dB / 20)
+    weight_p = 1.0 / delta_p
+    weight_s = 1.0 / delta_s
+
+    taps = sig.remez(
+        n,
+        [0, passband_edge, stopband_edge, sample_rate / 2],
+        [gain, 0.0],
+        weight=[weight_p, weight_s],
+        fs=sample_rate,
+    )
+    return taps.astype(np.float32)
+
+
 class BurstDownmix:
     def __init__(self, output_sample_rate: int, search_depth: int = None,
                  handle_multiple_frames_per_burst: bool = True,
@@ -60,23 +100,26 @@ class BurstDownmix:
         self.sync_search_len = ((iridium.PREAMBLE_LENGTH_LONG +
                                   iridium.UW_LENGTH + 8) * self.output_sps)
 
-        # Input FIR (low-pass, 401 taps at output_sample_rate cutoff)
-        # gr-iridium uses firdes.low_pass_2 with 40 dB stop-band attenuation
+        # Input FIR: exact port of gr's firdes.low_pass_2(gain=1,
+        # sr=input_sr, cutoff=burst_width/2=20 kHz, transition=burst_width=40 kHz,
+        # attenuation=40 dB).  gr uses Parks-McClellan (Remez) — much shorter
+        # (~113 taps at 2 MHz input) than our previous Hamming firwin(401).
+        # An over-designed filter cuts too tight and removes signal edges.
         if input_taps is None:
-            # Approximate: 401-tap FIR with cutoff at burst_width/2
-            # Actual C++ uses low_pass_2(gain=1, sr=channel_sample_rate,
-            #   cutoff=burst_width/2, transition=burst_width, attenuation=40)
-            burst_width = 40_000  # Hz
-            # Assume input at 2 MHz for the moment; caller can override
-            input_taps = sig.firwin(401, burst_width / (2 * 2_000_000))
+            # Assume 2 MHz input; caller can override for other sample rates
+            input_taps = _firdes_low_pass_2(
+                gain=1.0, sample_rate=2_000_000,
+                cutoff_freq=40_000 / 2, transition_width=40_000,
+                attenuation_dB=40.0)
         self.input_taps = np.asarray(input_taps, dtype=np.float32)
 
-        # Start-finder FIR: narrow low-pass on |signal|²
+        # Start-finder FIR: matches gr's low_pass_2(1, burst_sr, 5e3/2,
+        # 10e3/2, 60) — narrow low-pass on |signal|² for envelope detection
         if start_finder_taps is None:
-            burst_sample_rate = self.output_sample_rate
-            # low_pass_2(1, burst_sr, 5e3/2, 10e3/2, 60)
-            start_finder_taps = sig.firwin(
-                101, 5e3 / burst_sample_rate)
+            start_finder_taps = _firdes_low_pass_2(
+                gain=1.0, sample_rate=self.output_sample_rate,
+                cutoff_freq=5e3 / 2, transition_width=10e3 / 2,
+                attenuation_dB=60.0)
         self.start_finder_taps = np.asarray(start_finder_taps, dtype=np.float32)
 
         # Root-raised-cosine matched filter (51 taps, α=0.4)
