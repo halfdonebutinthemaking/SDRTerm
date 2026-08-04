@@ -144,61 +144,46 @@ def _pick_best_phase(matched: np.ndarray, sps: int) -> np.ndarray:
     return best
 
 
+# Half-width of the trim window around the envelope peak, in symbols.
+# One Iridium burst is ~8-20 ms (200-500 symbols at 25 ksym/s).  400
+# symbols each side = 800 total = 32 ms, comfortably covers any burst
+# type (IPB/IL/IU3/VOC/…) with margin, while still cutting the pushed
+# 100 ms window by ~3× so symbol timing / CFO / bit extraction see
+# mostly-burst instead of mostly-noise samples.  A previous envelope-
+# walk approach worked on synthetic data but fell back to the full
+# window on live captures — adjacent-channel leakage through the 50 kHz
+# decimation filter kept the envelope above threshold everywhere, and
+# multiple bursts in the same 100 ms window (TDMA sat pass) had the
+# same effect.
+_TRIM_HALF_SYMS = 400
+
+
 def _trim_to_burst(matched: np.ndarray, sps: int,
-                   min_len_syms: int = 200) -> np.ndarray:
-    """Trim the matched-filter output to the burst region.
+                   half_syms: int = _TRIM_HALF_SYMS) -> np.ndarray:
+    """Trim the matched-filter output to a fixed-width window around the
+    envelope peak.
 
-    The iridium plugin pushes ~100 ms windows around each detection so
-    iridium-toolkit's own extractor has enough runway before/after the
-    burst.  A real Iridium burst is ~8-20 ms; running symbol timing
-    recovery over the whole 100 ms means ~80 ms of noise dilutes the
-    signal energy and phase estimates.
+    Approach: smooth |matched|² over one symbol, find the peak, take
+    ±half_syms·sps samples around it.  No threshold walk — robust
+    against adjacent-channel leakage and multi-burst windows that
+    would keep an envelope-walk anchored to the window edges.
 
-    Envelope-based approach:
-      1. Compute |matched|² and smooth over one symbol period
-      2. Find peak sample
-      3. Threshold at peak-10 dB, walk outward from peak to find the
-         contiguous above-threshold region
-      4. Add ±2 symbols of guard
-
-    Falls back to the full matched signal if the burst can't be located
-    (envelope roughly flat, threshold never crossed) or the resulting
-    region is shorter than `min_len_syms` symbols.  Guarantees the
-    downstream symbol timing / CFO / bit extraction sees a clean burst
-    rather than mostly-noise samples.
+    Returns `matched` unchanged if it's already shorter than the target.
     """
     n = len(matched)
-    if n < min_len_syms * sps:
+    target = 2 * half_syms * sps
+    if n <= target:
         return matched
     # Smooth envelope with a one-symbol boxcar (fast, no scipy dep)
     power = (matched.real ** 2 + matched.imag ** 2).astype(np.float32)
-    # Simple boxcar via cumsum diff — O(n)
-    csum = np.cumsum(power, dtype=np.float64)
-    box  = np.zeros_like(power)
+    csum  = np.cumsum(power, dtype=np.float64)
+    box   = np.zeros_like(power)
     box[sps:] = csum[sps:] - csum[:-sps]
-    box /= float(sps)
     peak_idx = int(np.argmax(box))
-    peak_val = float(box[peak_idx])
-    if peak_val <= 0.0:
-        return matched
-    thresh = peak_val * 0.1              # -10 dB from peak
-    # Walk left/right from peak
-    left = peak_idx
-    while left > 0 and box[left] > thresh:
-        left -= 1
-    right = peak_idx
-    while right < n - 1 and box[right] > thresh:
-        right += 1
-    guard = 2 * sps
-    left  = max(0, left - guard)
-    right = min(n, right + guard)
-    trimmed = matched[left:right]
-    if len(trimmed) < min_len_syms * sps:
-        # Burst envelope too narrow — likely a false positive from the
-        # detector or the whole window is noise; better to run on the
-        # full signal than on a sliver.
-        return matched
-    return trimmed
+    half = half_syms * sps
+    left  = max(0, peak_idx - half)
+    right = min(n, peak_idx + half)
+    return matched[left:right]
 
 
 # Gray-coded DQPSK phase-difference → 2-bit mapping.  Phase differences
