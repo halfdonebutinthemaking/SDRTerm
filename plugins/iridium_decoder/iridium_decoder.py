@@ -103,8 +103,12 @@ class IridiumDecoderPlugin(Decoder):
         self._parser_proc = None
         self._parser_path: str = None
         self._parser_cwd:  str = None
+        self._parser_interp: str = None
         self._parser_reader_thread = None
         self._parser_available = None   # None=untested, True/False=cached
+        self._parser_error: str = None  # last error message for the UI
+        self._parser_lines_written = 0
+        self._parser_lines_read    = 0
         # DSP objects — instantiated lazily in start() when we know SR
         self._tagger:  FftBurstTagger = None
         self._downmix: BurstDownmix   = None
@@ -146,37 +150,97 @@ class IridiumDecoderPlugin(Decoder):
 
     def _ensure_parser(self) -> bool:
         """Start iridium-parser.py subprocess on demand.  Returns True if
-        parsing is available."""
+        parsing is available.  Sets `self._parser_error` on failure so
+        the UI can show why messages view is empty."""
         if self._parser_proc is not None and self._parser_proc.poll() is None:
             return True
-        if self._parser_available is False:
-            return False
-        self._parser_path, self._parser_cwd = _find_iridium_parser()
+        # Clear stale state
+        self._parser_error = None
+        if self._parser_path is None:
+            self._parser_path, self._parser_cwd = _find_iridium_parser()
         if self._parser_path is None:
             self._parser_available = False
+            self._parser_error = ('iridium-parser.py not found.  Set '
+                                   '$IRIDIUM_PARSER to its full path.')
             return False
+        # Try several Python interpreters — SDRTerm's own (sys.executable)
+        # may lack `crcmod`; the system `python3` from PATH usually has it.
+        import sys as _sys
+        candidates = ['python3', 'python', _sys.executable]
+        # De-dup while preserving order
+        seen = set(); interpreters = []
+        for c in candidates:
+            if c and c not in seen:
+                seen.add(c); interpreters.append(c)
+
+        last_err = None
+        for interp in interpreters:
+            try:
+                proc = subprocess.Popen(
+                    [interp, '-u', self._parser_path, '--uw-ec', '--harder', '-'],
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    cwd=self._parser_cwd,
+                    text=True, bufsize=1,
+                )
+            except FileNotFoundError as e:
+                last_err = 'interpreter {} not found'.format(interp)
+                continue
+            except Exception as e:
+                last_err = '{}: {}'.format(type(e).__name__, e)
+                continue
+
+            # Give the subprocess ~500 ms to start / crash.  If it dies
+            # immediately (missing crcmod, etc.), the next interpreter
+            # gets tried.
+            import time as _time
+            for _ in range(10):
+                _time.sleep(0.05)
+                if proc.poll() is not None:
+                    break
+            if proc.poll() is not None:
+                err_txt = ''
+                try:
+                    err_txt = proc.stderr.read()[:200]
+                except Exception:
+                    pass
+                last_err = '{} exited early: {}'.format(interp, err_txt.strip() or 'no stderr')
+                try:
+                    proc.stdout.close(); proc.stderr.close(); proc.stdin.close()
+                except Exception:
+                    pass
+                continue
+
+            # Interpreter accepted, subprocess is running
+            self._parser_proc = proc
+            self._parser_interp = interp
+            self._parser_available = True
+            # Drain stderr in a thread so the parser's own warnings don't
+            # block its stdout pipe when the PIPE fills up.
+            threading.Thread(target=self._parser_stderr_drain,
+                              args=(proc,), daemon=True).start()
+            # Backfill any already-decoded bursts (oldest first)
+            for m in list(self._messages)[::-1]:
+                self._feed_parser(m)
+            # Reader thread for stdout
+            self._parser_reader_thread = threading.Thread(
+                target=self._parser_reader_loop,
+                name='iridium-parser-reader', daemon=True)
+            self._parser_reader_thread.start()
+            return True
+
+        # All interpreters failed
+        self._parser_available = False
+        self._parser_error = 'all tried: ' + (last_err or 'unknown')
+        return False
+
+    def _parser_stderr_drain(self, proc):
+        """Drain the subprocess stderr so its stdout pipe doesn't stall."""
         try:
-            self._parser_proc = subprocess.Popen(
-                ['python3', '-u', self._parser_path, '--uw-ec', '--harder', '-'],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                cwd=self._parser_cwd,
-                text=True, bufsize=1,
-            )
+            for _ in proc.stderr:
+                pass
         except Exception:
-            self._parser_available = False
-            return False
-        self._parser_available = True
-        # Backfill: feed any already-decoded bursts so the parsed view
-        # shows history as soon as it's toggled on.
-        for m in list(self._messages)[::-1]:   # oldest first
-            self._feed_parser(m)
-        # Reader thread
-        self._parser_reader_thread = threading.Thread(
-            target=self._parser_reader_loop,
-            name='iridium-parser-reader', daemon=True)
-        self._parser_reader_thread.start()
-        return True
+            pass
 
     def _stop_parser(self):
         if self._parser_proc is not None:
@@ -193,6 +257,7 @@ class IridiumDecoderPlugin(Decoder):
         if self._parser_proc is None or self._parser_proc.stdin is None:
             return
         if self._parser_proc.poll() is not None:
+            self._parser_error = 'parser subprocess died'
             self._parser_proc = None
             return
         bits_str = ''.join(str(b) for b in msg['bits'])
@@ -207,16 +272,19 @@ class IridiumDecoderPlugin(Decoder):
         try:
             self._parser_proc.stdin.write(line)
             self._parser_proc.stdin.flush()
-        except Exception:
+            self._parser_lines_written += 1
+        except Exception as e:
+            self._parser_error = 'write failed: {}'.format(e)
             self._parser_proc = None
 
     def _parser_reader_loop(self):
         """Read parsed lines from iridium-parser stdout and cache them."""
-        while (self._parser_proc is not None
-               and self._parser_proc.poll() is None
+        proc = self._parser_proc
+        while (proc is not None
+               and proc.poll() is None
                and not self._stop_evt.is_set()):
             try:
-                line = self._parser_proc.stdout.readline()
+                line = proc.stdout.readline()
             except Exception:
                 break
             if not line:
@@ -224,8 +292,11 @@ class IridiumDecoderPlugin(Decoder):
             line = line.rstrip()
             if not line:
                 continue
-            # Skip parser's own error / warning lines
-            if line.startswith(('ERR:', 'Warning:')):
+            self._parser_lines_read += 1
+            # Skip parser's own warning lines but keep everything else,
+            # even lines with 'ERR:' at the end (partial parses often have
+            # useful type info before the error).
+            if line.startswith('Warning:'):
                 continue
             self._parsed.appendleft(line)
 
@@ -478,32 +549,52 @@ class IridiumDecoderPlugin(Decoder):
 
     def _draw_messages_view(self, screen_obj, result: dict, rows: int, cols: int):
         import curses
-        if self._parser_available is False:
-            msg = ('iridium-parser.py not found.  Set $IRIDIUM_PARSER '
-                   'to its full path, or clone iridium-toolkit under '
-                   '~/iridium-toolkit/ and press m again.')
-            try:
-                screen_obj.addstr(5, 2, msg[:cols - 4])
-            except curses.error:
-                pass
-            return
-
         parsed = result.get('parsed', [])
-        header = ('Parsed messages via {} ({} shown)'.format(
-            self._parser_path or 'iridium-parser', len(parsed)))
+
+        # Diagnostic line — shows subprocess health so failures are visible
+        diag = 'parser: '
+        if self._parser_available is False:
+            diag += 'UNAVAILABLE — ' + (self._parser_error or 'unknown')
+        elif self._parser_proc is not None and self._parser_proc.poll() is None:
+            diag += 'running ({})'.format(self._parser_interp or '?')
+            diag += '   sent: {}   received: {}'.format(
+                self._parser_lines_written, self._parser_lines_read)
+        else:
+            diag += 'not started (press m again to retry)'
+            if self._parser_error:
+                diag += '   last error: ' + self._parser_error
+        try:
+            screen_obj.addstr(4, 2, diag[:cols - 4])
+        except curses.error:
+            pass
+
+        header = 'Parsed messages ({} shown){}'.format(
+            len(parsed),
+            '  path: ' + self._parser_path if self._parser_path else '')
         try:
             screen_obj.addstr(5, 2, header[:cols - 4], curses.A_UNDERLINE)
         except curses.error:
             pass
 
         if not parsed:
-            try:
-                screen_obj.addstr(7, 2,
-                    'Waiting for parsed output.  If you just toggled to '
-                    'this view, iridium-parser is chewing through the '
-                    'backlog; results should stream in shortly.')
-            except curses.error:
-                pass
+            if self._parser_available is False:
+                # Persistent error — show longer help
+                msg1 = ('Not receiving parsed output.  ' +
+                        (self._parser_error or 'Check that '
+                         'iridium-parser.py runs standalone with its '
+                         'crcmod dependency installed.'))
+                try:
+                    screen_obj.addstr(7, 2, msg1[:cols - 4])
+                except curses.error:
+                    pass
+            else:
+                try:
+                    screen_obj.addstr(7, 2,
+                        'Waiting for parsed output.  Press m to switch '
+                        'back to bits view if you want to see raw decodes '
+                        'while waiting.')
+                except curses.error:
+                    pass
             return
 
         # Type-code first-3-chars → curses colour, if we can init
