@@ -144,46 +144,46 @@ def _pick_best_phase(matched: np.ndarray, sps: int) -> np.ndarray:
     return best
 
 
-# Half-width of the trim window around the envelope peak, in symbols.
-# One Iridium burst is ~8-20 ms (200-500 symbols at 25 ksym/s).  400
-# symbols each side = 800 total = 32 ms, comfortably covers any burst
-# type (IPB/IL/IU3/VOC/…) with margin, while still cutting the pushed
-# 100 ms window by ~3× so symbol timing / CFO / bit extraction see
-# mostly-burst instead of mostly-noise samples.  A previous envelope-
-# walk approach worked on synthetic data but fell back to the full
-# window on live captures — adjacent-channel leakage through the 50 kHz
-# decimation filter kept the envelope above threshold everywhere, and
-# multiple bursts in the same 100 ms window (TDMA sat pass) had the
-# same effect.
-_TRIM_HALF_SYMS = 400
+# Trim-window width in symbols.  Iridium bursts are ~8-20 ms
+# (200-500 symbols at 25 ksym/s: 8.28 ms for IL/IU3/VOC, 20.32 ms for
+# IPB paging).  400 symbols = 16 ms covers a typical burst body plus
+# preamble tail without inviting the adjacent-burst / noise-tail
+# dilution that keeps symbol timing recovery weak.
+_TRIM_SYMS = 400
 
 
 def _trim_to_burst(matched: np.ndarray, sps: int,
-                   half_syms: int = _TRIM_HALF_SYMS) -> np.ndarray:
-    """Trim the matched-filter output to a fixed-width window around the
-    envelope peak.
+                   trim_syms: int = _TRIM_SYMS) -> np.ndarray:
+    """Trim the matched-filter output to the contiguous window of
+    maximal integrated energy — a coarse matched-filter for
+    "burst-present" of the target width.
 
-    Approach: smooth |matched|² over one symbol, find the peak, take
-    ±half_syms·sps samples around it.  No threshold walk — robust
-    against adjacent-channel leakage and multi-burst windows that
-    would keep an envelope-walk anchored to the window edges.
+    Approach: compute a sliding-window sum of |matched|² over
+    `trim_syms · sps` samples (cheap via cumsum diff), find the offset
+    where the sum is largest, return that slice.  Guaranteed to overlap
+    the burst as long as burst energy exceeds the sum of noise over
+    the same window width — true at any reasonable SNR.
 
-    Returns `matched` unchanged if it's already shorter than the target.
+    Why not argmax(|matched|²) + fixed offset (previous approach):
+      - Single-sample peak can be an SDR spur, noise spike, or the
+        RRC pulse's ripple, not the burst body's centre.
+      - Sliding-window energy integrates across the whole burst, so
+        it's robust to individual-sample noise.
+
+    Returns `matched` unchanged if it's already shorter than trim_syms.
     """
     n = len(matched)
-    target = 2 * half_syms * sps
-    if n <= target:
+    win = trim_syms * sps
+    if n <= win:
         return matched
-    # Smooth envelope with a one-symbol boxcar (fast, no scipy dep)
     power = (matched.real ** 2 + matched.imag ** 2).astype(np.float32)
     csum  = np.cumsum(power, dtype=np.float64)
-    box   = np.zeros_like(power)
-    box[sps:] = csum[sps:] - csum[:-sps]
-    peak_idx = int(np.argmax(box))
-    half = half_syms * sps
-    left  = max(0, peak_idx - half)
-    right = min(n, peak_idx + half)
-    return matched[left:right]
+    # Sum over [k, k+win) = csum[k+win-1] - csum[k-1]; prepend a zero
+    # so k=0 works uniformly.
+    csum0 = np.concatenate([[0.0], csum])
+    win_sum = csum0[win:] - csum0[:-win]
+    best_start = int(np.argmax(win_sum))
+    return matched[best_start:best_start + win]
 
 
 # Gray-coded DQPSK phase-difference → 2-bit mapping.  Phase differences
