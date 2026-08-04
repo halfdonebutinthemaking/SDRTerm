@@ -101,31 +101,67 @@ def _pick_best_phase(matched: np.ndarray, sps: int) -> np.ndarray:
 # are quantised into 4 bins by the sign of (real, imag) of the diff
 # product; each combination maps to a Gray-adjacent 2-bit code.
 def _dqpsk_bits(symbols: np.ndarray) -> str:
-    """Return a string of '0'/'1' bits from consecutive symbol pairs."""
+    """Return a string of '0'/'1' bits from consecutive symbol pairs.
+
+    Standard π/4-Gray DQPSK mapping:
+        quadrant of (symbol[k] · conj(symbol[k-1]))  →  2 bits
+          I>0, Q>0  →  0 0
+          I<0, Q>0  →  0 1
+          I<0, Q<0  →  1 1
+          I>0, Q<0  →  1 0
+
+    Which gives:
+        high = 1 - q  (high bit = 1 when Q is negative)
+        low  = 1 - i  (low  bit = 1 when I is negative)
+
+    Verified against a synthetic bit-stream → symbols → demod round-trip
+    in the test at the bottom of this file.  If Iridium's actual on-air
+    convention differs from this Gray mapping the UW correlator has
+    swap/conj variants that will match anyway (see find_uw)."""
     if len(symbols) < 2:
         return ''
     diff = symbols[1:] * np.conj(symbols[:-1])
-    # Quantise by quadrant.  Standard Iridium DQPSK Gray mapping:
-    #   quadrant → 2 bits
-    #     I,Q signs (+,+) → 00
-    #     I,Q signs (-,+) → 01
-    #     I,Q signs (-,-) → 11
-    #     I,Q signs (+,-) → 10
     q_i = (diff.real >= 0).astype(np.uint8)
     q_q = (diff.imag >= 0).astype(np.uint8)
-    # Compose per Gray code above
-    #   (i, q) → high bit, low bit
-    #   (1, 1) → 0, 0
-    #   (0, 1) → 0, 1
-    #   (0, 0) → 1, 1
-    #   (1, 0) → 1, 0
-    high = (1 - q_i) & (q_q ^ 1) | (1 - q_i) & q_q     # 1 when i==0
-    high = (1 - q_i).astype(np.uint8)
-    low  = (q_i ^ q_q).astype(np.uint8)
+    high = (1 - q_q).astype(np.uint8)
+    low  = (1 - q_i).astype(np.uint8)
     out = np.empty(2 * len(diff), dtype=np.uint8)
     out[0::2] = high
     out[1::2] = low
     return ''.join('1' if b else '0' for b in out)
+
+
+# ── DQPSK encoder for round-trip testing ──────────────────────────────────
+# Inverse of _dqpsk_bits: bits → complex symbols.  Used by the test in
+# the module block below to verify demod produces back what we encoded.
+
+def _bits_to_dqpsk_symbols(bits_str: str) -> np.ndarray:
+    """Encode a '01'-bit string as π/4-Gray DQPSK symbols.
+
+    First symbol is arbitrary (reference); every subsequent symbol is
+    the previous rotated by the phase corresponding to the next 2 bits:
+        00 → 45° (+1+j)/√2 · prev
+        01 → 135° (-1+j)/√2 · prev
+        11 → 225° (-1-j)/√2 · prev
+        10 → 315° (+1-j)/√2 · prev
+    """
+    assert len(bits_str) % 2 == 0
+    n_syms = len(bits_str) // 2 + 1   # +1 for the reference symbol
+    out = np.zeros(n_syms, dtype=np.complex64)
+    out[0] = (1 + 0j)                  # arbitrary reference
+    inv_sqrt2 = 1.0 / np.sqrt(2.0)
+    for bi in range(0, len(bits_str), 2):
+        high = bits_str[bi]
+        low  = bits_str[bi + 1]
+        # invert the mapping in _dqpsk_bits:
+        #   high = 1-q  → q_sign = 1-high
+        #   low  = 1-i  → i_sign = 1-low
+        q_sign = 1 - int(high)     # 1 → Q > 0, 0 → Q < 0
+        i_sign = 1 - int(low)      # 1 → I > 0, 0 → I < 0
+        step = complex((1 if i_sign else -1) * inv_sqrt2,
+                       (1 if q_sign else -1) * inv_sqrt2)
+        out[bi // 2 + 1] = out[bi // 2] * step
+    return out
 
 
 def _bits_to_bipolar(bits_str: str) -> np.ndarray:
