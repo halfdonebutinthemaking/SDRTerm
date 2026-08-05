@@ -27,9 +27,13 @@ M_SQRT1_2 = 1.0 / math.sqrt(2.0)
 try:
     import numba as _numba
     _jit = _numba.njit(cache=True, fastmath=True)
+    HAS_NUMBA = True
+    NUMBA_VERSION = _numba.__version__
 except ImportError:
     def _jit(fn):
         return fn
+    HAS_NUMBA = False
+    NUMBA_VERSION = None
 
 
 @_jit
@@ -133,6 +137,20 @@ def _slice_jit(burst_r, burst_i, mags):
     level = total_mag / n
     confidence = int(100.0 * n_ok / n)
     return n, symbols[:n], level, confidence
+
+
+def numba_active() -> bool:
+    """Returns True only if BOTH functions have been successfully JIT-
+    compiled by Numba (as opposed to imported but not yet triggered, or
+    fallen back to pure Python).  Numba's dispatcher exposes .signatures
+    only after at least one specialisation has been compiled."""
+    if not HAS_NUMBA:
+        return False
+    for fn in (_pll_jit, _slice_jit):
+        sigs = getattr(fn, 'signatures', None)
+        if not sigs:   # None or empty list
+            return False
+    return True
 
 
 class QpskDemod:

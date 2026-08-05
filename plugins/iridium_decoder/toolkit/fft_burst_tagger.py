@@ -27,10 +27,12 @@ try:
     import pyfftw.interfaces.numpy_fft as _fft_backend
     # Cache plans so repeated FFTs of the same size hit the fast path
     pyfftw.interfaces.cache.enable()
-    _HAS_PYFFTW = True
+    HAS_PYFFTW = True
+    PYFFTW_VERSION = pyfftw.__version__
 except ImportError:
     _fft_backend = np.fft
-    _HAS_PYFFTW = False
+    HAS_PYFFTW = False
+    PYFFTW_VERSION = None
 
 
 class Burst:

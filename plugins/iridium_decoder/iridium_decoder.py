@@ -21,10 +21,29 @@ from collections import deque
 import numpy as np
 
 from core import Decoder, AppState
-from .toolkit.fft_burst_tagger import FftBurstTagger
+from .toolkit.fft_burst_tagger import (
+    FftBurstTagger, HAS_PYFFTW, PYFFTW_VERSION,
+)
 from .toolkit.burst_downmix import BurstDownmix
-from .toolkit.qpsk_demod import QpskDemod
+from .toolkit.qpsk_demod import (
+    QpskDemod, HAS_NUMBA, NUMBA_VERSION, numba_active,
+)
 from .toolkit import iridium
+
+
+def _accelerators_summary() -> str:
+    """Human-readable status of the optional performance backends."""
+    parts = []
+    if HAS_NUMBA:
+        parts.append('numba' + ('*' if numba_active() else '-cold'))
+    else:
+        parts.append('python')
+    if HAS_PYFFTW:
+        parts.append('pyfftw')
+    else:
+        parts.append('np.fft')
+    parts.append('oaconv')   # always available (scipy is a hard dep)
+    return ' + '.join(parts)
 
 # Vendored iridium-toolkit parser — imported lazily so the plugin still
 # loads even if crcmod isn't installed yet.
@@ -471,8 +490,19 @@ class IridiumDecoderPlugin(Decoder):
             result.get('queue_len', 0),
             result.get('n_dropped', 0),
             both, self._threshold_db, save_note)
+        # Accelerator status — helps users diagnose why CPU seems high
+        # despite the optional perf backends being installed
+        accel = 'accel: ' + _accelerators_summary()
         try:
             screen_obj.addstr(3, 2, stats[:cols - 4], curses.A_BOLD)
+            # Right-align the accelerator string on the same line so
+            # it's always visible.
+            if len(accel) + len(stats) + 6 < cols:
+                screen_obj.addstr(3, cols - len(accel) - 2,
+                                   accel, curses.A_DIM)
+            else:
+                # Terminal too narrow — put it on line 2 above
+                screen_obj.addstr(2, 2, accel[:cols - 4], curses.A_DIM)
         except curses.error:
             pass
 
