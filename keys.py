@@ -21,17 +21,6 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.tab_idx = min(state.tab_idx, len(cur_tabs))
             draw(stdscr, state, results, registry, cur_tabs, all_plugins, sdr, wf_rows)
 
-    # ── Swallow mouse / scroll-wheel events ──────────────────────────────────
-    # Enabled in main.py so trackpad scroll doesn't leak through as
-    # KEY_UP / KEY_DOWN (which would silently change bandwidth or scroll
-    # menus).  We consume the event so it doesn't affect state.
-    if key == curses.KEY_MOUSE:
-        try:
-            curses.getmouse()   # drain the event
-        except curses.error:
-            pass
-        return
-
     # ── plugin menu modal ─────────────────────────────────────────────────────
     if state.menu_active is not None:
         if key == 27:                             # esc — cancel
@@ -256,12 +245,21 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
     elif key == ord('.'):
         state.center_hz += state.bw_hz / FFT_BINS
         sdr.center_freq  = state.center_hz
-    elif key == curses.KEY_UP:
+    elif key in (curses.KEY_UP, curses.KEY_DOWN):
+        # Ignore plain arrow up/down on the core tab.  Terminals map
+        # trackpad two-finger scroll to these keys; letting them change
+        # bandwidth caused the SDR to constantly restart when the user
+        # was just scrolling to read output.  Bandwidth is now on
+        # `[` and `]` (bigger bandwidths and smaller, respectively) —
+        # deliberate keystrokes that trackpad scroll can't accidentally
+        # send.
+        pass
+    elif key == ord(']'):
         higher = [b for b in sdr.supported_bandwidths if b > state.bw_hz]
         if higher:
             state.bw_hz = min(higher)
             # sdr.sample_rate applied by _start_reader() after async read stops
-    elif key == curses.KEY_DOWN:
+    elif key == ord('['):
         min_bw = _required_bw(state.active_decoders, registry)
         lower  = [b for b in sdr.supported_bandwidths
                   if b < state.bw_hz and b >= min_bw]

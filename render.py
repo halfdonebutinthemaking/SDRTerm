@@ -323,7 +323,8 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
                 col += len(dev_status) + 1
 
             # core tab — right side
-            rhs_parts = ['a=auto', 'g=gain', 'i=iq', 'p=plugins', 's=save', 'l=load']
+            rhs_parts = ['[/]=bw', 'a=auto', 'g=gain', 'i=iq',
+                         'p=plugins', 's=save', 'l=load']
             if sdr.key_help:
                 rhs_parts.append(sdr.key_help)
             rhs_parts.append('v=spectrum' if state.waterfall_active else 'v=waterfall')

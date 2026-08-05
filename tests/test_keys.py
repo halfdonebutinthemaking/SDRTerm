@@ -168,11 +168,14 @@ class TestGainMode:
         press(curses.KEY_DOWN, ctx)
         assert ctx['state'].gain_db == pytest.approx(GAIN_MIN)
 
-    def test_up_outside_gain_mode_changes_bw_not_gain(self, ctx):
+    def test_bracket_close_outside_gain_mode_changes_bw_not_gain(self, ctx):
+        # Bandwidth key is `]` since the arrow-key trackpad-scroll fix.
+        # In gain-mode arrow keys change the gain; outside gain-mode
+        # they're ignored (BW steps are on brackets now).
         ctx['state'].bw_hz = BW_STEPS[0]
         ctx['state'].gain_mode = False
         ctx['state'].gain_db = 10.0
-        press(curses.KEY_UP, ctx)
+        press(ord(']'), ctx)
         assert ctx['state'].gain_db == pytest.approx(10.0)   # unchanged
         assert ctx['state'].bw_hz == BW_STEPS[1]             # BW stepped
 
@@ -194,25 +197,40 @@ class TestAgcToggle:
 # ── bandwidth stepping ────────────────────────────────────────────────────────
 
 class TestBandwidthStepping:
-    def test_up_steps_to_next_bw(self, ctx):
+    # Bandwidth is bound to `[` / `]` (not arrow keys) so trackpad
+    # two-finger scroll — which many terminals translate to KEY_UP /
+    # KEY_DOWN — doesn't restart the SDR when the user is just scrolling.
+    def test_bracket_close_steps_to_next_bw(self, ctx):
         ctx['state'].bw_hz = BW_STEPS[0]
-        press(curses.KEY_UP, ctx)
+        press(ord(']'), ctx)
         assert ctx['state'].bw_hz == BW_STEPS[1]
 
-    def test_down_steps_to_previous_bw(self, ctx):
+    def test_bracket_open_steps_to_previous_bw(self, ctx):
         ctx['state'].bw_hz = BW_STEPS[-1]
-        press(curses.KEY_DOWN, ctx)
+        press(ord('['), ctx)
         assert ctx['state'].bw_hz == BW_STEPS[-2]
 
-    def test_up_at_max_stays(self, ctx):
+    def test_bracket_close_at_max_stays(self, ctx):
         ctx['state'].bw_hz = BW_STEPS[-1]
-        press(curses.KEY_UP, ctx)
+        press(ord(']'), ctx)
         assert ctx['state'].bw_hz == BW_STEPS[-1]
 
-    def test_down_at_min_stays(self, ctx):
+    def test_bracket_open_at_min_stays(self, ctx):
         ctx['state'].bw_hz = BW_STEPS[0]
-        press(curses.KEY_DOWN, ctx)
+        press(ord('['), ctx)
         assert ctx['state'].bw_hz == BW_STEPS[0]
+
+    def test_arrow_up_is_ignored_on_core_tab(self, ctx):
+        # Arrow keys must NOT change bandwidth — that was the trackpad-
+        # scroll bug this section documents.
+        ctx['state'].bw_hz = BW_STEPS[0]
+        press(curses.KEY_UP, ctx)
+        assert ctx['state'].bw_hz == BW_STEPS[0]
+
+    def test_arrow_down_is_ignored_on_core_tab(self, ctx):
+        ctx['state'].bw_hz = BW_STEPS[-1]
+        press(curses.KEY_DOWN, ctx)
+        assert ctx['state'].bw_hz == BW_STEPS[-1]
 
 
 # ── path input modal ──────────────────────────────────────────────────────────
