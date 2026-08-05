@@ -160,8 +160,62 @@ plugin's raw display.
 ## CPU tuning
 
 At 2 MHz sample rate the plugin needs to keep up with ~977 FFT frames per
-second plus O(N × 401) FIR filtering per burst.  On modest CPUs (M-series
+second plus O(N × 113) FIR filtering per burst.  On modest CPUs (M-series
 Mac, mid-range x86) this is ~2× realtime — should handle live streams
 comfortably.  During dense satellite passes the queue can fill; the plugin
 drops chunks rather than blocking the SDR reader.  If drops become
 persistent, disable both-bin mode (`b`) to halve per-burst CPU cost.
+
+### What "Dropped" means
+
+The header shows `Detected: N   A:OK: M   Queue: Q   Dropped: D`.
+These are three different numbers and easily confused:
+
+- **Dropped** = raw IQ chunks (blocks of ~100 ms of samples straight
+  from the SDR) that the plugin threw away **before ever inspecting
+  them for bursts**.  This happens when the worker thread's input
+  queue is full — the SDR keeps delivering samples faster than the
+  Python DSP chain can process them, so we drop the newest chunk to
+  keep the SDR reader unblocked.  Every dropped chunk is 100 ms of
+  potential Iridium activity that got neither detected nor decoded.
+- **Detected** = bursts the tagger found in the chunks we DID process.
+  These are candidates that at least made it past the FFT detector.
+- **A:OK** = detected bursts that also passed downmix + demod and
+  produced a recognisable unique word (i.e., real Iridium messages,
+  potentially further classifiable by iridium-parser).
+
+So a healthy live session might read `Detected: 1170  A:OK: 35
+Queue: 12  Dropped: 0` — every SDR chunk got processed, ~35 of the
+1170 candidates were valid.
+
+An overloaded session reads `Detected: 293  A:OK: 7  Queue: 128
+Dropped: 1353` — 1353 chunks × 100 ms = 135 s of IQ we never saw
+because the worker was busy.  If you'd processed all of it, both
+"Detected" and "A:OK" would be roughly 5× larger.  **Watch the
+Dropped counter — if it climbs continuously the plugin is CPU-bound;
+disable both-bin (`b`), lower the sample rate, or accept some data
+loss.**
+
+### Why some bursts stay `RAW` in the messages view
+
+The `m`-toggle messages view shows type-classified messages: `IRI`,
+`VOC`, `ISY`, `IU3`, `IBC`, `IME`, `IRA`, and — sometimes — `RAW`.
+
+`RAW:` means the burst was demodulated (unique word passed at HD ≤ 2)
+but the vendored iridium-toolkit parser couldn't identify the frame
+type.  Three main causes:
+
+1. **LCW BCH decode failure** — the 3-symbol Link Control Word
+   encodes the frame type.  It's BCH-protected but can only correct
+   ~3-4 bit errors.  More errors → we can't tell what kind of frame
+   it is even though the UW was fine.
+2. **Unknown frame type** — Iridium has many message formats; the
+   parser only classifies the common ones.  Anything else stays RAW.
+3. **Frame truncated** — some types (e.g. IRA ring-alert) need a
+   minimum bit count.  If the burst was truncated (weak trailing
+   signal), it stays RAW.
+
+The bits after `<uw>` on a RAW line are the recovered payload — you
+can save the session with `s` and run `analyze_raw.py` to look for
+recurring patterns that might be new message types worth adding to
+the parser.
