@@ -1,8 +1,7 @@
 {
   "version": 1,
-  "_comment": "Iridium decoder pipeline preset — Stage 1 detector + capture + Stage 3 in-process native DQPSK demod running side-by-side. HackRF single-slot at 1621.25 MHz for maximum burst throughput to the decoder. Bursts flow: iridium plugin detects, saves .cf32 to disk (unchanged), AND channelises + pushes to the in-process queue that iridium_decoder consumes on a low-priority background thread. Phase 1 output is raw bit strings per burst.",
   "center_hz": 1621250000.0,
-  "bw_hz": 2000000,
+  "bw_hz": 2048000,
   "gain_db": 18.0,
   "gain_auto": false,
   "iq_corr": true,
@@ -10,17 +9,14 @@
   "nrsc5_sc_outer": 546,
   "waterfall_active": false,
   "active_decoders": [
-    "spectrum",
-    "iridium",
     "iridium_decode",
-    "peak_marker"
+    "spectrum"
   ],
   "plugin_order": [
     "iridium",
     "iridium_decode",
     "peak_marker",
     "constellation",
-    "spectrum",
     "freqhop",
     "range-scan",
     "record",
@@ -38,6 +34,27 @@
     "iridium": {
       "threshold_db": 15.0,
       "capture_on": true
+    },
+    "constellation": {
+      "symrate": 10500,
+      "m": 4,
+      "ref_angle": 0.0,
+      "differential": false,
+      "gating": false,
+      "carrier_lock_on": true
+    },
+    "freqhop": {
+      "slots": []
+    },
+    "range-scan": {
+      "scan_freq_min": 0.0,
+      "scan_freq_max": 0.0,
+      "dwell_s": 0.5,
+      "min_snr": 10.0,
+      "sort_snr": false
+    },
+    "modclass": {
+      "threshold": 0.55
     }
   }
 }

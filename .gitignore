@@ -33,3 +33,6 @@ data/
 
 # Iridium plugin burst captures (Stage 2a) — decoded by decode_bursts.sh
 plugins/iridium/iridium_bursts/
+
+# iridium_decoder session logs (created via `s` shortcut) — user's captures
+iridium_logs/
