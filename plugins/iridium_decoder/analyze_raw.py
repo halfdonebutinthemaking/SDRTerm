@@ -49,6 +49,43 @@ _RAW_RE = re.compile(
 _DL_UW = '001100000011000011110011'
 _UL_UW = '110011000011110011111100'
 
+# ── Iridium channel plan (for frequency-alignment filter) ──────────────
+# Iridium L-band uses 41.667 kHz channel spacing starting at 1616.0 MHz,
+# with a duplex block below 1626 MHz and a simplex block above.  Real
+# bursts land within ±5 kHz of a channel centre; anything further is
+# almost certainly a spur / interferer that accidentally passed our
+# UW check via bit-error correction.
+_IRIDIUM_BAND_LOW_HZ  = 1_616_000_000
+_IRIDIUM_CHAN_SPACING = 25_000_000.0 / 600.0    # ≈ 41 666.667 Hz
+_MAX_CHAN_DEVIATION   =  5_000                  # ± 5 kHz
+
+
+def _channel_deviation(freq_hz: int) -> float:
+    """Distance from `freq_hz` to the nearest Iridium channel centre, in Hz."""
+    rel = (freq_hz - _IRIDIUM_BAND_LOW_HZ) / _IRIDIUM_CHAN_SPACING - 0.5
+    nearest = round(rel)
+    dev = (rel - nearest) * _IRIDIUM_CHAN_SPACING
+    return abs(dev)
+
+
+def _looks_iridium(d: dict, min_conf: int, min_nsyms: int) -> bool:
+    """Cheap heuristic: is this RAW: line plausibly a real Iridium burst
+    (as opposed to a spur / noise trigger)?
+
+    Three signals combined:
+      - frequency within ±5 kHz of an Iridium channel centre
+      - QpskDemod confidence ≥ min_conf
+      - symbol count ≥ min_nsyms (below ~40 syms is almost certainly
+        truncated / spurious — not enough to carry an LCW header)
+    """
+    if d['conf'] < min_conf:
+        return False
+    if d['nsyms'] < min_nsyms:
+        return False
+    if _channel_deviation(d['freq_hz']) > _MAX_CHAN_DEVIATION:
+        return False
+    return True
+
 
 def _parse_input_line(line: str) -> dict:
     m = _RAW_RE.match(line.strip())
@@ -128,7 +165,8 @@ def _expand_paths(paths: list) -> list:
     return out
 
 
-def analyze(paths: list, top_n: int = 15, pattern_bits: int = 32):
+def analyze(paths: list, top_n: int = 15, pattern_bits: int = 32,
+            min_conf: int = 40, min_nsyms: int = 40, filter_iridium: bool = True):
     paths = _expand_paths(paths)
     if not paths:
         print('No input files.  Pass one or more .raw log files (or a '
@@ -144,6 +182,9 @@ def analyze(paths: list, top_n: int = 15, pattern_bits: int = 32):
     raw_by_band = Counter()
     raw_pattern_examples: dict = defaultdict(list)
     raw_freqs_by_pattern: dict = defaultdict(list)
+    # Iridium-quality filter stats
+    raw_total_all = 0             # all RAW lines from the parser
+    raw_filter_rejects = Counter()   # {'off_channel': N, 'low_conf': N, 'short': N}
 
     for path in paths:
         with open(path) as f:
@@ -163,7 +204,19 @@ def analyze(paths: list, top_n: int = 15, pattern_bits: int = 32):
                 typed_counts[type_code] += 1
                 if type_code != 'RAW':
                     continue
-                # Bucket the RAW bursts
+                raw_total_all += 1
+                # Apply Iridium-quality filter before bucketing patterns
+                if filter_iridium:
+                    if d['conf'] < min_conf:
+                        raw_filter_rejects['low_conf'] += 1
+                        continue
+                    if d['nsyms'] < min_nsyms:
+                        raw_filter_rejects['too_short'] += 1
+                        continue
+                    if _channel_deviation(d['freq_hz']) > _MAX_CHAN_DEVIATION:
+                        raw_filter_rejects['off_channel'] += 1
+                        continue
+                # Bucket the RAW bursts that passed the filter
                 direction, post_uw = _classify(d['bits'])
                 raw_by_dir[direction or 'noUW'] += 1
                 raw_by_length[_length_bucket(d['nsyms'])] += 1
@@ -194,8 +247,35 @@ def analyze(paths: list, top_n: int = 15, pattern_bits: int = 32):
         print('No RAW frames to analyse — parser typed everything.')
         return
 
-    print('RAW frames: {}'.format(raw_total))
-    print()
+    # Report the filter's effect
+    kept = raw_total - sum(raw_filter_rejects.values())
+    if filter_iridium:
+        print('RAW frames: {} total, {} kept after Iridium-quality filter'.format(
+            raw_total, kept))
+        print('  (--no-filter to see all RAW frames)')
+        if raw_filter_rejects:
+            print('  filter rejected:')
+            for reason, cnt in raw_filter_rejects.most_common():
+                if reason == 'low_conf':
+                    hint = 'conf < {}%'.format(min_conf)
+                elif reason == 'too_short':
+                    hint = 'nsyms < {}'.format(min_nsyms)
+                elif reason == 'off_channel':
+                    hint = 'freq > ±{} Hz from any Iridium channel'.format(
+                        _MAX_CHAN_DEVIATION)
+                else:
+                    hint = reason
+                print('    {:>4d}  {}'.format(cnt, hint))
+        print()
+    else:
+        print('RAW frames: {} (filter disabled)'.format(raw_total))
+        print()
+
+    if kept == 0:
+        print('All RAW frames failed the Iridium-quality filter — most likely')
+        print('the RAW output is dominated by spurs / noise.  Re-run with')
+        print('--no-filter to see the ungrouped patterns anyway.')
+        return
     print('  By direction:')
     for k, v in raw_by_dir.most_common():
         print('    {:>6s}  {}'.format(k, v))
@@ -245,8 +325,19 @@ def main():
                    help='Number of top patterns to show (default 15)')
     p.add_argument('--bits', type=int, default=32,
                    help='Bit width of the pattern key (default 32)')
+    p.add_argument('--min-conf', type=int, default=40,
+                   help='Iridium filter: minimum QpskDemod confidence %% '
+                        '(default 40, lower = more permissive)')
+    p.add_argument('--min-nsyms', type=int, default=40,
+                   help='Iridium filter: minimum symbols per burst '
+                        '(default 40, below this is likely truncated / spur)')
+    p.add_argument('--no-filter', action='store_true',
+                   help='Disable Iridium-quality filter (analyse ALL RAW '
+                        'frames including obvious noise triggers)')
     args = p.parse_args()
-    analyze(args.paths, top_n=args.top, pattern_bits=args.bits)
+    analyze(args.paths, top_n=args.top, pattern_bits=args.bits,
+            min_conf=args.min_conf, min_nsyms=args.min_nsyms,
+            filter_iridium=not args.no_filter)
 
 
 if __name__ == '__main__':
