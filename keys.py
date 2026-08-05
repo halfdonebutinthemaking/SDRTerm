@@ -21,6 +21,17 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
             state.tab_idx = min(state.tab_idx, len(cur_tabs))
             draw(stdscr, state, results, registry, cur_tabs, all_plugins, sdr, wf_rows)
 
+    # ── Swallow mouse / scroll-wheel events ──────────────────────────────────
+    # Enabled in main.py so trackpad scroll doesn't leak through as
+    # KEY_UP / KEY_DOWN (which would silently change bandwidth or scroll
+    # menus).  We consume the event so it doesn't affect state.
+    if key == curses.KEY_MOUSE:
+        try:
+            curses.getmouse()   # drain the event
+        except curses.error:
+            pass
+        return
+
     # ── plugin menu modal ─────────────────────────────────────────────────────
     if state.menu_active is not None:
         if key == 27:                             # esc — cancel

@@ -53,6 +53,21 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
+    # Enable mouse tracking so trackpad / scroll-wheel events are captured
+    # as KEY_MOUSE at the curses layer rather than being translated by
+    # the terminal into KEY_UP / KEY_DOWN (which some terminals — notably
+    # iTerm2 with "scroll wheel sends arrow keys" enabled, and macOS
+    # Terminal.app in alt-screen mode — do by default).  Without this,
+    # trackpad two-finger scroll silently pumps arrow-key events into the
+    # bandwidth/menu handlers.  We then discard the mouse events (see
+    # keys.py) — they're captured, not acted on.
+    try:
+        curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        # Zero interval means every event delivered individually (no
+        # gesture batching, so we don't need to worry about double-clicks).
+        curses.mouseinterval(0)
+    except (AttributeError, curses.error):
+        pass
     if curses.has_colors():
         curses.start_color()
         curses.use_default_colors()
