@@ -171,6 +171,132 @@ uv run python main.py --preset presets/iridium_decode.sdrterm
 Enables both the iridium plugin (burst display) and iridium_decoder
 (message decoding) at 2 MHz, HackRF or RTL-SDR.
 
+## Offline pattern analysis (analyze_raw)
+
+`analyze_raw.py` reads one or more saved `.raw` session logs (produced
+via the `s` shortcut) and groups the still-unclassified `RAW:` bursts
+by common bit patterns.  Recurring patterns are candidate new message
+types — signals that iridium-toolkit's parser doesn't yet know how to
+classify but which appear repeatedly, so are likely real message
+classes rather than noise.
+
+### Usage
+
+```bash
+# Default: quality-filtered analysis of all logs in iridium_logs/
+uv run python -m plugins.iridium_decoder.analyze_raw iridium_logs
+
+# Same, explicit glob (works with shell or without)
+uv run python -m plugins.iridium_decoder.analyze_raw iridium_logs/*.raw
+
+# Multiple explicit files
+uv run python -m plugins.iridium_decoder.analyze_raw file1.raw file2.raw
+```
+
+### CLI flags
+
+| Flag | Default | Effect |
+|---|---|---|
+| `--top N` | 15 | How many top patterns to show |
+| `--bits N` | 32 | Bits-after-UW used as the pattern key.  32 covers the LCW header (24 bits) plus 8 more.  Smaller `N` groups more bursts together, larger separates them. |
+| `--min-conf N` | 40 | Iridium-quality filter: reject bursts with QpskDemod confidence below N % (real bursts land tightly at QPSK quadrant centres) |
+| `--min-nsyms N` | 40 | Iridium-quality filter: reject bursts with fewer than N symbols (truncated / spur) |
+| `--no-filter` | off | Skip the quality filter — analyse ALL RAW frames including obvious noise triggers |
+
+### Iridium-quality filter
+
+Not every `RAW:` line represents a real Iridium burst.  Some are spurs
+or noise that accidentally passed the UW check via bit-error correction
+(the demod allows Hamming distance ≤ 2 in the 12-symbol UW, so random
+noise occasionally satisfies it).  The default filter uses three
+signals to focus pattern analysis on **plausibly real** bursts:
+
+1. **Frequency alignment** — the burst frequency must fall within
+   ±5 kHz of an Iridium channel centre (channels are on a fixed
+   41.667 kHz grid starting at 1616 MHz).  Real satellite bursts land
+   on the grid; interferers and spurs typically don't.
+2. **QpskDemod confidence ≥ 40 %** — real bursts produce tightly-
+   clustered symbol constellations; noise-triggered UW matches have
+   scattered symbols and low confidence.
+3. **Symbol count ≥ 40** — below this is almost certainly a truncated
+   burst (too short to carry an LCW header).
+
+Rejected counts are shown in the report so you can see why bursts
+were dropped:
+
+```
+RAW frames: 984 total, 437 kept after Iridium-quality filter
+  filter rejected:
+    480  nsyms < 40
+     67  conf < 40%
+```
+
+Use `--no-filter` to see the pre-filter counts, or tune with
+`--min-conf` / `--min-nsyms` for stricter or looser rejection.
+
+### Report sections
+
+The analyzer prints, in order:
+
+1. **Classification breakdown** — how many bursts became each parsed
+   type (IRI / VOC / ISY / IU3 / IBC / IME / IRA), plus how many
+   stayed as `RAW`.  Percentages let you see the parser's hit rate.
+2. **RAW-frame filter stats** — after the quality filter, how many
+   RAW bursts survive and why any were rejected.
+3. **RAW by direction** — DL vs UL split of the filtered RAW bursts.
+   Satellite passes are usually 5-10× more DL than UL.
+4. **RAW by symbol-length bucket** — Iridium has several frame length
+   families (~131-191 syms for normal duplex, 80-444 for simplex).
+   A big cluster at one specific length is a strong hint of a
+   recurring message class.
+5. **RAW by frequency band** — duplex (1616-1626 MHz) vs simplex
+   (>1626 MHz) split.  These use different message families.
+6. **Top-N recurring N-bit patterns after the UW** — this is the
+   payoff.  Each pattern is annotated with:
+   - `count`: how many bursts match this exact bit prefix
+   - `freq/MHz`: median frequency of matching bursts, ± spread
+   - `sample ts,freq`: 1-2 example bursts you can grep in the log
+
+### Reading the top-N patterns
+
+A pattern is a **candidate new message type** when it satisfies TWO
+conditions:
+
+- **count ≥ 3** — it recurs, so it's not random noise
+- **frequency spread ≤ 5 MHz** — it clusters on specific channels or
+  channel groups, not scattered across the band
+
+If both hold, the burst's first 24 bits are likely the LCW field of
+an Iridium message class the parser doesn't recognise.  Compare its
+bit pattern to iridium-toolkit's [FORMAT.md](https://github.com/muccc/iridium-toolkit/blob/master/FORMAT.md)
+and the `IridiumLCWMessage.upgrade()` branches in
+[bitsparser.py](parser/bitsparser.py) to see if it maps to a known LCW
+type-code that just isn't fully decoded (e.g. `T:rsrvd` variants).
+
+Adding a new classifier is a small patch to `bitsparser.py`'s
+`upgrade()` method + a new `IridiumXYZMessage` subclass — a natural
+[upstream contribution](https://github.com/muccc/iridium-toolkit) to
+iridium-toolkit if you find something new.
+
+### Workflow
+
+1. **Capture** a long session: enable the plugin, press `s` to start
+   saving, let it run for 15-30 minutes during a good satellite pass.
+2. **Verify** the log contains messages: `head iridium_logs/*.raw` —
+   should see many `RAW:` lines with the gr-iridium format.
+3. **Analyse** with default filter:
+   ```bash
+   uv run python -m plugins.iridium_decoder.analyze_raw iridium_logs
+   ```
+4. **Iterate** on the filter if too many rejects:
+   - Too many `nsyms < 40` rejections → your bursts are getting cut
+     off; either lower `--min-nsyms 20` or investigate why the demod
+     terminates early (SNR / burst-end threshold)
+   - Too many `off_channel` rejections → your tuner frequency is
+     off; check `state.center_hz` matches Iridium band alignment
+5. **Cross-reference** the top-3 patterns with FORMAT.md to see if
+   they correspond to known-but-unparsed LCW types.
+
 ## Comparison with the earlier shell-out pipeline
 
 | | External `iridium-extractor` + `iridium-parser` | `iridium_decoder` (this plugin) |
