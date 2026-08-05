@@ -19,6 +19,19 @@ version) so that timestamps can be computed without integer overflow.
 import math
 import numpy as np
 
+# Optional pyFFTW backend — 2-3× faster than numpy for the ~977 FFTs/s
+# tagger workload at 2 MHz.  Falls back to numpy.fft silently if pyfftw
+# isn't installed, so the plugin still works out of the box.
+try:
+    import pyfftw
+    import pyfftw.interfaces.numpy_fft as _fft_backend
+    # Cache plans so repeated FFTs of the same size hit the fast path
+    pyfftw.interfaces.cache.enable()
+    _HAS_PYFFTW = True
+except ImportError:
+    _fft_backend = np.fft
+    _HAS_PYFFTW = False
+
 
 class Burst:
     __slots__ = ('id', 'start', 'stop', 'last_active', 'center_bin',
@@ -115,7 +128,7 @@ class FftBurstTagger:
     def _magnitude_squared_shifted(self, samples: np.ndarray) -> np.ndarray:
         """FFT of `samples * window`, magnitude squared, shifted so DC is
         in the middle (bin fft_size/2)."""
-        spec = np.fft.fft(samples * self.window)
+        spec = _fft_backend.fft(samples * self.window)
         mag2 = (spec.real ** 2 + spec.imag ** 2).astype(np.float32)
         # C++ does the shift manually via two half-copies:
         #   [d_fft_size/2 : d_fft_size] ← FFT bins [d_fft_size/2 : end]

@@ -30,6 +30,17 @@ import scipy.signal as sig
 
 from . import iridium
 
+# Optional pyFFTW backend — used per-burst for CFO estimation FFT and
+# the sync-word correlation forward/inverse FFTs.  For a busy pass
+# (~50 bursts/s) this adds up to significant CPU savings.  Falls back
+# to numpy.fft silently if pyfftw isn't installed.
+try:
+    import pyfftw
+    import pyfftw.interfaces.numpy_fft as _fft_backend
+    pyfftw.interfaces.cache.enable()
+except ImportError:
+    _fft_backend = np.fft
+
 
 def _firdes_low_pass_2(gain: float, sample_rate: float, cutoff_freq: float,
                        transition_width: float, attenuation_dB: float
@@ -310,8 +321,12 @@ class BurstDownmix:
         # per-rate to avoid re-designing on every burst.
         input_taps = self._get_input_taps(int(input_sample_rate))
         decimation = int(round(input_sample_rate / self.output_sample_rate))
-        # C++ uses filterNdec which is FIR filter + decimate in one pass
-        filtered = np.convolve(shifted, input_taps, mode='valid')
+        # Overlap-add convolution is O(N log M) vs np.convolve's O(N*M).
+        # For a 200 000-sample burst × 113-tap FIR (2 MHz input), np is
+        # already fast; but at 10 MHz input the filter grows to 559 taps
+        # and 1 M samples per burst, where oaconvolve is 5-10× faster.
+        # C++ uses filterNdec which is FIR filter + decimate in one pass.
+        filtered = sig.oaconvolve(shifted, input_taps, mode='valid')
         decimated = filtered[::decimation].astype(np.complex64)
 
         sample_rate = input_sample_rate / decimation
@@ -380,7 +395,7 @@ class BurstDownmix:
         fft_input = np.zeros(self.cfo_fft_size * self.cfo_fft_over_size,
                              dtype=np.complex64)
         fft_input[:self.cfo_fft_size] = windowed
-        fft_out = np.fft.fft(fft_input)
+        fft_out = _fft_backend.fft(fft_input)
         mag2 = np.abs(fft_out) ** 2
 
         max_index_shifted = int(np.argmax(mag2))
@@ -428,10 +443,10 @@ class BurstDownmix:
         search_len = min(self.sync_search_len, len(rrc_out))
         corr_input = np.zeros(self.corr_fft_size, dtype=np.complex64)
         corr_input[:search_len] = rrc_out[:search_len]
-        corr_fft = np.fft.fft(corr_input)
+        corr_fft = _fft_backend.fft(corr_input)
 
-        dl_ifft = np.fft.ifft(corr_fft * self.dl_sync_template_fft)
-        ul_ifft = np.fft.ifft(corr_fft * self.ul_sync_template_fft)
+        dl_ifft = _fft_backend.ifft(corr_fft * self.dl_sync_template_fft)
+        ul_ifft = _fft_backend.ifft(corr_fft * self.ul_sync_template_fft)
         dl_mag2 = np.abs(dl_ifft) ** 2
         ul_mag2 = np.abs(ul_ifft) ** 2
 

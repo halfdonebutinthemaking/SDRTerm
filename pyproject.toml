@@ -12,6 +12,12 @@ dependencies = [
     "crcmod>=1.7",
 ]
 
+[project.optional-dependencies]
+perf = [
+    "numba>=0.66.0",
+    "pyfftw>=0.15.1",
+]
+
 [dependency-groups]
 dev = [
     "pytest>=8.0",
