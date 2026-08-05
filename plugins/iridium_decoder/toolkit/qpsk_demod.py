@@ -153,6 +153,115 @@ def numba_active() -> bool:
     return True
 
 
+# ── Pure-Python fallback versions (for runtime A/B testing) ─────────────
+# These implement the exact same math as the JIT'd kernels above but
+# without Numba, so users can toggle at runtime via the `n` key to
+# measure Numba's actual impact on their workload.
+
+def _pll_py(x, alpha):
+    """Pure-Python first-order PLL — same math as _pll_jit."""
+    n = len(x)
+    y = np.empty(n, dtype=np.complex64)
+    phi_r = 1.0
+    phi_i = 0.0
+    total_phase = 0.0
+    for i in range(n):
+        xr = float(x[i].real)
+        xi = float(x[i].imag)
+        yr = xr * phi_r - xi * phi_i
+        yi = xr * phi_i + xi * phi_r
+        y[i] = complex(yr, yi)
+        if yr >= 0.0 and yi >= 0.0:
+            xhr, xhi = M_SQRT1_2, M_SQRT1_2
+        elif yr >= 0.0 and yi < 0.0:
+            xhr, xhi = M_SQRT1_2, -M_SQRT1_2
+        elif yr < 0.0 and yi < 0.0:
+            xhr, xhi = -M_SQRT1_2, -M_SQRT1_2
+        else:
+            xhr, xhi = -M_SQRT1_2, M_SQRT1_2
+        er_r = xhr * yr + xhi * yi
+        er_i = xhr * yi - xhi * yr
+        er_mag = math.sqrt(er_r * er_r + er_i * er_i)
+        if er_mag < 1e-30:
+            continue
+        pht_r = er_r / er_mag
+        pht_i = er_i / er_mag
+        phase_t = math.atan2(pht_i, pht_r) * alpha
+        total_phase += phase_t
+        f_r = math.cos(phase_t)
+        f_i = math.sin(phase_t)
+        new_r = f_r * phi_r + f_i * phi_i
+        new_i = f_r * phi_i - f_i * phi_r
+        m = math.sqrt(new_r * new_r + new_i * new_i)
+        if m > 1e-30:
+            phi_r = new_r / m
+            phi_i = new_i / m
+        else:
+            phi_r = new_r
+            phi_i = new_i
+    return y, total_phase
+
+
+def _slice_py(burst_r, burst_i, mags):
+    """Pure-Python QPSK slicer — same math as _slice_jit."""
+    n_syms = burst_r.shape[0]
+    symbols = np.empty(n_syms, dtype=np.int32)
+    offsets = np.empty(n_syms, dtype=np.float32)
+    max_mag = 0.0
+    n = 0
+    low_count = 0
+    PI = math.pi
+    for i in range(n_syms):
+        m = float(mags[i])
+        if m > max_mag:
+            max_mag = m
+        r = float(burst_r[i])
+        im = float(burst_i[i])
+        if r >= 0.0 and im >= 0.0:
+            symbols[i] = 0
+        elif r >= 0.0 and im < 0.0:
+            symbols[i] = 3
+        elif r < 0.0 and im < 0.0:
+            symbols[i] = 2
+        else:
+            symbols[i] = 1
+        phase_int = int((math.atan2(im, r) + PI) * 180.0 / PI)
+        offsets[i] = 45.0 - float(phase_int % 90)
+        n += 1
+        if m < max_mag / 8.0:
+            low_count += 1
+            if low_count == 3:
+                n -= 3
+                break
+        else:
+            low_count = 0
+    if n <= 0:
+        return 0, symbols[:0], 0.0, 0
+    n_ok = 0
+    total_mag = 0.0
+    for i in range(n):
+        if abs(offsets[i]) <= 22.0:
+            n_ok += 1
+        total_mag += float(mags[i])
+    level = total_mag / n
+    confidence = int(100.0 * n_ok / n)
+    return n, symbols[:n], level, confidence
+
+
+# ── Runtime dispatch ───────────────────────────────────────────────────
+# Default: use Numba if available.  QpskDemod checks USE_JIT before every
+# call so `set_use_jit(False)` takes effect on the next burst without a
+# plugin restart.
+USE_JIT = HAS_NUMBA
+
+
+def set_use_jit(enabled: bool):
+    """Enable or disable Numba dispatch at runtime.  No-op if Numba
+    isn't installed (USE_JIT stays False)."""
+    global USE_JIT
+    USE_JIT = bool(enabled) and HAS_NUMBA
+
+
 class QpskDemod:
     def __init__(self, alpha: float = 1.0 / 5.0):
         self.alpha = alpha
@@ -164,15 +273,18 @@ class QpskDemod:
     # ── First-order PLL (from gr-burst/synchronizer_v4_impl.cc) ──────────
     @staticmethod
     def _qpsk_first_order_pll(x: np.ndarray, alpha: float):
-        """Thin wrapper around the (optionally Numba-JIT'd) PLL kernel."""
+        """Dispatches to the JIT'd or pure-Python PLL depending on
+        USE_JIT (togglable at runtime via set_use_jit)."""
         x = np.ascontiguousarray(x, dtype=np.complex64)
-        return _pll_jit(x, float(alpha))
+        if USE_JIT:
+            return _pll_jit(x, float(alpha))
+        return _pll_py(x, float(alpha))
 
     # ── Slicer + confidence ─────────────────────────────────────────────
     @staticmethod
     def _demod_qpsk(burst: np.ndarray) -> tuple:
-        """Wrapper around the (optionally Numba-JIT'd) slicer.  Returns
-        (n_usable, symbols, level, confidence).
+        """Dispatches to the JIT'd or pure-Python slicer depending on
+        USE_JIT.  Returns (n_usable, symbols, level, confidence).
 
         symbols mapping: (I≥0,Q≥0)→0, (I<0,Q≥0)→1, (I<0,Q<0)→2, (I≥0,Q<0)→3
         """
@@ -180,13 +292,14 @@ class QpskDemod:
         if n_syms == 0:
             return 0, np.zeros(0, dtype=np.int32), 0.0, 0
         # Split into contiguous real / imag / mag arrays so Numba can
-        # index them tightly (numba supports complex but real-arrays are
-        # a hair faster and portable across older versions).
+        # index them tightly (also fine for the pure-Python path).
         burst = np.ascontiguousarray(burst, dtype=np.complex64)
         burst_r = np.ascontiguousarray(burst.real, dtype=np.float32)
         burst_i = np.ascontiguousarray(burst.imag, dtype=np.float32)
         mags    = np.abs(burst).astype(np.float32)
-        return _slice_jit(burst_r, burst_i, mags)
+        if USE_JIT:
+            return _slice_jit(burst_r, burst_i, mags)
+        return _slice_py(burst_r, burst_i, mags)
 
     # ── UW check (Hamming distance in symbol space) ─────────────────────
     @staticmethod

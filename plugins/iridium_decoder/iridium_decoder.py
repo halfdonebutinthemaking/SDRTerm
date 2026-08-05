@@ -27,15 +27,22 @@ from .toolkit.fft_burst_tagger import (
 from .toolkit.burst_downmix import BurstDownmix
 from .toolkit.qpsk_demod import (
     QpskDemod, HAS_NUMBA, NUMBA_VERSION, numba_active,
+    set_use_jit, USE_JIT,
 )
+from .toolkit import qpsk_demod as _qpsk_mod
 from .toolkit import iridium
 
 
 def _accelerators_summary() -> str:
-    """Human-readable status of the optional performance backends."""
+    """Human-readable status of the optional performance backends.
+    Reflects the runtime dispatch state (USE_JIT toggle), not just
+    whether numba is installed at import time."""
     parts = []
     if HAS_NUMBA:
-        parts.append('numba' + ('*' if numba_active() else '-cold'))
+        if _qpsk_mod.USE_JIT:
+            parts.append('numba' + ('*' if numba_active() else '-cold'))
+        else:
+            parts.append('numba-OFF')   # installed but toggled off via `n`
     else:
         parts.append('python')
     if HAS_PYFFTW:
@@ -89,7 +96,7 @@ _VIEW_MESSAGES = 1   # parsed message types via vendored parser
 class IridiumDecoderPlugin(Decoder):
     name            = 'iridium_decode'
     key             = 'j'
-    key_help        = 'r=clear  b=both-bin  m=view  s=save  +/-=thresh'
+    key_help        = 'r=clear b=both-bin m=view s=save +/-=thresh n=numba'
     # Detection threshold bounds — matches iridium plugin's tuning limits.
     _MIN_THRESH_DB  = 6.0
     _MAX_THRESH_DB  = 30.0
@@ -442,6 +449,11 @@ class IridiumDecoderPlugin(Decoder):
             new_th = max(self._MIN_THRESH_DB,
                          self._threshold_db - self._THRESH_STEP_DB)
             self._set_threshold(new_th)
+            return True
+        if key == ord('n'):
+            # Toggle Numba dispatch at runtime.  No-op if numba isn't
+            # installed (dispatch stays on pure Python).
+            set_use_jit(not _qpsk_mod.USE_JIT)
             return True
         return False
 
