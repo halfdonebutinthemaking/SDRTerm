@@ -96,8 +96,8 @@ class FftBurstTagger:
         # The ENBW correction accounts for the fact that our per-bin
         # magnitude includes energy from neighboring frequencies via
         # window leakage.
-        self.threshold = (
-            (10 ** (threshold_db / 10)) / self.history_size / self.window_enbw)
+        self.threshold_db = float(threshold_db)
+        self.threshold = self._compute_threshold(self.threshold_db)
 
         if max_bursts:
             self.max_bursts = int(max_bursts)
@@ -123,6 +123,17 @@ class FftBurstTagger:
         self.bursts: list = []
         self.new_bursts: list = []
         self.gone_bursts: list = []
+
+    def _compute_threshold(self, threshold_db: float) -> float:
+        return ((10 ** (threshold_db / 10))
+                / self.history_size / self.window_enbw)
+
+    def set_threshold_db(self, threshold_db: float):
+        """Adjust the detection threshold at runtime.  Higher = fewer
+        marginal detections, lower CPU load per second, but may miss
+        weak bursts.  Safe to call while process_frame is running."""
+        self.threshold_db = float(threshold_db)
+        self.threshold = self._compute_threshold(self.threshold_db)
 
     # ── FFT + magnitude² ─────────────────────────────────────────────────
     def _magnitude_squared_shifted(self, samples: np.ndarray) -> np.ndarray:

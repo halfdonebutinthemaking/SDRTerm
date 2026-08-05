@@ -90,6 +90,34 @@ mode is a pragmatic fix while the root cause is investigated).
 | `r` | Clear the decoded-burst list + reset counters |
 | `b` | Toggle both-bin mode (2× decodes but 2× CPU) |
 | `m` | Toggle view: raw bits ↔ parsed messages (VOC / IRI / ISY / ...) |
+| `s` | Save session to a `.raw` log for offline analysis |
+| `+` / `-` | Detection threshold up / down by 2 dB (see below) |
+
+### Detection threshold tuning
+
+`+` / `-` adjust the tagger's SNR threshold (range 6-30 dB, default 14).
+This is the **single biggest CPU-vs-completeness knob** — every detected
+burst costs the same downstream DSP work whether or not it eventually
+decodes, so raising the threshold trades marginal weak-burst decodes
+for headroom against `Dropped:`.
+
+Benchmark on a fixed 30 s indoor RTL-SDR capture (2 MHz sample rate,
+both-bin off):
+
+  | threshold | detections | A:OK | wall time | realtime factor |
+  |-----------|-----------:|-----:|----------:|----------------:|
+  | 14 dB     |       1170 |   19 |    10.1 s |   2.9× realtime |
+  | 18 dB     |          2 |    0 |     2.0 s |  14.6× realtime |
+  | 22 dB     |          0 |    0 |     2.0 s |  14.6× realtime |
+
+Indoor / weak-signal captures need low thresholds (marginal bursts
+decode).  Outdoor / strong-signal captures work with much higher
+thresholds and reclaim large amounts of CPU headroom.  If `Dropped:`
+is climbing during a satellite pass, **push threshold up 2 dB at a
+time until it stabilises**.  You can then decide whether to back
+off if you're missing decodes you care about.
+
+The threshold is persisted across sessions via SDRTerm's preset system.
 
 ### Message view
 

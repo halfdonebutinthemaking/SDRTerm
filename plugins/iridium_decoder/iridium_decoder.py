@@ -70,7 +70,12 @@ _VIEW_MESSAGES = 1   # parsed message types via vendored parser
 class IridiumDecoderPlugin(Decoder):
     name            = 'iridium_decode'
     key             = 'j'
-    key_help        = 'r=clear  b=both-bin  m=view  s=save'
+    key_help        = 'r=clear  b=both-bin  m=view  s=save  +/-=thresh'
+    # Detection threshold bounds — matches iridium plugin's tuning limits.
+    _MIN_THRESH_DB  = 6.0
+    _MAX_THRESH_DB  = 30.0
+    _THRESH_STEP_DB = 2.0
+    _DEFAULT_THRESH_DB = 14.0
     min_sample_rate = 2_000_000
     realtime        = False      # runs in bg worker; process() just enqueues
     bg_queue_depth  = 8
@@ -108,6 +113,7 @@ class IridiumDecoderPlugin(Decoder):
         self._demod:   QpskDemod      = None
         self._sample_rate = 0
         self._center_hz   = 0
+        self._threshold_db = self._DEFAULT_THRESH_DB
 
     # ── lifecycle ───────────────────────────────────────────────────────
 
@@ -121,7 +127,7 @@ class IridiumDecoderPlugin(Decoder):
         self._sample_rate = int(state.bw_hz)
         self._center_hz   = int(state.center_hz)
         self._tagger  = FftBurstTagger(sample_rate=self._sample_rate,
-                                       threshold_db=14.0,
+                                       threshold_db=self._threshold_db,
                                        center_frequency=float(self._center_hz))
         self._downmix = BurstDownmix(output_sample_rate=500_000)
         self._demod   = QpskDemod()
@@ -408,7 +414,22 @@ class IridiumDecoderPlugin(Decoder):
         if key == ord('s'):
             self._toggle_save()
             return True
+        if key in (ord('+'), ord('=')):
+            new_th = min(self._MAX_THRESH_DB,
+                         self._threshold_db + self._THRESH_STEP_DB)
+            self._set_threshold(new_th)
+            return True
+        if key in (ord('-'), ord('_')):
+            new_th = max(self._MIN_THRESH_DB,
+                         self._threshold_db - self._THRESH_STEP_DB)
+            self._set_threshold(new_th)
+            return True
         return False
+
+    def _set_threshold(self, threshold_db: float):
+        self._threshold_db = float(threshold_db)
+        if self._tagger is not None:
+            self._tagger.set_threshold_db(self._threshold_db)
 
     def status_text(self, state: AppState, result: dict) -> str:
         if not result:
@@ -444,11 +465,12 @@ class IridiumDecoderPlugin(Decoder):
         elif self._save_status:
             save_note = '   (' + self._save_status + ')'
         stats = ('Detected: {}   A:OK (UW): {} ({:.0f}%)   '
-                 'Queue: {}   Dropped: {}   both-bin: {}{}').format(
+                 'Queue: {}   Dropped: {}   both-bin: {}   thresh: {:.0f}dB{}'
+                 ).format(
             nb, na, pct,
             result.get('queue_len', 0),
             result.get('n_dropped', 0),
-            both, save_note)
+            both, self._threshold_db, save_note)
         try:
             screen_obj.addstr(3, 2, stats[:cols - 4], curses.A_BOLD)
         except curses.error:
@@ -657,7 +679,21 @@ class IridiumDecoderPlugin(Decoder):
     # ── state persistence ───────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {}
+        return {
+            'threshold_db': self._threshold_db,
+            'try_both':     self._try_both,
+        }
 
     def load_state(self, d: dict) -> None:
-        pass
+        if not isinstance(d, dict):
+            return
+        try:
+            th = float(d.get('threshold_db', self._DEFAULT_THRESH_DB))
+            self._threshold_db = max(self._MIN_THRESH_DB,
+                                      min(self._MAX_THRESH_DB, th))
+        except (TypeError, ValueError):
+            pass
+        try:
+            self._try_both = bool(d.get('try_both', _DEFAULT_TRY_BOTH_BINS))
+        except Exception:
+            pass
