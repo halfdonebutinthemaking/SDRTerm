@@ -21,6 +21,28 @@ os.environ.setdefault('ESCDELAY', '25')
 # carriage return, producing stair-step output in the shell after we exit.
 # `stty sane` is POSIX, idempotent, and takes microseconds — safe to run
 # on every exit whether or not curses cleaned up correctly.
+# macOS App Nap will suspend Terminal.app (and everything hosted in it)
+# when there's no keyboard / mouse activity for a while.  That includes
+# the SDR async-read thread and our plugin's bg workers — users see
+# the plugin "stop working" until they scroll a window, which briefly
+# wakes the terminal.  Spawning `caffeinate -is -w $PID` on startup
+# prevents this: caffeinate holds a system-level activity assertion
+# for as long as our process is alive, then exits automatically when
+# we do.  No-op on non-macOS.
+_caffeinate_proc = None
+if sys.platform == 'darwin':
+    try:
+        _caffeinate_proc = subprocess.Popen(
+            ['caffeinate', '-is', '-w', str(os.getpid())],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except (FileNotFoundError, OSError):
+        # caffeinate should always be present on macOS; if not, silent
+        # no-op — the plugin will still work, just with App Nap risk.
+        pass
+
+
 def _restore_terminal_on_exit():
     try:
         curses.endwin()
