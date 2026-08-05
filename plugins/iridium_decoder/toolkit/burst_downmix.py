@@ -100,18 +100,17 @@ class BurstDownmix:
         self.sync_search_len = ((iridium.PREAMBLE_LENGTH_LONG +
                                   iridium.UW_LENGTH + 8) * self.output_sps)
 
-        # Input FIR: exact port of gr's firdes.low_pass_2(gain=1,
-        # sr=input_sr, cutoff=burst_width/2=20 kHz, transition=burst_width=40 kHz,
-        # attenuation=40 dB).  gr uses Parks-McClellan (Remez) — much shorter
-        # (~113 taps at 2 MHz input) than our previous Hamming firwin(401).
-        # An over-designed filter cuts too tight and removes signal edges.
-        if input_taps is None:
-            # Assume 2 MHz input; caller can override for other sample rates
-            input_taps = _firdes_low_pass_2(
-                gain=1.0, sample_rate=2_000_000,
-                cutoff_freq=40_000 / 2, transition_width=40_000,
-                attenuation_dB=40.0)
-        self.input_taps = np.asarray(input_taps, dtype=np.float32)
+        # Input FIR: gr's firdes.low_pass_2(gain=1, sr=input_sr,
+        # cutoff=burst_width/2=20 kHz, transition=burst_width=40 kHz,
+        # attenuation=40 dB).  Parks-McClellan (Remez) design.
+        #
+        # The filter DEPENDS on the actual input sample rate (which may
+        # be 2, 4, 5, 8, 10, 20 MSPS depending on SDR).  We design lazily
+        # in `process()` on first use and cache by rate — this way the
+        # constructor doesn't need to know the input rate, and mixed-
+        # rate operation (unlikely but possible) still works.
+        self._input_taps_override = input_taps
+        self._input_taps_cache: dict = {}   # {input_sr_int → taps}
 
         # Start-finder FIR: matches gr's low_pass_2(1, burst_sr, 5e3/2,
         # 10e3/2, 60) — narrow low-pass on |signal|² for envelope detection
@@ -136,6 +135,26 @@ class BurstDownmix:
          self.ul_sync_template_fft,
          self.corr_fft_size,
          self.sync_word_len) = self._precompute_sync_templates()
+
+    def _get_input_taps(self, input_sample_rate: int) -> np.ndarray:
+        """Lazy-designed input LPF, cached per input sample rate.
+        cutoff = 20 kHz, transition = 40 kHz, stopband atten = 40 dB
+        (matches gr-iridium's flowgraph).  Number of taps scales up
+        with sample rate (Kaiser formula):
+              N ≈ (atten - 7.95) / (14.36 * transition/fs) + 1
+        so for higher SRs we get a longer filter, but the passband
+        stays at ±20 kHz around DC in Hz-space."""
+        if self._input_taps_override is not None:
+            return np.asarray(self._input_taps_override, dtype=np.float32)
+        cached = self._input_taps_cache.get(input_sample_rate)
+        if cached is not None:
+            return cached
+        taps = _firdes_low_pass_2(
+            gain=1.0, sample_rate=input_sample_rate,
+            cutoff_freq=40_000 / 2, transition_width=40_000,
+            attenuation_dB=40.0)
+        self._input_taps_cache[input_sample_rate] = taps
+        return taps
 
     # ── Filter construction (helpers) ────────────────────────────────────
     @staticmethod
@@ -285,10 +304,14 @@ class BurstDownmix:
         # Frequency correction in absolute Hz
         center_frequency = center_frequency + relative_frequency * input_sample_rate
 
-        # Low-pass + decimate
+        # Low-pass + decimate.  The FIR is designed for the SPECIFIC
+        # input sample rate — cutoff / transition are in Hz, so a filter
+        # designed for 2 MHz has the wrong cutoff at 20 MHz.  Cache
+        # per-rate to avoid re-designing on every burst.
+        input_taps = self._get_input_taps(int(input_sample_rate))
         decimation = int(round(input_sample_rate / self.output_sample_rate))
         # C++ uses filterNdec which is FIR filter + decimate in one pass
-        filtered = np.convolve(shifted, self.input_taps, mode='valid')
+        filtered = np.convolve(shifted, input_taps, mode='valid')
         decimated = filtered[::decimation].astype(np.complex64)
 
         sample_rate = input_sample_rate / decimation
