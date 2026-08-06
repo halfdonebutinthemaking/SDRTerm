@@ -576,6 +576,245 @@ handles this stage; see the \texttt{plugins/iridium\_decoder/parser/}
 directory.
 
 %═══════════════════════════════════════════════════════════════════
+\section{Worked Example: One Burst End-to-end}
+%═══════════════════════════════════════════════════════════════════
+
+This section follows the same data through every stage as concrete
+numbers, so each transformation can be checked against the formulas.
+
+\subsection{Raw bytes to complex baseband}
+
+Suppose the RTL-SDR delivers the four bytes
+$\{124, 130, 132, 122\}$ (unsigned). These become two complex samples
+via equation~(3):
+\begin{align*}
+x[0] &= \frac{124 - 127.4}{128} + j\,\frac{130 - 127.4}{128}
+      = -0.0266 + j\,0.0203, \\
+x[1] &= \frac{132 - 127.4}{128} + j\,\frac{122 - 127.4}{128}
+      =  0.0359 - j\,0.0422.
+\end{align*}
+Two IQ bytes $\Rightarrow$ one complex64 sample. At $f_s = \SI{2}{MHz}$
+the SDR delivers 4~MB/s of raw bytes, i.e.\ $\SI{16}{MB/s}$ once
+converted to complex64.
+
+\subsection{Time domain: raw IQ across a burst}
+
+Below is a synthetic 4~ms window containing one Iridium burst at
+$\hat f_\text{rough} = \SI{+100}{kHz}$ from the tuner center, embedded in
+Gaussian noise at 15~dB SNR. The plot shows I only (Q is 90$^\circ$
+phase-shifted).
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=4cm,
+  xlabel={sample index (0 -- 8000, i.e.\ 4 ms at 2 MHz)},
+  ylabel={I amplitude},
+  xmin=0, xmax=8000, ymin=-0.6, ymax=0.6,
+  ytick={-0.5, 0, 0.5},
+  grid=both, grid style={draw=gray!20},
+  axis on top,
+]
+  % Envelope: burst present between samples 2000 and 6000
+  \addplot[thick, blue!70!black, domain=0:8000, samples=800, smooth]
+    { 0.45 * ((x > 2000 && x < 6000) ? 1 : 0)
+      * cos(deg(2*3.14159*100000*(x/2e6))) * (rand*0.1 + 0.9)
+      + 0.05 * rand };
+  \draw[dashed, red!60!black] (axis cs:2000,-0.6) -- (axis cs:2000,0.6)
+        node[above, font=\scriptsize, red!60!black]{burst start};
+  \draw[dashed, red!60!black] (axis cs:6000,-0.6) -- (axis cs:6000,0.6)
+        node[above, font=\scriptsize, red!60!black]{burst end};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Synthetic burst in raw IQ. The high-amplitude middle
+region is the 2~ms burst body; the outer regions are thermal noise.
+The tagger will detect this because the spectral energy inside the
+burst band exceeds threshold.}
+\end{center}
+
+\subsection{Spectrum before and after LPF}
+
+The wide input spectrum (2~MHz visible) contains our burst at $+100$~kHz
+plus interference from adjacent Iridium channels and out-of-band noise.
+The input FIR (113 taps, 20~kHz cutoff, 40~dB stopband) removes almost
+everything outside $\pm 20$~kHz of DC:
+
+\begin{center}
+\begin{tikzpicture}
+% Before
+\begin{axis}[
+  name=before,
+  width=6.5cm, height=4cm,
+  xlabel={frequency / kHz}, ylabel={magnitude / dB},
+  title={\scriptsize\emph{before input FIR}},
+  xmin=-1000, xmax=1000, ymin=-70, ymax=5,
+  grid=both, grid style={draw=gray!20},
+  title style={yshift=-6pt},
+]
+  % Noise floor with adjacent channel peaks
+  \addplot[thick, blue!70!black, domain=-1000:1000, samples=400]
+    { -50 + rand*4
+      + 40 * exp(-((x-100)/8)^2)      % our burst at +100 kHz
+      + 20 * exp(-((x+42)/6)^2)       % adjacent chan -42
+      + 20 * exp(-((x-142)/6)^2)      % adjacent chan +142
+      + 15 * exp(-((x-542)/8)^2)      % far interferer
+      + 12 * exp(-((x+700)/10)^2) };  % far interferer
+  \draw[dashed, red!60!black] (axis cs:-20,-70) -- (axis cs:-20,5);
+  \draw[dashed, red!60!black] (axis cs:20,-70) -- (axis cs:20,5);
+\end{axis}
+
+% After
+\begin{axis}[
+  name=after, at=(before.right of south east), anchor=left of south west,
+  xshift=1.4cm,
+  width=6.5cm, height=4cm,
+  xlabel={frequency / kHz}, ylabel={magnitude / dB},
+  title={\scriptsize\emph{after input FIR + decimate}},
+  xmin=-1000, xmax=1000, ymin=-70, ymax=5,
+  grid=both, grid style={draw=gray!20},
+  title style={yshift=-6pt},
+]
+  % Only content within ±20 kHz survives
+  \addplot[thick, blue!70!black, domain=-1000:1000, samples=400]
+    { -60 + rand
+      + 40 * exp(-((x-100)/8)^2)
+      - 50 * ((abs(x)>50) ? 1 : 0) };
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Input LPF removes ${\sim}\SI{50}{dB}$ of adjacent-
+channel and out-of-band content. Only the ${\pm}\SI{20}{kHz}$ around DC
+survives (marked with dashed lines on the ``before'' plot).}
+\end{center}
+
+\subsection{Constellation before and after PLL}
+
+After matched filtering and symbol-rate decimation, we have one complex
+value per symbol. Ideally they cluster at the four QPSK points
+$\{45^\circ, 135^\circ, 225^\circ, 315^\circ\}$. In practice, residual
+phase drift, noise, and imperfect CFO estimation cause smearing. The
+first-order PLL tracks and corrects the drift on the fly.
+
+\begin{center}
+\begin{tikzpicture}
+% Before PLL
+\begin{axis}[
+  name=before,
+  width=6.5cm, height=6.5cm,
+  xlabel={I}, ylabel={Q},
+  title={\scriptsize\emph{before PLL: residual phase drift}},
+  xmin=-1.5, xmax=1.5, ymin=-1.5, ymax=1.5,
+  grid=both, grid style={draw=gray!20},
+  axis equal image,
+  title style={yshift=-6pt},
+]
+  % Ideal quadrant markers
+  \draw[dashed, gray] (axis cs:-1.5,0)--(axis cs:1.5,0);
+  \draw[dashed, gray] (axis cs:0,-1.5)--(axis cs:0,1.5);
+  % Scatter — 4 clusters rotated by an increasing angle to show drift
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(deg(45  + 3.14159/4 + x*0.06)) + 0.08*rand},
+     {sin(deg(45  + 3.14159/4 + x*0.06)) + 0.08*rand});
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(deg(135 + 3.14159/4 + x*0.06)) + 0.08*rand},
+     {sin(deg(135 + 3.14159/4 + x*0.06)) + 0.08*rand});
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(deg(225 + 3.14159/4 + x*0.06)) + 0.08*rand},
+     {sin(deg(225 + 3.14159/4 + x*0.06)) + 0.08*rand});
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(deg(315 + 3.14159/4 + x*0.06)) + 0.08*rand},
+     {sin(deg(315 + 3.14159/4 + x*0.06)) + 0.08*rand});
+\end{axis}
+
+% After PLL
+\begin{axis}[
+  name=after, at=(before.right of south east), anchor=left of south west,
+  xshift=1.4cm,
+  width=6.5cm, height=6.5cm,
+  xlabel={I}, ylabel={Q},
+  title={\scriptsize\emph{after PLL: tight clusters}},
+  xmin=-1.5, xmax=1.5, ymin=-1.5, ymax=1.5,
+  grid=both, grid style={draw=gray!20},
+  axis equal image,
+  title style={yshift=-6pt},
+]
+  \draw[dashed, gray] (axis cs:-1.5,0)--(axis cs:1.5,0);
+  \draw[dashed, gray] (axis cs:0,-1.5)--(axis cs:0,1.5);
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(45)  + 0.05*rand}, {sin(45)  + 0.05*rand});
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(135) + 0.05*rand}, {sin(135) + 0.05*rand});
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(225) + 0.05*rand}, {sin(225) + 0.05*rand});
+  \addplot[only marks, mark=*, mark size=0.6pt, blue!60!black, samples=60,
+           domain=0:60]
+    ({cos(315) + 0.05*rand}, {sin(315) + 0.05*rand});
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{QPSK constellation before/after the first-order PLL.
+Without correction the clusters smear along the unit circle. The PLL
+tracks the drift symbol-by-symbol and pulls each cluster back to its
+ideal quadrant centre — confidence rises from $\sim 30\%$ to $\sim
+70\%$.}
+\end{center}
+
+\subsection{Numeric trace: symbols to bits}
+
+Suppose the first four QPSK symbols after the slicer are
+\begin{equation*}
+\mathbf{s} = (0,\, 2,\, 2,\, 3).
+\end{equation*}
+Differential decoding computes $b_k = (s_k - s_{k-1}) \bmod 4$, starting
+from an assumed $s_{-1} = 0$:
+\[
+\begin{array}{c|c|c|c|c}
+k & s_k & s_k - s_{k-1} & (s_k - s_{k-1}) \bmod 4 & \text{Gray bits} \\ \hline
+0 & 0 & 0-0 = 0 & 0 & \texttt{00} \\
+1 & 2 & 2-0 = 2 & 2 & \texttt{11} \\
+2 & 2 & 2-2 = 0 & 0 & \texttt{00} \\
+3 & 3 & 3-2 = 1 & 1 & \texttt{10} \\
+\end{array}
+\]
+Bit output so far: \texttt{00110010}. Compare the first 24 bits of the
+demodulated sequence against $\text{UW}_{\text{DL}} =
+\texttt{001100000011000011110011}$: if the Hamming distance is $\leq 2$,
+the burst passes A:OK.
+
+\subsection{Numeric example: detection threshold}
+
+For the user-set threshold $\gamma = 14$~dB with $H = 512$ history and
+$\mathrm{ENBW} = 1.72$:
+\begin{equation*}
+\theta \;=\; \frac{10^{14/10}}{512 \cdot 1.72}
+       \;=\; \frac{25.12}{880.6}
+       \;=\; 0.0285.
+\end{equation*}
+So the tagger fires when a bin's magnitude-squared divided by the
+history sum exceeds $0.0285$. If bin $k$ measures
+$P_m[k] = 30$ and the history sum is $S[k] = 500$, we get $R = 0.06 >
+\theta$: burst detected on that bin.
+
+\subsection{Numeric example: quadratic peak interpolation}
+
+Suppose the CFO-FFT peak is at bin $k^\star = 47$ with neighbouring
+magnitudes $|\alpha| = 100$, $|\beta| = 250$, $|\gamma| = 120$:
+\begin{equation*}
+\Delta k \;=\; \frac{1}{2}\cdot\frac{100 - 120}{100 - 2\cdot 250 + 120}
+       \;=\; \frac{1}{2}\cdot\frac{-20}{-280}
+       \;=\; +0.0357.
+\end{equation*}
+The refined peak is at $47.036$ bins, giving a $\sim 4\%$-of-a-bin
+correction on the fine CFO estimate. At a 16$\times$-oversampled FFT of
+size $M = 8192$ this is $\sim 2$~Hz precision, which is well below the
+$\sim 20$~Hz phase drift the PLL can handle.
+
+%═══════════════════════════════════════════════════════════════════
 \section{End-to-end Block Diagram}
 %═══════════════════════════════════════════════════════════════════
 
