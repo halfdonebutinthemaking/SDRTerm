@@ -351,6 +351,60 @@ window's equivalent noise bandwidth (ENBW $=1.72$ for Blackman):
 Because $\bar{P}[k]$ is only updated in frames without active bursts, the
 noise-floor estimate does not drift upward during dense passes.
 
+\subsection{Detection in action}
+
+Below is a snapshot of one FFT frame's \emph{relative magnitude}
+$R_m[k] = P_m[k] / S[k]$. The horizontal dashed line is the threshold
+$\theta$ set from user input $\gamma = 14$~dB (i.e.\ $\theta = 0.0285$).
+Three peaks exceed threshold — the tagger extracts them, sorted by
+magnitude, then applies the burst-mask (\S\ref{sec:tracking}) to drop
+any that fall within $\pm w/2$ bins of an already-active burst.
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=5cm,
+  xlabel={FFT bin index $k$}, ylabel={$R_m[k]$ (linear)},
+  xmin=0, xmax=2048, ymin=0, ymax=0.12,
+  ytick={0, 0.03, 0.06, 0.09, 0.12},
+  yticklabel style={/pgf/number format/fixed},
+  grid=both, grid style={draw=gray!20},
+  axis on top,
+]
+  % Noise floor plus three peaks
+  \addplot[thick, blue!70!black, domain=0:2048, samples=400]
+    { 0.008 + rand*0.003
+      + 0.09 * exp(-((x-380)/25)^2)     % first burst
+      + 0.06 * exp(-((x-1100)/25)^2)    % second burst
+      + 0.04 * exp(-((x-1720)/25)^2) }; % third burst
+  % Threshold line
+  \draw[dashed, red!70!black, thick]
+    (axis cs:0, 0.0285) -- (axis cs:2048, 0.0285)
+    node[left, font=\scriptsize, red!70!black, xshift=-1cm, yshift=0.3cm]
+      {$\theta = 0.0285$ (\SI{14}{dB})};
+  % Peak markers
+  \node[circle, draw=orange!80!black, fill=orange!20, inner sep=1.5pt]
+    at (axis cs:380,  0.098) {};
+  \node[circle, draw=orange!80!black, fill=orange!20, inner sep=1.5pt]
+    at (axis cs:1100, 0.068) {};
+  \node[circle, draw=orange!80!black, fill=orange!20, inner sep=1.5pt]
+    at (axis cs:1720, 0.048) {};
+  \node[font=\scriptsize, orange!80!black, above=1mm] at (axis cs:380, 0.098)  {burst A};
+  \node[font=\scriptsize, orange!80!black, above=1mm] at (axis cs:1100, 0.068) {burst B};
+  \node[font=\scriptsize, orange!80!black, above=1mm] at (axis cs:1720, 0.048) {burst C};
+  % DC bin marker
+  \draw[dotted, gray!50] (axis cs:1024,0) -- (axis cs:1024,0.12);
+  \node[font=\tiny, gray!60!black] at (axis cs:1024, 0.115) {DC (bin $N/2$)};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{One FFT frame's relative-magnitude spectrum after
+dividing by the moving-average baseline. The threshold $\theta$
+(dashed red) separates candidate bursts from noise. Three peaks
+qualify here; the tagger extracts them, sorts by magnitude, and
+either creates new bursts (if the burst-mask allows) or extends
+existing ones.}
+\end{center}
+
 \subsection{Threshold intuition}
 
 For a background of Gaussian noise, $P_m[k]$ is chi-squared distributed
@@ -389,6 +443,7 @@ threshold below the burst SNR catches them, above rejects them.}
 \end{center}
 
 \subsection{Burst tracking}
+\label{sec:tracking}
 
 For each bin that is above threshold in the current frame, the detector
 either (a) marks an existing burst on that bin as ``still active'' if one
@@ -397,6 +452,59 @@ centre bin has been below threshold for \texttt{burst\_post\_len} samples
 (typically \SI{16}{ms}). Bins within $\pm w/2$ of an active burst are
 masked out of the peak search so a single wideband burst produces only
 one detection.
+
+\begin{center}
+\begin{tikzpicture}[
+  frame/.style={draw, thin, gray!40, minimum width=0.28cm, minimum height=0.28cm},
+  active/.style={draw, thin, black, fill=blue!40,   minimum width=0.28cm, minimum height=0.28cm},
+  post/.style={draw, thin, black, fill=blue!15,     minimum width=0.28cm, minimum height=0.28cm},
+  masked/.style={draw, thin, black, fill=orange!30, minimum width=0.28cm, minimum height=0.28cm},
+  lbl/.style={font=\tiny\ttfamily},
+]
+  % axes
+  \foreach \x in {0,...,29} { \node[frame] at (\x*0.32, 0) {}; }
+  \foreach \y in {0,...,7}  { \foreach \x in {0,...,29} {
+        \node[frame] at (\x*0.32, \y*0.32) {}; } }
+
+  % Burst 1 on bin ~2, frames 3..11 active, 12..14 post
+  \foreach \x in {3,4,5,6,7,8,9,10,11} { \node[active] at (\x*0.32, 2*0.32) {}; }
+  \foreach \x in {12,13,14}            { \node[post]   at (\x*0.32, 2*0.32) {}; }
+  \foreach \x in {3,...,14}            { \node[masked] at (\x*0.32, 1*0.32) {};
+                                          \node[masked] at (\x*0.32, 3*0.32) {}; }
+
+  % Burst 2 on bin ~6, frames 8..21 active, 22..24 post
+  \foreach \x in {8,9,10,11,12,13,14,15,16,17,18,19,20,21} { \node[active] at (\x*0.32, 6*0.32) {}; }
+  \foreach \x in {22,23,24}            { \node[post]   at (\x*0.32, 6*0.32) {}; }
+  \foreach \x in {8,...,24}            { \node[masked] at (\x*0.32, 5*0.32) {};
+                                          \node[masked] at (\x*0.32, 7*0.32) {}; }
+
+  % Isolated single-frame peak (noise trigger) on bin 4, frame 26 — never
+  % becomes a "gone burst" because post_len countdown ends without another
+  % detection on the same bin
+  \node[active] at (26*0.32, 4*0.32) {};
+  \foreach \x in {27,28} { \node[post] at (\x*0.32, 4*0.32) {}; }
+
+  % axis labels
+  \draw[-{Latex}] (-0.4, 0) -- (30*0.32+0.3, 0)
+        node[right, font=\scriptsize]{time (FFT frames $\to$)};
+  \draw[-{Latex}] (-0.2, -0.4) -- (-0.2, 8*0.32)
+        node[above, font=\scriptsize]{bin $k$};
+
+  % legend
+  \node[active, label=right:{\scriptsize active}]  at ( 0,  -1.4) {};
+  \node[post,   label=right:{\scriptsize post-len}] at ( 2.5,-1.4) {};
+  \node[masked, label=right:{\scriptsize masked (adjacent)}]  at ( 5.2,-1.4) {};
+\end{tikzpicture}
+\captionof{figure}{Two bursts on different bins, tracked across
+consecutive FFT frames. Dark cells are frames where the bin exceeded
+threshold; light-blue tails are the ``post-length'' quiet period after
+the burst body (\SI{16}{ms} at \SI{2}{MHz}) — the burst is only marked
+``gone'' after the full post-length has elapsed with no re-trigger.
+Orange cells are the $\pm w/2$-bin masking around active bursts,
+preventing wide-carrier bursts from being fragmented into multiple
+detections. On the right, a short-lived noise trigger simply times
+out during its own post-length.}
+\end{center}
 
 \subsection{Output}
 
@@ -427,7 +535,50 @@ Multiplying the burst by a complex exponential
 \begin{equation}
 y[n] \;=\; x[n]\, e^{-j 2\pi \hat{f}_\text{rough} n / f_s}
 \end{equation}
-shifts the burst to \SI{0}{Hz} in baseband.
+shifts the burst to \SI{0}{Hz} in baseband. Geometrically the operation
+just rotates the whole spectrum leftward by $\hat{f}_\text{rough}$~Hz:
+
+\begin{center}
+\begin{tikzpicture}
+% Before shift
+\begin{axis}[
+  name=before,
+  width=6.5cm, height=3.8cm,
+  xlabel={frequency / kHz}, ylabel={magnitude},
+  title={\scriptsize\emph{before shift ($\hat f_\text{rough} = \SI{+300}{kHz}$)}},
+  xmin=-1000, xmax=1000, ymin=0, ymax=1.1,
+  ytick=\empty,
+  grid=both, grid style={draw=gray!20},
+  title style={yshift=-6pt},
+]
+  \addplot[thick, blue!70!black, domain=-1000:1000, samples=300]
+    { 0.1 + 0.9*exp(-((x-300)/25)^2) };
+  \draw[dashed, gray!60] (axis cs:0,0)--(axis cs:0,1.1);
+  \node[font=\tiny, gray!60!black] at (axis cs:0, 1.05) [above right] {DC};
+\end{axis}
+% After shift
+\begin{axis}[
+  name=after, at=(before.right of south east), anchor=left of south west,
+  xshift=1.4cm,
+  width=6.5cm, height=3.8cm,
+  xlabel={frequency / kHz}, ylabel={magnitude},
+  title={\scriptsize\emph{after $\times\ e^{-j 2\pi\, \hat f_\text{rough}\, n / f_s}$}},
+  xmin=-1000, xmax=1000, ymin=0, ymax=1.1,
+  ytick=\empty,
+  grid=both, grid style={draw=gray!20},
+  title style={yshift=-6pt},
+]
+  \addplot[thick, blue!70!black, domain=-1000:1000, samples=300]
+    { 0.1 + 0.9*exp(-((x-0)/25)^2) };
+  \draw[dashed, gray!60] (axis cs:0,0)--(axis cs:0,1.1);
+  \node[font=\tiny, gray!60!black] at (axis cs:0, 1.05) [above right] {DC};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Spectrum before and after the rough CFO shift. The
+burst has been slid from $+\SI{300}{kHz}$ to DC; adjacent-channel content
+(not shown) has moved with it and will now be attenuated by the
+subsequent low-pass filter.}
+\end{center}
 
 \subsection{Low-pass filter and decimation}
 
@@ -448,6 +599,56 @@ symbol):
 \begin{equation}
 z[m] \;=\; (h * y)[m D].
 \end{equation}
+
+Frequency response of the input FIR at $f_s = \SI{2}{MHz}$ (113 taps,
+40~dB stopband):
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=5.5cm,
+  xlabel={frequency / kHz},
+  ylabel={magnitude / dB},
+  xmin=-100, xmax=100, ymin=-60, ymax=5,
+  ytick={0, -10, -20, -30, -40, -50, -60},
+  xtick={-100, -80, -60, -40, -20, 0, 20, 40, 60, 80, 100},
+  xticklabel style={font=\tiny},
+  grid=both, grid style={draw=gray!20},
+  axis on top,
+]
+  % Idealised low-pass response: flat 0 dB in ±20 kHz, transition to
+  % -40 dB in ±40 kHz, floor at -50 dB
+  \addplot[thick, blue!70!black, domain=-100:100, samples=500]
+    { (abs(x) <= 20) ? 0
+      : ( (abs(x) <= 40) ? (0 + (abs(x)-20) * (-40 - 0) / (40 - 20))
+                         : -40 - 5 * exp(-((x+42)/30)^2) - 5 * exp(-((x-42)/30)^2)
+      ) };
+  % Highlight passband / transition / stopband regions
+  \draw[fill=green!15, draw=green!40, opacity=0.4]
+    (axis cs:-20, -60) rectangle (axis cs:20, 5);
+  \draw[fill=orange!15, draw=orange!40, opacity=0.4]
+    (axis cs:-40, -60) rectangle (axis cs:-20, 5);
+  \draw[fill=orange!15, draw=orange!40, opacity=0.4]
+    (axis cs: 20, -60) rectangle (axis cs: 40, 5);
+  \node[font=\tiny, green!30!black]  at (axis cs:  0, 4) {\emph{passband}};
+  \node[font=\tiny, orange!60!black] at (axis cs:-30, 4) {\emph{transition}};
+  \node[font=\tiny, orange!60!black] at (axis cs: 30, 4) {\emph{transition}};
+  \node[font=\tiny, blue!50!black]   at (axis cs:-70, 4) {\emph{stopband}};
+  \node[font=\tiny, blue!50!black]   at (axis cs: 70, 4) {\emph{stopband}};
+  % Threshold markers
+  \draw[dashed, red!60!black]
+    (axis cs:-100, -40) -- (axis cs:100, -40)
+    node[right, font=\tiny, red!60!black, xshift=-0.9cm, yshift=0.3cm]
+    {\SI{-40}{dB} stopband};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Input FIR magnitude response.  Passband (green)
+covers $\pm\SI{20}{kHz}$ around DC — comfortably wider than an Iridium
+channel's $\pm 10$~kHz half-width, so no in-band content is attenuated.
+The transition (orange) rolls off across $\SI{40}{kHz}$ (one full
+inter-channel spacing), and adjacent Iridium channels at $\pm 41.67$~kHz
+land in the stopband at $\leq -40$~dB.}
+\end{center}
 
 \subsection{Burst-start detection}
 
