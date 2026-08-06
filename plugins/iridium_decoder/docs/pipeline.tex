@@ -752,20 +752,198 @@ This works because RRC pulses have zero-crossings at multiples of the
 symbol period so no ISI is introduced.
 
 \subsection{First-order phase-locked loop}
+\label{sec:pll}
 
 Even after fine CFO correction, small residual phase errors accumulate
-across the burst (thermal noise, imperfect fine-CFO estimate). A
-first-order QPSK phase-locked loop (PLL) tracks this drift symbol-by-
-symbol:
+across the burst — thermal noise, imperfect fine-CFO estimate, oscillator
+short-term drift. A decision-directed \emph{first-order phase-locked
+loop} (PLL) tracks this drift symbol-by-symbol.
+
+\subsubsection*{What the loop does, conceptually}
+
+At each symbol we ask: ``if I assume the received sample $r[k]$ was
+transmitted at the nearest QPSK constellation point, how much would I
+have to rotate my current phase estimate to make that assumption
+consistent?'' We then rotate a tiny fraction ($\alpha \approx 0.2$) of
+that error into the estimate, and use the updated estimate to
+counter-rotate the next sample. Over 10--20 symbols the estimate
+converges; from then on it tracks drift.
+
+\subsubsection*{Loop block diagram}
+
+\begin{center}
+\begin{tikzpicture}[
+  block/.style={draw, rounded corners, minimum width=1.9cm,
+                minimum height=0.9cm, align=center, font=\small},
+  op/.style={draw, circle, inner sep=1pt, font=\small},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  lbl/.style={font=\scriptsize, midway, above},
+]
+  \node[block]                        (mult)   {$\times$};
+  \node[block, right=2cm of mult]     (slice)  {slice to\\nearest QPSK};
+  \node[block, below=1.1cm of slice]  (err)    {conj\,$\times$};
+  \node[block, left=1.5cm of err]     (angle)  {$\arg(\cdot)$};
+  \node[block, left=1.4cm of angle]   (gain)   {$\alpha$};
+  \node[block, below=1.1cm of gain]   (integ)  {$e^{-j\Delta\phi}\cdot(\cdot)$};
+
+  % Input
+  \node[left=1.3cm of mult, font=\small] (in) {$r[k]$};
+  \draw[arrow] (in) -- (mult);
+  % Multiply by phi_hat
+  \node[below=0.7cm of mult, font=\small] (phi) {$\hat\varphi[k]$};
+  \draw[arrow] (phi) -- (mult);
+  % Output y (also fed forward for slicing)
+  \draw[arrow] (mult) -- node[lbl] {$\hat r[k]$} (slice);
+  \node[right=1.4cm of slice, font=\small] (out) {to slicer};
+  \draw[arrow] (slice) -- (out);
+  % Feedback path
+  \draw[arrow] (slice.south) |- node[right, font=\scriptsize, xshift=-2mm, yshift=2mm]{$\hat s^\ast$} (err.east);
+  \draw[arrow] (mult) |- ($(err.east)+(1.2,-0.6)$) -- ($(err.east)+(0,-0.6)$) -- (err.south east);
+  \draw[arrow] (err) -- node[lbl]{$e[k]$} (angle);
+  \draw[arrow] (angle) -- (gain);
+  \draw[arrow] (gain) |- node[lbl, xshift=1.5cm, yshift=-1mm]{$\Delta\phi$} (integ.east);
+  \draw[arrow] (integ.north) |- node[near end, font=\scriptsize, above]{next $\hat\varphi[k+1]$} (phi.west);
+\end{tikzpicture}
+\captionof{figure}{First-order QPSK PLL structure. The received sample
+$r[k]$ is de-rotated by the current phase estimate $\hat\varphi[k]$;
+the corrected sample is sliced to the nearest ideal QPSK point $\hat s$;
+the phase error $\arg(\hat s^\ast \hat r)$ is scaled by $\alpha$ and
+integrated into the next phase estimate. \emph{Decision-directed}
+because $\hat s$ is our best guess at the transmitted symbol.}
+\end{center}
+
+\subsubsection*{Update equations}
+
 \begin{align}
-\hat{r}[k]      &= r[k]\cdot \hat{\varphi}[k]  \\
-\hat{s}[k]      &= \text{nearest QPSK symbol of } \hat{r}[k]  \\
-e[k]            &= \hat{s}^\ast[k]\cdot \hat{r}[k]  \\
-\Delta\phi[k]   &= \alpha \cdot \arg\bigl(e[k] / |e[k]|\bigr)  \\
-\hat{\varphi}[k+1] &= e^{-j\Delta\phi[k]}\cdot \hat{\varphi}[k]
+\hat{r}[k]      &= r[k]\cdot \hat{\varphi}[k]                              && \text{de-rotate by current estimate} \\
+\hat{s}[k]      &= \tfrac{1}{\sqrt{2}}\bigl(\mathrm{sgn}(\mathrm{Re}\,\hat r) + j\,\mathrm{sgn}(\mathrm{Im}\,\hat r)\bigr)   && \text{nearest ideal QPSK point} \\
+e[k]            &= \hat{s}^\ast[k]\cdot \hat{r}[k]                         && \text{error phasor} \\
+\Delta\phi[k]   &= \alpha \cdot \arg\bigl(e[k] / |e[k]|\bigr)              && \text{scale error by loop gain} \\
+\hat{\varphi}[k+1] &= e^{-j\Delta\phi[k]}\cdot \hat{\varphi}[k] \,/\, |\cdot|  && \text{update estimate, renormalise}
 \end{align}
-The loop constant $\alpha = 1/5$ trades tracking speed vs.\ noise gain.
-This is a port of \texttt{gr-burst}'s \texttt{synchronizer\_v4} PLL.
+Initial condition: $\hat{\varphi}[0] = 1$. The renormalisation on the
+last line keeps $|\hat{\varphi}| = 1$ so numerical drift doesn't shrink
+or grow the correction phasor over long bursts.
+
+\subsubsection*{The error phasor geometrically}
+
+\begin{center}
+\begin{tikzpicture}[scale=2.0]
+  \draw[->, gray] (-1.3,0)--(1.3,0) node[right,font=\scriptsize]{I};
+  \draw[->, gray] (0,-1.3)--(0,1.3) node[above,font=\scriptsize]{Q};
+  \draw[dashed, gray!50] (0,0) circle (1);
+  % Ideal QPSK points
+  \foreach \a in {45, 135, 225, 315} {
+    \fill[gray!40] ({cos(\a)},{sin(\a)}) circle (0.03);
+  }
+  % Received sample r-hat: off-ideal
+  \fill[blue!70!black] ({cos(70)},{sin(70)}) circle (0.05)
+        node[above right, font=\tiny, blue!70!black]{$\hat r[k]$};
+  \draw[thick, blue!70!black, ->] (0,0) -- ({cos(70)},{sin(70)});
+  % Nearest ideal s-hat
+  \fill[red!70!black] ({cos(45)},{sin(45)}) circle (0.05)
+        node[right, font=\tiny, red!70!black]{$\hat s[k]$};
+  \draw[thick, red!70!black, ->, dashed] (0,0) -- ({cos(45)},{sin(45)});
+  % Error angle arc
+  \draw[thick, orange, ->]
+    (0.4,0) arc (0:25:0.4);
+  \node[font=\tiny, orange] at (0.55, 0.13) {$\arg(e[k]) = 25^\circ$};
+  % Explanation
+  \node[font=\scriptsize, align=left, blue!30!black]
+    at (-1.2, -1.0) [right] {
+      Sample $\hat r$ arrived at $70^\circ$ (blue).\\
+      Nearest ideal is $45^\circ$ (red).\\
+      Error phasor $e = \hat s^\ast \hat r$ has argument $25^\circ$.\\
+      With $\alpha = 0.2$, correction $\Delta\phi = 5^\circ$ (orange arc).
+    };
+\end{tikzpicture}
+\captionof{figure}{Geometric view of one PLL iteration. The
+error phasor $e = \hat s^\ast \hat r$ has magnitude $|\hat r|$ and
+argument equal to the angular offset from the nearest ideal QPSK
+point. The loop applies only a small fraction $\alpha$ of this error
+to $\hat\varphi$, so noise on individual samples doesn't yank the
+estimate off-course.}
+\end{center}
+
+\subsubsection*{Loop-gain choice ($\alpha$)}
+
+$\alpha$ trades \emph{tracking bandwidth} against \emph{noise gain}:
+\begin{itemize}
+\item Large $\alpha$ ($\to 1$): the estimate tracks any phase change
+      almost immediately. Good for large drifts, but each noisy sample
+      injects nearly its full error into the estimate — output
+      constellation becomes noisy.
+\item Small $\alpha$ ($\to 0$): the estimate barely moves per sample.
+      Very stable estimate, but any real phase drift accumulates before
+      the loop catches up.
+\end{itemize}
+For Iridium's $\sim 25$-ksym/s DQPSK bursts, $\alpha = 1/5 = 0.2$ gives
+a 1/e loop time constant of $\approx 5$ symbols (\SI{200}{\micro s}) —
+fast enough to lock inside the 16-symbol preamble, slow enough to reject
+per-symbol noise.
+
+\subsubsection*{Numeric trace: two iterations}
+
+Suppose the received sample at $k = 3$ is
+$r = 0.85\,e^{j\,70^\circ}$ (magnitude 0.85, phase 70°), and the current
+estimate is $\hat\varphi = 1$ (i.e.\ no correction yet):
+
+\begin{align*}
+\hat r[3] &= r \cdot 1 = 0.85\,e^{j 70^\circ} \\
+\hat s[3] &= \tfrac{1}{\sqrt 2}(1 + j) = 1.0\,e^{j 45^\circ}
+             \quad\text{(nearest QPSK in Q1)}\\
+e[3]      &= \hat s^\ast \hat r = 1.0\,e^{-j 45^\circ}\cdot 0.85\,e^{j 70^\circ}
+           = 0.85\,e^{j 25^\circ} \\
+\Delta\phi[3] &= 0.2 \cdot 25^\circ = 5^\circ \\
+\hat\varphi[4] &= e^{-j 5^\circ}\cdot 1 = 1.0\,e^{-j 5^\circ}
+\end{align*}
+On the next symbol, if $r$ arrives at $67^\circ$ (drifting further),
+$\hat r = 67^\circ + (-5^\circ) = 62^\circ$; error against ideal $45^\circ$
+is $17^\circ$; correction $= 3.4^\circ$, so $\hat\varphi \to e^{-j
+8.4^\circ}$. The estimate exponentially approaches the true phase.
+
+\subsubsection*{Loop convergence}
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=5cm,
+  xlabel={symbol index $k$}, ylabel={phase estimate error / deg},
+  xmin=0, xmax=40, ymin=-40, ymax=40,
+  ytick={-30, -15, 0, 15, 30},
+  grid=both, grid style={draw=gray!20},
+  legend pos=north east, legend style={font=\scriptsize},
+]
+  % True phase drift: initial offset 30° drifting to 5° over 40 syms
+  \addplot[thick, red!60!black, domain=0:40, samples=41]
+    { 30 - 25*x/40 };
+  \addlegendentry{true phase drift}
+  % PLL estimate: converges exponentially with alpha=0.2
+  \addplot[thick, blue!70!black, domain=0:40, samples=200]
+    { 30 * exp(-x*0.2)                                % initial catch-up
+    + (30 - 25*x/40) * (1 - exp(-x*0.2)) };            % track drift
+  \addlegendentry{PLL estimate, $\alpha = 0.2$}
+  % Slow alpha
+  \addplot[thick, orange!70!black, dashed, domain=0:40, samples=200]
+    { 30 * exp(-x*0.05)
+    + (30 - 25*x/40) * (1 - exp(-x*0.05)) };
+  \addlegendentry{$\alpha = 0.05$ (slow)}
+  % Fast alpha
+  \addplot[thick, green!40!black, dashed, domain=0:40, samples=200]
+    { 30 * exp(-x*0.5)
+    + (30 - 25*x/40) * (1 - exp(-x*0.5)) + 2*rand};
+  \addlegendentry{$\alpha = 0.5$ (fast, noisy)}
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{PLL convergence to a drifting phase reference for
+three values of $\alpha$. Small $\alpha$ (orange) lags behind the drift.
+Large $\alpha$ (green) catches up faster but injects visible symbol-to-
+symbol noise. $\alpha = 0.2$ (blue, our choice) is the balance.}
+\end{center}
+
+This is a port of \texttt{gr-burst}'s \texttt{synchronizer\_v4} PLL
+implementation, adapted for Iridium's specific DQPSK constellation and
+25-ksym/s symbol rate.
 
 \subsection{QPSK slicer}
 
