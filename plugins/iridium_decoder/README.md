@@ -31,6 +31,16 @@ Any combination is valid:
 The two plugins share no state; each maintains its own tagger, worker
 thread, and result deque.
 
+## Deep dive
+
+For a ground-up mathematical walkthrough of the entire signal chain
+(from complex baseband + Nyquist through Iridium's frame plan, DQPSK,
+adaptive noise-floor detection, RRC matched filtering, DFT-based sync
+search, and QPSK PLL / slicer), see
+[`docs/pipeline.tex`](docs/pipeline.tex).  Build with
+`make -C docs` (needs TeXLive with `tikz` and `pgfplots`) to get a PDF
+with block diagrams and formulas explaining every stage.
+
 ## DSP chain
 
 ```
