@@ -131,9 +131,20 @@ $f_s = \SI{10}{MHz}$ therefore covers essentially the whole band.
 
 \subsection{Frequency plan}
 
-Iridium uses \SI{41.667}{kHz} channel spacing (exactly $\SI{25}{MHz}/600$)
-across the L-band. Duplex channels occupy \SI{1616}{}\textendash\SI{1626}{MHz};
-the simplex block for ring alerts sits above \SI{1626}{MHz}.
+Iridium uses a \SI{41.667}{kHz} channel raster (more precisely,
+$\SI{41666.667}{Hz}$) across the L-band. The value is fixed by the
+Iridium system spec (proprietary, reverse-engineered by
+Sec \& schneider, first documented at 32C3~\cite{iridium-32c3}); the
+same fractional value also equals
+$\SI{25}{MHz}/600$ or $\SI{500}{kHz}/12$, but neither of those
+denominators has a direct physical meaning in the air-interface
+protocol — the raster itself is the primitive constant.
+
+The \SI{10.5}{MHz} L-band therefore holds up to
+$10\,500\,000 / 41\,666.667 = 252$ channels. Duplex channels
+occupy \SI{1616}{}\textendash\SI{1626}{MHz} (240 channels, indexed
+$k = 0 \ldots 239$); the simplex block for ring alerts and paging
+sits above \SI{1626}{MHz}.
 
 \begin{center}
 \begin{tikzpicture}
@@ -944,7 +955,8 @@ combination, e.g.\ \verb|accel: numba* + pyfftw + oaconv|.
       (\href{https://github.com/muccc/iridium-toolkit}{muccc/iridium-toolkit}).
 \item \textbf{Chaos Communication Congress talks} by Sec \& schneider,
       32C3 (2015) and 33C3 (2016). Reference for the reverse-engineered
-      frame formats.
+      frame formats.\label{iridium-32c3}\\
+      \url{https://media.ccc.de/v/32c3-7154-iridium_update}
 \item \textbf{\emph{Attacks on the Iridium Satellite Network}},
       Groß \& Schafer, WOOT '17.
 \item \textbf{\emph{Multirate Signal Processing for Communications
