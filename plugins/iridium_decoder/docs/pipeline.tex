@@ -214,6 +214,54 @@ encoding means the mapping shown is applied to the difference between
 consecutive symbols, so a static carrier phase offset doesn't matter.}
 \end{center}
 
+\subsection{Preamble}
+
+Every burst starts with a repetitive BPSK preamble whose sole purpose is
+to give the receiver a coherent block for coarse timing and (after
+squaring — see \S5.4) carrier-frequency-offset estimation.
+
+There are two preamble lengths:
+\begin{itemize}
+\item \textbf{Short preamble} — 16 symbols. Used by all normal duplex
+      frames (voice, data, signalling on the 1616\textendash 1626 MHz
+      channels).
+\item \textbf{Long preamble} — 64 symbols. Used by simplex bursts
+      above 1626 MHz (ring alerts, paging) where the receiver has less
+      prior information and needs more signal for acquisition.
+\end{itemize}
+
+The preamble is not random data — it is a fixed, direction-specific
+pattern using only two of the four QPSK constellation points (i.e.\ it
+is BPSK, hence the useful mathematical property that $s(t)^2$ is a
+constant tone at $2 f_\text{CFO}$).
+
+\begin{center}
+\begin{tabular}{lll}
+\toprule
+                & \textbf{Downlink (satellite $\to$ mobile)} & \textbf{Uplink (mobile $\to$ satellite)} \\
+\midrule
+Symbols         & $(0, 0, 0, \ldots, 0)$      & $(2, 0, 2, 0, \ldots, 2, 0)$ \\
+                & \emph{constant}             & \emph{alternating} \\
+Complex value   & $s_0 = +1 + j$ (repeat)     & $s_1, s_0, s_1, s_0, \ldots$ \\
+                &                             & where $s_1 = -1 - j$ \\
+Bits (after diff-\,Gray) & \texttt{0000\,0000\,\ldots} & \texttt{1111\,1111\,\ldots} \\
+Hex (short, 32 bits)    & \texttt{0x00000000} & \texttt{0xFFFFFFFF} \\
+Hex (long, 128 bits)    & \texttt{0x000...000} \emph{(DL only)} & --- \\
+\bottomrule
+\end{tabular}
+\captionof{figure}{Iridium preamble structure. Constant symbols on the
+downlink and alternating symbols on the uplink both look like all-0
+(DL) or all-1 (UL) bits AFTER differential Gray decoding — because
+differential encoding maps constant symbols to bit pair $(0,0)$ and
+any consistent alternation to $(1,1)$.}
+\end{center}
+
+The 12 symbols immediately after the preamble carry the \emph{unique
+word} (UW), which we search for during acquisition. The UW patterns are
+also BPSK-symmetric (only symbols $\{0, 2\}$), so the full preamble+UW
+window is entirely $\pi$-encoded and the squaring trick still works
+across that whole span.
+
 \subsection{Burst layout}
 
 Every burst begins with a fixed synchronisation pattern that our decoder
