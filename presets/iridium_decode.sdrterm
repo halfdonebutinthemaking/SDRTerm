@@ -1,10 +1,10 @@
 {
   "version": 1,
   "center_hz": 1621250000.0,
-  "bw_hz": 2048000,
-  "gain_db": 18.0,
+  "bw_hz": 6000000,
+  "gain_db": 14.0,
   "gain_auto": false,
-  "iq_corr": true,
+  "iq_corr": false,
   "fm_bw_hz": 100000,
   "nrsc5_sc_outer": 546,
   "waterfall_active": false,
@@ -34,6 +34,10 @@
     "iridium": {
       "threshold_db": 15.0,
       "capture_on": true
+    },
+    "iridium_decode": {
+      "threshold_db": 14.0,
+      "try_both": false
     },
     "constellation": {
       "symrate": 10500,

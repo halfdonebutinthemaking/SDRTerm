@@ -13,7 +13,8 @@
 \usepackage{tikz}
 \usepackage{pgfplots}
 \pgfplotsset{compat=1.18}
-\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc, decorations.pathreplacing}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc,
+                decorations.pathreplacing, backgrounds, fit}
 \usepackage{listings}
 \usepackage{xcolor}
 \usepackage{hyperref}
@@ -117,7 +118,7 @@ If the SDR samples at rate $f_s$, then $x[n] = x(n/f_s)$. Nyquist tells us
 we can unambiguously represent signals whose spectral content spans
 $(-f_s/2, +f_s/2]$ relative to the tuner center. For SDRTerm the typical
 choice for Iridium is $f_s = \SI{2}{MHz}$ (RTL-SDR practical maximum) or
-$f_s = \SI{2\ldots 20}{MHz}$ (HackRF native rates), always with
+$f_s \in [\SI{2}{MHz}, \SI{20}{MHz}]$ (HackRF native rates), always with
 $f_s \bmod \SI{100}{kHz} = 0$ so that timestamps remain integer-computable.
 
 The Iridium L-band spans $\SI{1616.0}{MHz} \ldots \SI{1626.5}{MHz}$
@@ -651,14 +652,16 @@ everything outside $\pm 20$~kHz of DC:
   grid=both, grid style={draw=gray!20},
   title style={yshift=-6pt},
 ]
-  % Noise floor with adjacent channel peaks
+  % Noise floor with adjacent channel peaks.  Sigmas widened compared
+  % to a real spectrum plot so pgfmath's exp() stays within its
+  % floating-point range (real ± 10^38 limit).
   \addplot[thick, blue!70!black, domain=-1000:1000, samples=400]
     { -50 + rand*4
-      + 40 * exp(-((x-100)/8)^2)      % our burst at +100 kHz
-      + 20 * exp(-((x+42)/6)^2)       % adjacent chan -42
-      + 20 * exp(-((x-142)/6)^2)      % adjacent chan +142
-      + 15 * exp(-((x-542)/8)^2)      % far interferer
-      + 12 * exp(-((x+700)/10)^2) };  % far interferer
+      + 40 * exp(-((x-100)/25)^2)      % our burst at +100 kHz
+      + 20 * exp(-((x+42)/20)^2)       % adjacent chan -42
+      + 20 * exp(-((x-142)/20)^2)      % adjacent chan +142
+      + 15 * exp(-((x-542)/25)^2)      % far interferer
+      + 12 * exp(-((x+700)/30)^2) };   % far interferer
   \draw[dashed, red!60!black] (axis cs:-20,-70) -- (axis cs:-20,5);
   \draw[dashed, red!60!black] (axis cs:20,-70) -- (axis cs:20,5);
 \end{axis}
@@ -674,10 +677,11 @@ everything outside $\pm 20$~kHz of DC:
   grid=both, grid style={draw=gray!20},
   title style={yshift=-6pt},
 ]
-  % Only content within ±20 kHz survives
+  % Only content within ±20 kHz survives; use wider sigma to avoid
+  % pgfmath overflow on the flat regions.
   \addplot[thick, blue!70!black, domain=-1000:1000, samples=400]
     { -60 + rand
-      + 40 * exp(-((x-100)/8)^2)
+      + 40 * exp(-((x-100)/25)^2)
       - 50 * ((abs(x)>50) ? 1 : 0) };
 \end{axis}
 \end{tikzpicture}

@@ -36,3 +36,10 @@ plugins/iridium/iridium_bursts/
 
 # iridium_decoder session logs (created via `s` shortcut) — user's captures
 iridium_logs/
+
+# LaTeX build artefacts under plugins/iridium_decoder/docs/
+plugins/iridium_decoder/docs/*.aux
+plugins/iridium_decoder/docs/*.log
+plugins/iridium_decoder/docs/*.out
+plugins/iridium_decoder/docs/*.toc
+plugins/iridium_decoder/docs/*.pdf
