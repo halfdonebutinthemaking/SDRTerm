@@ -112,6 +112,39 @@ x[n] \;=\; \frac{I_{\text{byte}}[n] - 127.4}{128}
         + j\,\frac{Q_{\text{byte}}[n] - 127.4}{128}.
 \end{equation}
 
+Geometrically the complex baseband is a rotating phasor whose I and Q
+components are just its projections onto the axes:
+
+\begin{center}
+\begin{tikzpicture}[scale=1.6]
+  \draw[->, gray] (-1.5,0)--(1.5,0) node[right, font=\scriptsize]{I};
+  \draw[->, gray] (0,-1.5)--(0,1.5) node[above, font=\scriptsize]{Q};
+  \draw[dashed, gray!40] (0,0) circle (1);
+  % Phasor
+  \draw[thick, blue!70!black, ->] (0,0) -- ({cos(35)},{sin(35)})
+        node[above right, font=\scriptsize, blue!70!black] {$x(t)$};
+  % I projection
+  \draw[dashed, red!60!black] ({cos(35)},{sin(35)}) -- ({cos(35)},0);
+  \fill[red!60!black] ({cos(35)},0) circle (0.03);
+  \node[font=\scriptsize, red!60!black, below] at ({cos(35)},0) {$I(t)$};
+  % Q projection
+  \draw[dashed, green!40!black] ({cos(35)},{sin(35)}) -- (0,{sin(35)});
+  \fill[green!40!black] (0,{sin(35)}) circle (0.03);
+  \node[font=\scriptsize, green!40!black, left] at (0,{sin(35)}) {$Q(t)$};
+  % Angle
+  \draw[thick, orange] (0.35,0) arc (0:35:0.35);
+  \node[font=\tiny, orange] at (0.5, 0.1) {$\phi(t)$};
+  % Magnitude
+  \node[font=\scriptsize, blue!70!black] at (0.5, 0.55)
+        [rotate=35, above] {$|x(t)|$};
+\end{tikzpicture}
+\captionof{figure}{Complex baseband as a rotating phasor $x(t) =
+|x(t)|\,e^{j\phi(t)}$. The I and Q streams delivered by the SDR are
+just the horizontal (red) and vertical (green) projections of that
+phasor onto the axes. All the information about signal amplitude and
+phase is contained in this single complex number per sample.}
+\end{center}
+
 \subsection{Sampling and Nyquist}
 
 If the SDR samples at rate $f_s$, then $x[n] = x(n/f_s)$. Nyquist tells us
@@ -124,6 +157,38 @@ $f_s \bmod \SI{100}{kHz} = 0$ so that timestamps remain integer-computable.
 The Iridium L-band spans $\SI{1616.0}{MHz} \ldots \SI{1626.5}{MHz}$
 (\SI{10.5}{MHz} total). A single tuning at $f_c = \SI{1621.25}{MHz}$ with
 $f_s = \SI{10}{MHz}$ therefore covers essentially the whole band.
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=3.5cm,
+  xlabel={frequency / MHz (RF)},
+  ymin=0, ymax=1.2, ytick=\empty,
+  xmin=1615, xmax=1628,
+  xtick={1616, 1621.25, 1626, 1626.5},
+  xticklabel style={font=\scriptsize},
+  major grid style={line width=0.1pt, draw=gray!30},
+  ymajorgrids=false, xmajorgrids=true, axis on top,
+]
+  % Iridium band
+  \addplot[fill=blue!15, draw=blue!40]
+    coordinates {(1616,0)(1616,1)(1626.5,1)(1626.5,0)} \closedcycle;
+  % Tuner window at 10 MHz around 1621.25
+  \draw[dashed, red!70!black, thick] (axis cs:1616.25, 0) -- (axis cs:1616.25, 1.15);
+  \draw[dashed, red!70!black, thick] (axis cs:1626.25, 0) -- (axis cs:1626.25, 1.15);
+  \draw[<->, red!70!black, thick] (axis cs:1616.25, 1.1) -- (axis cs:1626.25, 1.1);
+  \node[font=\scriptsize, red!70!black] at (axis cs:1621.25, 1.15) [above] {tuner window at $f_s = \SI{10}{MHz}$};
+  % Tuner center marker
+  \draw[thick, red!70!black] (axis cs:1621.25, 0) -- (axis cs:1621.25, 1);
+  \node[font=\scriptsize, red!70!black] at (axis cs:1621.25, 0.5) [right, xshift=1mm] {$f_c$};
+  \node at (axis cs:1621.25, 0.3) {\scriptsize Iridium band};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{The Iridium band (blue) and a typical SDR tuner window
+(red-dashed) centred at $f_c = \SI{1621.25}{MHz}$. At $f_s = \SI{10}{MHz}$
+the window is wide enough to cover essentially the whole band, so no
+retuning is needed to catch bursts on any channel.}
+\end{center}
 
 %═══════════════════════════════════════════════════════════════════
 \section{The Iridium Air Interface}
@@ -329,6 +394,34 @@ P_m[k] \;=\; \bigl|X_m[k]\bigr|^2,
 \end{equation}
 is the per-bin instantaneous power estimate (unscaled).
 
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=4cm,
+  xlabel={sample index $n$ within the frame},
+  ylabel={window value $w[n]$},
+  xmin=0, xmax=2048, ymin=0, ymax=1.1,
+  ytick={0, 0.5, 1},
+  grid=both, grid style={draw=gray!20},
+  legend pos=north east, legend style={font=\scriptsize},
+]
+  \addplot[thick, blue!70!black, domain=0:2048, samples=200]
+    { 0.42 - 0.5*cos(deg(2*3.14159*x/2048))
+             + 0.08*cos(deg(4*3.14159*x/2048)) };
+  \addlegendentry{Blackman ($N = 2048$)}
+  \addplot[thick, red!60!black, dashed, domain=0:2048, samples=2]
+    { (x >= 0 && x <= 2048) ? 1 : 0 };
+  \addlegendentry{rectangular (no window)}
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Blackman window applied to each FFT frame. The
+rectangular (no-window) case would let full-scale amplitude reach both
+edges of the frame, causing severe spectral leakage from bright bins
+into their neighbours. Blackman tapers the edges to zero, giving 58 dB
+of side-lobe suppression at the cost of a ${\sim}\SI{-6}{dB}$ signal
+loss (compensated by the $1/0.42$ scaling factor in the code).}
+\end{center}
+
 \subsection{Adaptive noise floor}
 
 The detector keeps a rolling sum of the last $H = 512$ frame spectra
@@ -350,6 +443,43 @@ window's equivalent noise bandwidth (ENBW $=1.72$ for Blackman):
 
 Because $\bar{P}[k]$ is only updated in frames without active bursts, the
 noise-floor estimate does not drift upward during dense passes.
+
+\begin{center}
+\begin{tikzpicture}[
+  cell/.style={draw, thin, minimum width=0.42cm, minimum height=0.32cm},
+  active/.style={cell, fill=blue!25},
+  frozen/.style={cell, fill=red!20},
+  fresh/.style={cell, fill=green!25},
+]
+  % Ring buffer of H=8 shown (real is 512)
+  \foreach \x in {0,...,7} { \node[cell] at (\x*0.42, 0) {}; }
+  % Fresh frame just pushed
+  \node[fresh] at (2*0.42, 0) {};
+  % Marker for current write index
+  \draw[->, thick, green!60!black] (2*0.42, -0.55) -- (2*0.42, -0.25)
+        node[below, font=\tiny, at start, green!60!black] {write};
+  % Older frames
+  \foreach \x/\lbl in {0/{$-2$}, 1/{$-1$}, 3/{$+5$}, 4/{$+4$}, 5/{$+3$}, 6/{$+2$}, 7/{$+1$}} {
+    \node[font=\tiny, above=1mm] at (\x*0.42, 0.16) {\lbl};
+  }
+  \node[font=\tiny, above=1mm, green!60!black] at (2*0.42, 0.16) {\textbf{now}};
+  % Legend + arrow
+  \draw[->, thick] (7*0.42+0.5, 0.0) -- (7*0.42+2.5, 0.0);
+  \node[fresh, right=1cm of {(7*0.42+2.5, 0.0)}, label=right:{\scriptsize add\;$P_m$}] {};
+  \node[cell,  right=1cm of {(7*0.42+2.5, -0.6)}, label=right:{\scriptsize subtract oldest}] {};
+  % Formula reminder
+  \node[align=center, font=\scriptsize, below=1.2cm of {(0, 0)}, xshift=1.5cm]
+    {\emph{ring buffer of last $H$ frame spectra}\\[-0.5ex]
+     $S[k] \leftarrow S[k] - P_\text{oldest}[k] + P_\text{new}[k]$\\[-0.5ex]
+     — update SKIPPED when a burst is active};
+\end{tikzpicture}
+\captionof{figure}{Adaptive noise floor as an $H$-deep ring buffer of
+recent frame spectra. Each new frame overwrites the oldest slot; the
+running sum $S[k]$ is maintained incrementally by subtracting the
+outgoing frame and adding the new one — no need to re-sum all $H$
+entries. Critically, this update is \emph{skipped} while any burst is
+active, so burst energy never contaminates the noise estimate.}
+\end{center}
 
 \subsection{Detection in action}
 
@@ -515,6 +645,32 @@ $\SI{2}{ms}$ before the first detection frame (so the whole burst,
 including preamble, is contained). This is what the downstream stage
 consumes.
 
+\begin{center}
+\begin{tikzpicture}[
+  slot/.style={draw, rounded corners=1pt, minimum width=2.4cm,
+               minimum height=0.6cm, font=\scriptsize\ttfamily, align=center},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+]
+  \node[slot, fill=blue!10]  (a) {t\_start};
+  \node[slot, fill=blue!10, right=0.2 of a]  (b) {t\_stop};
+  \node[slot, fill=green!15, right=0.2 of b] (c) {k\_centre};
+  \node[slot, fill=orange!15, right=0.2 of c] (d) {mag / dB};
+  \node[slot, fill=orange!15, right=0.2 of d] (e) {noise / dBFS};
+  \node[font=\scriptsize] at (a.south) [below]      {sample index};
+  \node[font=\scriptsize] at (b.south) [below]      {sample index};
+  \node[font=\scriptsize] at (c.south) [below]      {FFT bin};
+  \node[font=\scriptsize] at (d.south) [below]      {SNR};
+  \node[font=\scriptsize] at (e.south) [below]      {noise floor};
+  \node[align=center, below=1.2cm of c, font=\scriptsize]
+    {\emph{one tuple per gone burst — consumed by the downmix stage}\\
+     stream position + centre frequency + power hint};
+\end{tikzpicture}
+\captionof{figure}{Tagger output tuple. Sample indices tell the
+downmix stage exactly which slice of the raw IQ buffer to extract; the
+centre bin gives the rough baseband frequency; magnitude and noise are
+carried through for the plugin's status display and later analysis.}
+\end{center}
+
 %═══════════════════════════════════════════════════════════════════
 \section{Per-burst Processing (\texttt{BurstDownmix})}
 %═══════════════════════════════════════════════════════════════════
@@ -659,6 +815,48 @@ the envelope exceeds $0.28$ times the maximum. A small pre-start guard
 (\SI{100}{us}) is subtracted so the RRC transient at the burst edge
 doesn't corrupt the CFO estimate.
 
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=4cm,
+  xlabel={sample index (0 -- 3500, i.e.\ 7 ms of search window)},
+  ylabel={$|z|^2$ (envelope)},
+  xmin=0, xmax=3500, ymin=0, ymax=1.2,
+  ytick={0, 0.28, 0.5, 1},
+  yticklabels={0, {\scriptsize $0.28\cdot\text{max}$}, 0.5, 1},
+  grid=both, grid style={draw=gray!20},
+  axis on top,
+]
+  % Smoothed envelope: quiet, sharp rise, plateau, small tail
+  \addplot[thick, blue!70!black, domain=0:3500, samples=200]
+    { (x < 600) ? 0.03 + 0.02*rand
+    : ((x < 900) ? (0.03 + (x-600)/300 * 0.95)
+    : ((x < 3200) ? (0.98 + 0.03*rand)
+    : (0.98 * exp(-(x-3200)/300)))) };
+  % 0.28 * max threshold line
+  \draw[dashed, red!70!black, thick]
+    (axis cs:0, 0.28) -- (axis cs:3500, 0.28);
+  % First-crossing marker
+  \fill[green!60!black] (axis cs:684, 0.28) circle (2pt);
+  \draw[<-, green!60!black, thick]
+    (axis cs:684, 0.28) -- (axis cs:900, 0.6)
+    node[right, font=\scriptsize, green!60!black]
+    {first crossing};
+  % Adjusted start (with pre-start guard)
+  \draw[dashed, orange!80!black, thick]
+    (axis cs:634, 0) -- (axis cs:634, 1.2);
+  \node[font=\tiny, orange!80!black, above]
+    at (axis cs:634, 1.15) {start$-100\,\mu$s};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Burst-start detection. The smoothed envelope
+$|z|^2$ is scanned across the first 7~ms; we find its maximum, take
+$28\%$ of that as threshold (red dashed), and find the first index
+that crosses (green dot). Backing off $100\,\mu$s (orange dashed) gives
+a small guard so the RRC filter's leading transient doesn't leak into
+the CFO estimator.}
+\end{center}
+
 \subsection{Fine CFO via signal-squared FFT}
 
 Iridium's 16-symbol preamble is BPSK-modulated (all symbols at $s_0 =
@@ -681,6 +879,51 @@ $k^\star$ to sub-bin resolution:
 \end{equation}
 where $\alpha, \beta, \gamma$ are the magnitudes at bins
 $k^\star - 1, k^\star, k^\star + 1$.
+
+\begin{center}
+\begin{tikzpicture}
+% signal spectrum (BPSK spreads energy across bins)
+\begin{axis}[
+  name=before,
+  width=6.5cm, height=4cm,
+  xlabel={frequency / kHz}, ylabel={magnitude},
+  title={\scriptsize\emph{$|z|$ — BPSK preamble spectrum}},
+  xmin=-50, xmax=50, ymin=0, ymax=1.1,
+  ytick=\empty,
+  grid=both, grid style={draw=gray!20},
+  title style={yshift=-6pt},
+]
+  % Broad hump — BPSK spread
+  \addplot[thick, blue!70!black, domain=-50:50, samples=200]
+    { 0.1 + 0.6*exp(-((x-5)/15)^2)
+          + 0.5*exp(-((x-15)/12)^2)
+          + 0.4*exp(-((x+5)/15)^2) };
+\end{axis}
+% squared spectrum: single tone at 2*CFO
+\begin{axis}[
+  name=after, at=(before.right of south east), anchor=left of south west,
+  xshift=1.4cm,
+  width=6.5cm, height=4cm,
+  xlabel={frequency / kHz}, ylabel={magnitude},
+  title={\scriptsize\emph{$|z^2|$ — tone at $2\hat f_\text{fine}$}},
+  xmin=-50, xmax=50, ymin=0, ymax=1.1,
+  ytick=\empty,
+  grid=both, grid style={draw=gray!20},
+  title style={yshift=-6pt},
+]
+  \addplot[thick, blue!70!black, domain=-50:50, samples=200]
+    { 0.05 + 0.95*exp(-((x-10)/2)^2) };
+  \draw[dashed, red!60!black] (axis cs:10,0)--(axis cs:10,1.05);
+  \node[font=\tiny, red!60!black, above] at (axis cs:10,1.05) {peak $= 2\hat f_\text{fine}$};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Signal-squared trick. Left: the received preamble is
+BPSK-modulated, so its spectrum is broad and offset from DC by the
+residual CFO plus modulation spread. Right: squaring cancels the $\pm 1$
+BPSK modulation and leaves a single narrow tone at exactly $2 \hat
+f_\text{fine}$, whose FFT peak we can locate to sub-bin resolution via
+quadratic interpolation.}
+\end{center}
 
 \subsection{Root-raised-cosine matched filter}
 
@@ -737,6 +980,42 @@ Both correlations are done efficiently by FFT: pre-compute
 $\mathcal{F}\{s_D^\ast[-n]\}$ once, then per burst compute
 $c_D = \mathcal{F}^{-1}\{\mathcal{F}\{z\} \cdot \mathcal{F}\{s_D^\ast\}\}$.
 
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=4cm,
+  xlabel={correlation lag $m$ (samples)},
+  ylabel={$|c[m]|$},
+  xmin=0, xmax=2000, ymin=0, ymax=1.1,
+  ytick={0, 0.5, 1},
+  grid=both, grid style={draw=gray!20},
+  axis on top,
+  legend pos=north west, legend style={font=\scriptsize},
+]
+  % DL correlation — strong peak somewhere in middle
+  \addplot[thick, blue!70!black, domain=0:2000, samples=300]
+    { 0.15 + 0.1*rand + 0.85*exp(-((x-900)/25)^2) };
+  \addlegendentry{$|c_D|$ (DL template)}
+  % UL correlation — much weaker (this is a DL burst)
+  \addplot[thick, red!60!black, domain=0:2000, samples=300]
+    { 0.15 + 0.1*rand + 0.25*exp(-((x-720)/40)^2) };
+  \addlegendentry{$|c_U|$ (UL template)}
+  % Peak marker
+  \fill[green!60!black] (axis cs:900, 0.98) circle (2pt);
+  \draw[dashed, green!60!black]
+    (axis cs:900, 0) -- (axis cs:900, 1.1);
+  \node[font=\scriptsize, green!60!black]
+    at (axis cs:900, 1.05) [above] {peak $m^\star = 900$};
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Sync-word correlation.  Two correlations are
+computed in parallel — one against the DL template, one against UL.
+The peak's height decides direction (here DL wins), and its location
+$m^\star$ tells us where the UW starts in the aligned buffer.  The
+phase at the peak, $\angle c(m^\star)$, is the residual rotation to
+subtract before demodulation.}
+\end{center}
+
 %═══════════════════════════════════════════════════════════════════
 \section{Symbol Demodulation (\texttt{QpskDemod})}
 %═══════════════════════════════════════════════════════════════════
@@ -748,6 +1027,35 @@ every 20th sample to get one complex value per symbol:
 \begin{equation}
 r[k] \;=\; z_\text{aligned}[k \cdot \text{sps}].
 \end{equation}
+
+\begin{center}
+\begin{tikzpicture}[
+  dot/.style={circle, fill=blue!30!black, inner sep=0.7pt},
+  sym/.style={circle, draw=red!70!black, thick, fill=red!30, inner sep=1.5pt},
+]
+  \draw[->, gray] (-0.3, 0) -- (14.5, 0) node[right, font=\scriptsize]{sample index};
+  \foreach \x in {0,...,60} {
+    \pgfmathsetmacro{\y}{sin(\x*40)*0.4 + rand*0.15}
+    \node[dot] at (\x*0.22, \y) {};
+  }
+  % Highlight every 20th: 0, 20, 40, 60 — but sps=20 mapped to 0, 20, 40, 60 sample dots
+  \foreach \x/\k in {0/0, 20/1, 40/2, 60/3} {
+    \pgfmathsetmacro{\y}{sin(\x*40)*0.4}
+    \node[sym] at (\x*0.22, \y) {};
+    \draw[dashed, red!70!black, thin] (\x*0.22, -1.2) -- (\x*0.22, \y);
+    \node[font=\tiny, red!70!black, below] at (\x*0.22, -1.2) {$k=\k$};
+  }
+  \node[font=\scriptsize, blue!30!black] at (0, -1.7) [right]
+    {intermediate samples \emph{discarded} — RRC guarantees they contribute};
+  \node[font=\scriptsize, blue!30!black] at (0, -2.0) [right]
+    {zero energy to symbol decisions at the marked instants};
+\end{tikzpicture}
+\captionof{figure}{Symbol-rate decimation. Only every $\text{sps}$-th
+sample (red circles) is kept for symbol decisions. Because the signal
+was RRC-filtered, the intermediate samples (blue) have zero
+inter-symbol interference at the marked instants — so throwing them
+away doesn't lose information.}
+\end{center}
 This works because RRC pulses have zero-crossings at multiples of the
 symbol period so no ISI is introduced.
 
@@ -964,6 +1272,45 @@ $45^\circ - (\text{phase deg}) \bmod 90$, is used to compute
 Real Iridium bursts get $50\ldots 70\%$; noise-triggered UW matches get
 $25\ldots 40\%$.
 
+\begin{center}
+\begin{tikzpicture}[scale=1.8]
+  \draw[->, gray] (-1.4,0)--(1.4,0) node[right, font=\scriptsize]{I};
+  \draw[->, gray] (0,-1.4)--(0,1.4) node[above, font=\scriptsize]{Q};
+  % Quadrant colouring
+  \fill[blue!10]    (0, 0) rectangle ( 1.3,  1.3);
+  \fill[green!10]   (0, 0) rectangle (-1.3,  1.3);
+  \fill[orange!10]  (0, 0) rectangle (-1.3, -1.3);
+  \fill[red!10]     (0, 0) rectangle ( 1.3, -1.3);
+  % Axis lines on top
+  \draw[gray] (-1.4,0)--(1.4,0);
+  \draw[gray] (0,-1.4)--(0,1.4);
+  % Symbol labels
+  \node[font=\small, blue!50!black]   at ( 0.75,  0.75) {$s = 0$};
+  \node[font=\small, green!40!black]  at (-0.75,  0.75) {$s = 1$};
+  \node[font=\small, orange!50!black] at (-0.75, -0.75) {$s = 2$};
+  \node[font=\small, red!50!black]    at ( 0.75, -0.75) {$s = 3$};
+  % Ideal QPSK points
+  \foreach \a in {45,135,225,315} {
+    \fill[black] ({cos(\a)},{sin(\a)}) circle (0.03);
+  }
+  % Example received sample
+  \fill[blue!70!black] (0.75, 0.5) circle (0.05);
+  \draw[->, thick, dashed, blue!70!black] (0.75, 0.5) -- ({cos(45)}, {sin(45)});
+  \node[font=\scriptsize, blue!70!black] at (0.75, 0.5) [above right, xshift=1mm]
+    {sample $\hat r[k]$};
+  % Confidence cone: within ±22° of Q1 ideal
+  \draw[thick, red!70!black] ({cos(45+22)*1.15},{sin(45+22)*1.15})
+      arc (67:23:1.15);
+  \node[font=\tiny, red!70!black] at ({cos(45)*1.35}, {sin(45)*1.35})
+      {$\pm 22^\circ$ confidence cone};
+\end{tikzpicture}
+\captionof{figure}{QPSK decision regions.  Each of the four
+constellation points owns the quadrant it lies in; a received sample
+is assigned to whichever quadrant its I and Q signs put it into.  The
+red arc shows the $\pm 22^\circ$ confidence cone around each ideal
+point — a symbol is ``confident'' if it falls inside its cone.}
+\end{center}
+
 \subsection{Unique-word check}
 
 The first 12 symbols of the demodulated sequence should match one of the
@@ -977,6 +1324,42 @@ d(\mathbf{s}, \mathrm{UW}) \;=\; \sum_{i=0}^{11}
 \end{equation}
 A burst passes the UW check (``A:OK'') if $d \leq 2$ for either the DL or
 UL UW.
+
+\begin{center}
+\begin{tikzpicture}[scale=1.05,
+  cell/.style={draw, minimum width=0.7cm, minimum height=0.7cm,
+               font=\small, align=center},
+  ok/.style={cell, fill=green!20},
+  bad/.style={cell, fill=red!25},
+]
+  % UW expected row
+  \node[font=\scriptsize] at (-0.5, 0.55) {\emph{UW}};
+  \foreach \i/\v in {0/0,1/2,2/2,3/2,4/2,5/0,6/0,7/0,8/2,9/0,10/0,11/2} {
+    \node[cell, fill=gray!15] at (\i*0.75, 0.55) {\v};
+  }
+  % Received row
+  \node[font=\scriptsize] at (-0.5, -0.2) {\emph{got}};
+  \foreach \i/\v/\match in {0/0/ok,1/2/ok,2/1/bad,3/2/ok,4/2/ok,5/0/ok,
+                            6/0/ok,7/0/ok,8/2/ok,9/0/ok,10/0/ok,11/2/ok} {
+    \node[\match] at (\i*0.75, -0.2) {\v};
+  }
+  % Diff row
+  \node[font=\scriptsize] at (-0.5, -0.95) {\emph{d}};
+  \foreach \i/\d in {0/0,1/0,2/1,3/0,4/0,5/0,6/0,7/0,8/0,9/0,10/0,11/0} {
+    \node[font=\scriptsize] at (\i*0.75, -0.95) {\d};
+  }
+  % Total
+  \draw[thick] (11*0.75+0.55, -1.3) rectangle (11*0.75+2.2, -0.6);
+  \node[font=\scriptsize, align=center] at (11*0.75+1.4, -0.95)
+    {\emph{sum}\\$d = 1 \leq 2$\\A:OK\;\checkmark};
+\end{tikzpicture}
+\captionof{figure}{Unique-word check example.  The 12 demodulated
+symbols (green = match, red = differ) are compared against the fixed
+UW pattern; any symbol difference of 3 counts as 1 (since $\pm90^\circ$
+is symmetric).  Here total distance $d = 1 \leq 2$, so the burst
+passes.  Everything after this point in the pipeline is optional
+message-body decoding.}
+\end{center}
 
 %═══════════════════════════════════════════════════════════════════
 \section{Bit Decoding and Message Parsing}
@@ -996,6 +1379,30 @@ b_k & \text{2-bit output}\\ \hline
 The output is a bit string of length $2(n-1)$ where $n$ is the number of
 demodulated symbols.
 
+\begin{center}
+\begin{tikzpicture}[scale=1.9]
+  % Cyclic diagram of Gray mapping
+  \foreach \a/\lbl/\bits in {90/0/00, 0/1/10, -90/2/11, 180/3/01} {
+    \node[circle, draw, fill=blue!15, minimum size=1cm, font=\small]
+      (n\lbl) at (\a:1.4) {$b_k = \lbl$};
+    \node[font=\scriptsize, red!60!black] at (\a:2.05) {\texttt{\bits}};
+  }
+  % Arrows showing +90° = "+1" step
+  \draw[->, thick, orange!70!black] (n0.east) to[bend right=30] node[right, font=\tiny] {$+1$} (n1.north);
+  \draw[->, thick, orange!70!black] (n1.south) to[bend right=30] node[below right, font=\tiny] {$+1$} (n2.east);
+  \draw[->, thick, orange!70!black] (n2.west) to[bend right=30] node[left, font=\tiny] {$+1$} (n3.south);
+  \draw[->, thick, orange!70!black] (n3.north) to[bend right=30] node[above left, font=\tiny] {$+1$} (n0.west);
+  % Center label
+  \node[font=\scriptsize, align=center] at (0,0)
+    {phase\\increment\\per symbol};
+\end{tikzpicture}
+\captionof{figure}{Differential Gray mapping.  Each successive symbol
+increments the phase by 0, 90, 180 or $-90^\circ$; that increment is
+what carries the two bits.  The Gray table (red) is arranged so
+adjacent codes differ by only one bit — a small phase-decision error
+becomes a single bit error, not two.}
+\end{center}
+
 \subsection{BCH-protected LCW header}
 
 The 3-symbol \emph{Link Control Word} (LCW) that follows the sync-word
@@ -1005,6 +1412,25 @@ than $t$ errors after Gray-decoding, the frame type is unrecoverable and
 the parser emits a \texttt{RAW:} line: unique word recovered but content
 unclassifiable.
 
+\begin{center}
+\begin{tikzpicture}[
+  seg/.style={draw, minimum height=0.9cm, font=\scriptsize, align=center},
+]
+  \node[seg, minimum width=4.5cm, fill=blue!20]        (data)   {21 data bits\\(frame type + control)};
+  \node[seg, minimum width=2.5cm, fill=green!20, right=0 of data] (parity) {10 parity bits\\(BCH ECC)};
+  \draw[decorate, decoration={brace, amplitude=4pt}, thick]
+       (data.south west) -- (parity.south east)
+       node[midway, below=0.4cm, font=\scriptsize]
+       {BCH(31,\,21) codeword — corrects up to $t = 2$ bit errors};
+\end{tikzpicture}
+\captionof{figure}{BCH(31, 21) codeword layout.  21 payload bits
+(carrying the frame type-code plus control fields) are extended with
+10 parity bits computed from a generator polynomial.  The receiver
+runs a syndrome check + Berlekamp\textendash Massey decoder; up to 2
+flipped bits can be corrected.  More than 2 → the frame type stays
+unknown and the message is emitted as \texttt{RAW:}.}
+\end{center}
+
 \subsection{Message classification}
 
 Once the LCW type-code is known, the message is dispatched to a
@@ -1013,6 +1439,35 @@ class has its own field layout, further FEC (Reed-Solomon in some
 cases), and interpretation. The vendored \texttt{iridium-toolkit} parser
 handles this stage; see the \texttt{plugins/iridium\_decoder/parser/}
 directory.
+
+\begin{center}
+\begin{tikzpicture}[
+  node distance=0.35cm and 1.2cm,
+  root/.style={draw, rounded corners, fill=blue!20, minimum width=3cm,
+               minimum height=0.7cm, font=\small\ttfamily, align=center},
+  leaf/.style={draw, rounded corners, minimum width=1.6cm,
+               minimum height=0.6cm, font=\scriptsize\ttfamily, align=center},
+  arrow/.style={->, thick},
+]
+  \node[root] (lcw) {LCW type-code};
+  \node[leaf, fill=green!15, below=1.3cm of lcw, xshift=-5cm] (iri) {IRI\\generic};
+  \node[leaf, fill=cyan!15, right=of iri]  (voc) {VOC\\voice};
+  \node[leaf, fill=green!15, right=of voc] (iu3) {IU3\\uplink};
+  \node[leaf, fill=yellow!20, right=of iu3](isy) {ISY\\system};
+  \node[leaf, fill=yellow!20, right=of isy](ibc) {IBC\\broadcast};
+  \node[leaf, fill=magenta!15, right=of ibc](ime) {IME\\maintenance};
+  \node[leaf, fill=orange!20, right=of ime](ira) {IRA\\ring alert};
+  \foreach \n in {iri, voc, iu3, isy, ibc, ime, ira} {
+    \draw[arrow] (lcw.south) -- (\n.north);
+  }
+\end{tikzpicture}
+\captionof{figure}{Message-type dispatch.  The 4-bit LCW type-code
+(3 bits from the LCW header + 1 direction bit) selects which
+type-specific parser to invoke.  Each class has its own field layout,
+further FEC, and interpretation — implemented in
+\texttt{parser/bitsparser.py}.  Colour matches the on-screen legend
+in the plugin's message view.}
+\end{center}
 
 %═══════════════════════════════════════════════════════════════════
 \section{Worked Example: One Burst End-to-end}
@@ -1369,6 +1824,42 @@ Users can toggle the accelerators at runtime:
 
 The header line in the plugin's message view reports the active backend
 combination, e.g.\ \verb|accel: numba* + pyfftw + oaconv|.
+
+\begin{center}
+\begin{tikzpicture}
+\begin{axis}[
+  width=13cm, height=4.5cm,
+  xbar stacked, xmin=0, xmax=100,
+  ytick=\empty,
+  xlabel={\% of one CPU core (per second of stream, $f_s = \SI{2}{MHz}$)},
+  xtick={0, 20, 40, 60, 80, 100},
+  bar width=0.5cm,
+  y=0.9cm,
+  every axis plot/.append style={fill},
+  legend style={at={(0.5,-0.35)}, anchor=north, legend columns=-1,
+                font=\scriptsize, /tikz/every even column/.append style={column sep=5pt}},
+  nodes near coords style={font=\tiny, color=black},
+  nodes near coords={\pgfmathprintnumber\pgfplotspointmeta\%},
+  point meta=x,
+]
+  \addplot+[fill=blue!50]   coordinates {(10,0)};
+  \addplot+[fill=orange!60] coordinates {(28,0)};
+  \addplot+[fill=green!60]  coordinates {(6,0)};
+  \addplot+[fill=red!50]    coordinates {(2,0)};
+  \addplot+[fill=purple!40] coordinates {(3,0)};
+  \addplot+[fill=gray!40]   coordinates {(51,0)};
+  \legend{tagger FFT, downmix FIR, sync FFT, PLL+slice, parser, idle/queue/other}
+\end{axis}
+\end{tikzpicture}
+\captionof{figure}{Approximate CPU distribution per second of stream
+at $f_s = \SI{2}{MHz}$ with all accelerators off (pure-Python /
+numpy).  Downmix FIR dominates at $\sim 28\%$ due to the per-burst
+113-tap convolution repeated $\sim 40\times/\text{sec}$; tagger FFT
+sits around 10\%; PLL/slicer are negligible in absolute terms but
+account for most of the per-symbol Python overhead.  Enabling
+oaconvolve/pyFFTW/Numba shifts these numbers modestly on this
+particular workload.}
+\end{center}
 
 %═══════════════════════════════════════════════════════════════════
 \section{References}
