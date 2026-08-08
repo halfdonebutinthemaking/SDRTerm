@@ -347,6 +347,12 @@ _CPR_PAIR_MAX_AGE  = 10.0      # global decode requires even+odd within this
 _LOG_DIR_DEFAULT   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   'adsb_logs')
 _LOG_FILE_NAME     = 'adsb.csv'                # single append-only file
+
+# In-memory per-aircraft position history (used by the web view to
+# reconstruct trails after a browser reload).  1000 points × 5 floats ≈
+# 40 kB per aircraft; even at 500 aircraft the total is ~20 MB — well
+# within a laptop's headroom.
+_MAX_TRACK_POINTS  = 1000
 _CSV_HEADER        = ('timestamp,icao,callsign,lat,lon,alt,'
                       'gs,ias,tas,heading,vr\n')
 
@@ -601,6 +607,8 @@ class AdsbDecoder(Decoder):
         cpr_key = 'cpr_odd' if odd else 'cpr_even'
         ac[cpr_key] = (lat_cpr, lon_cpr, now)
 
+        prev = (ac.get('lat'), ac.get('lon'))
+
         even = ac.get('cpr_even')
         odd_pair = ac.get('cpr_odd')
         if even is not None and odd_pair is not None and \
@@ -610,6 +618,7 @@ class AdsbDecoder(Decoder):
             pos = _cpr_global(even[0], even[1], odd_pair[0], odd_pair[1], use_odd)
             if pos is not None:
                 ac['lat'], ac['lon'] = pos
+                self._append_track(ac, now, prev)
                 return
 
         # Fallback: local decode from previous position, if any
@@ -618,8 +627,29 @@ class AdsbDecoder(Decoder):
                 ac['lat'], ac['lon'] = _cpr_local(
                     ac['lat'], ac['lon'], lat_cpr, lon_cpr, odd,
                 )
+                self._append_track(ac, now, prev)
             except Exception:
                 pass
+
+    def _append_track(self, ac: dict, now: float, prev_pos) -> None:
+        """Push a new point onto this aircraft's position ring-buffer.
+
+        Called after a successful CPR decode.  Skips no-ops (same coord
+        as the last one) so a stationary aircraft doesn't pad the trail
+        with duplicates.  Each point is (ts, lat, lon, alt, heading) —
+        enough for the browser to draw an altitude-shaded / heading-
+        arrowed trail later without another schema change.
+        """
+        lat = ac.get('lat')
+        lon = ac.get('lon')
+        if lat is None or lon is None:
+            return
+        if (lat, lon) == prev_pos:
+            return
+        track = ac.get('track')
+        if track is None:
+            track = ac['track'] = deque(maxlen=_MAX_TRACK_POINTS)
+        track.append((now, lat, lon, ac.get('alt'), ac.get('heading')))
 
     # ── keys ─────────────────────────────────────────────────────────────────
 
@@ -724,13 +754,21 @@ class AdsbDecoder(Decoder):
 
     # ── web view (consumed by plugins/webserver) ─────────────────────────────
 
-    def web_json(self) -> dict:
+    def web_json(self, query: dict = None) -> dict:
         """Snapshot for the browser.  Called from an HTTP thread, so return a
         defensive copy — process() may be mutating the aircraft dict on the
-        SDRTerm worker thread at the same time."""
+        SDRTerm worker thread at the same time.
+
+        When called with ?history=1 the response also includes each
+        aircraft's in-memory position trail — used by the browser to
+        rebuild polylines after a page reload.  Regular 2 s polls omit
+        the ?history flag so the wire format stays small.
+        """
+        query = query or {}
+        include_history = query.get('history') == '1'
         aircraft = []
         for icao, ac in list(self._aircraft.items()):
-            aircraft.append({
+            entry = {
                 'icao':      icao,
                 'callsign':  ac.get('callsign'),
                 'lat':       ac.get('lat'),
@@ -741,7 +779,15 @@ class AdsbDecoder(Decoder):
                 'heading':   ac.get('heading'),
                 'vr':        ac.get('vr'),
                 'last_seen': ac.get('last_seen'),
-            })
+            }
+            if include_history:
+                track = ac.get('track')
+                if track:
+                    entry['track'] = [
+                        {'ts': t, 'lat': la, 'lon': lo, 'alt': al, 'heading': hd}
+                        for (t, la, lo, al, hd) in track
+                    ]
+            aircraft.append(entry)
         return {
             'aircraft':  aircraft,
             'n_bursts':  self._n_bursts,

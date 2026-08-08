@@ -283,7 +283,26 @@
       if (!entry) {
         const marker = L.marker(latlng, { icon: planeIcon(heading, isStale) })
                         .addTo(map).bindPopup(popupHtml(ac));
-        entry = markers[ac.icao] = { marker, poly: null, coords: [latlng], latestAc: ac };
+
+        // If the server sent us a full track (only on the first fetch,
+        // via ?history=1), pre-populate the coords array so the polyline
+        // renders immediately.  Otherwise start empty — the polyline
+        // will be created lazily on the second live position update.
+        let coords = [latlng];
+        let poly = null;
+        if (Array.isArray(ac.track) && ac.track.length > 0) {
+          coords = ac.track.map(p => [p.lat, p.lon]);
+          // Append current position if it's newer than the last track point
+          const last = coords[coords.length - 1];
+          if (last[0] !== ac.lat || last[1] !== ac.lon) coords.push(latlng);
+          if (coords.length >= 2) {
+            poly = L.polyline(coords, {
+              color: '#ff0', weight: 2, opacity: 0.75,
+              lineCap: 'round', lineJoin: 'round',
+            }).addTo(map);
+          }
+        }
+        entry = markers[ac.icao] = { marker, poly, coords, latestAc: ac };
 
         // Hook enrichment + route drawing on popup lifecycle.
         // Also persist the selected ICAO so it survives page reloads.
@@ -362,9 +381,12 @@
   }
 
   // ── poll ─────────────────────────────────────────────────────────────
-  async function tick() {
+  // First tick after page load asks for full history so trails restore
+  // instantly; subsequent 2 s polls omit ?history=1 to keep responses lean.
+  async function tick(withHistory = false) {
     try {
-      const r = await fetch('/api/adsb', { cache: 'no-store' });
+      const url = withHistory ? '/api/adsb?history=1' : '/api/adsb';
+      const r = await fetch(url, { cache: 'no-store' });
       if (!r.ok) throw new Error(r.statusText);
       const d = await r.json();
       const now = Date.now() / 1000;
@@ -379,8 +401,8 @@
       document.getElementById('log-state').textContent = 'error: ' + e.message;
     }
   }
-  setInterval(tick, 2000);
-  tick();
+  setInterval(() => tick(false), 2000);
+  tick(true);
 
   // ── auto-reload every 30 s ───────────────────────────────────────────
   // The reload keeps the app fresh (picks up new JS if you're editing,

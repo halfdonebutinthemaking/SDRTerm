@@ -30,7 +30,7 @@ import os
 import pathlib
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import unquote
+from urllib.parse import unquote, parse_qs
 
 from core import Decoder, AppState
 
@@ -67,13 +67,18 @@ class _Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        path = unquote(self.path.split('?', 1)[0])
+        split = self.path.split('?', 1)
+        path = unquote(split[0])
+        # Flatten the query dict — parse_qs gives {'k': ['v']} but the plugin
+        # contract wants {'k': 'v'} for the common single-value case.
+        query = ({k: v[0] for k, v in parse_qs(split[1]).items() if v}
+                 if len(split) > 1 else {})
         parts = [p for p in path.split('/') if p]
         try:
             if not parts:
                 return self._serve_index()
             if parts[0] == 'api' and len(parts) == 2:
-                return self._serve_api(parts[1])
+                return self._serve_api(parts[1], query)
             if parts[0] == 'tab' and len(parts) == 2:
                 return self._serve_tab(parts[1])
             if parts[0] == 'static' and len(parts) >= 3:
@@ -103,13 +108,18 @@ class _Handler(BaseHTTPRequestHandler):
                 html.append(f'<a href="/tab/{slug}">{title}</a>')
         self._send(200, 'text/html; charset=utf-8', '\n'.join(html).encode())
 
-    def _serve_api(self, slug: str):
+    def _serve_api(self, slug: str, query: dict = None):
         plugin = self._webserver._plugin_by_slug(slug)
         if plugin is None or not hasattr(plugin, 'web_json'):
             self.send_error(404)
             return
+        # Prefer the new signature web_json(query=None); fall back to the
+        # legacy zero-arg form for any plugin that predates query support.
         try:
-            data = plugin.web_json()
+            try:
+                data = plugin.web_json(query=query or {})
+            except TypeError:
+                data = plugin.web_json()
         except Exception as exc:
             self.send_error(500, f'plugin.web_json() raised: {exc!r}')
             return

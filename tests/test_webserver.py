@@ -172,6 +172,10 @@ class TestAdsbIntegration:
         assert 'location.reload' in html
         assert 'fitBounds' in html
         assert 'adsb:selected' in html
+        # Server-side trail restore: browser asks for ?history=1 on the
+        # first fetch after (re)load.
+        assert '?history=1' in html
+        assert 'ac.track' in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
@@ -180,6 +184,33 @@ class TestAdsbIntegration:
         static = server._plugin_static_dir(adsb)
         assert static is not None
         assert static.endswith('/plugins/adsb/web')
+
+    def test_history_query_produces_tracks(self, server, tmp_path):
+        """End-to-end: ?history=1 over HTTP returns per-aircraft tracks."""
+        from plugins.adsb.adsb import AdsbDecoder
+        adsb = AdsbDecoder()
+        adsb._log_dir = str(tmp_path)
+        # Feed a global-decode pair
+        for hex_frame in ['8D40621D58C382D690C8AC2863A7',
+                          '8D40621D58C386435CC412692AD6']:
+            msg = bytes.fromhex(hex_frame)
+            adsb._parse_df17(msg, __import__('plugins.adsb.adsb',
+                                             fromlist=['_bytes_to_bits'])
+                             ._bytes_to_bits(msg))
+        server.wire({'adsb': adsb, 'webserver': server})
+        server.start(None)
+        time.sleep(0.05)
+
+        # Without history: no track
+        body, _, _ = _get(_base(server) + '/api/adsb')
+        data = json.loads(body)
+        assert 'track' not in data['aircraft'][0]
+
+        # With history: track present
+        body, _, _ = _get(_base(server) + '/api/adsb?history=1')
+        data = json.loads(body)
+        assert 'track' in data['aircraft'][0]
+        assert isinstance(data['aircraft'][0]['track'], list)
 
 
 # ── security ─────────────────────────────────────────────────────────────────

@@ -223,6 +223,65 @@ class TestCorrelator:
 
 # ── end-to-end pipeline smoke test ───────────────────────────────────────────
 
+class TestPositionTrack:
+    """In-memory per-aircraft position history that the web view uses to
+    reconstruct polylines after a browser reload."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        return d
+
+    def _feed(self, d, hex_frame: str):
+        msg = bytes.fromhex(hex_frame)
+        d._parse_df17(msg, _bytes_to_bits(msg))
+
+    def test_position_pair_appends_a_point(self, tmp_path):
+        d = self._mk(tmp_path)
+        # Global decode needs an even+odd pair from the same ICAO
+        self._feed(d, '8D40621D58C382D690C8AC2863A7')   # even
+        self._feed(d, '8D40621D58C386435CC412692AD6')   # odd
+        ac = d._aircraft['40621D']
+        assert 'track' in ac
+        assert len(ac['track']) >= 1
+        pt = ac['track'][-1]
+        # Shape: (ts, lat, lon, alt, heading).  The global decoder picks
+        # whichever of the two frames is newer for the returned coordinate,
+        # so odd-frame values apply here — tolerance matches the existing
+        # test_global_decode_use_odd_variant test.
+        assert len(pt) == 5
+        assert pt[1] == pytest.approx(52.2572, abs=0.05)
+        assert pt[2] == pytest.approx(3.919,   abs=0.05)
+
+    def test_duplicate_position_is_not_appended(self, tmp_path):
+        d = self._mk(tmp_path)
+        self._feed(d, '8D40621D58C382D690C8AC2863A7')
+        self._feed(d, '8D40621D58C386435CC412692AD6')
+        n1 = len(d._aircraft['40621D']['track'])
+        # Same odd frame again — no new position → no new track point
+        self._feed(d, '8D40621D58C386435CC412692AD6')
+        n2 = len(d._aircraft['40621D']['track'])
+        assert n2 == n1
+
+    def test_web_json_includes_track_only_with_history(self, tmp_path):
+        d = self._mk(tmp_path)
+        self._feed(d, '8D40621D58C382D690C8AC2863A7')
+        self._feed(d, '8D40621D58C386435CC412692AD6')
+        # No query — no tracks in response
+        payload = d.web_json()
+        assert 'track' not in payload['aircraft'][0]
+        # With ?history=1 — track is included as a list of dicts
+        payload = d.web_json(query={'history': '1'})
+        ac = payload['aircraft'][0]
+        assert 'track' in ac
+        assert isinstance(ac['track'], list)
+        assert set(ac['track'][0].keys()) >= {'ts', 'lat', 'lon', 'alt', 'heading'}
+
+
 class TestCsvLogging:
     class _S:
         bw_hz = 2_000_000
