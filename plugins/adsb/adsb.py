@@ -365,6 +365,12 @@ class AdsbDecoder(Decoder):
     bg_queue_depth  = 8
     full_view       = True
 
+    # ── webserver plugin contract ────────────────────────────────────────────
+    web_title       = 'ADS-B live map'
+    web_slug        = 'adsb'
+    web_static_dir  = 'web'                    # plugins/adsb/web/index.html
+    web_poll_ms     = 2000
+
     def __init__(self):
         self._aircraft: dict     = {}
         self._messages           = deque(maxlen=64)
@@ -715,3 +721,30 @@ class AdsbDecoder(Decoder):
     def load_state(self, d: dict) -> None:
         if 'logging_enabled' in d:
             self._logging_enabled = bool(d['logging_enabled'])
+
+    # ── web view (consumed by plugins/webserver) ─────────────────────────────
+
+    def web_json(self) -> dict:
+        """Snapshot for the browser.  Called from an HTTP thread, so return a
+        defensive copy — process() may be mutating the aircraft dict on the
+        SDRTerm worker thread at the same time."""
+        aircraft = []
+        for icao, ac in list(self._aircraft.items()):
+            aircraft.append({
+                'icao':      icao,
+                'callsign':  ac.get('callsign'),
+                'lat':       ac.get('lat'),
+                'lon':       ac.get('lon'),
+                'alt':       ac.get('alt'),
+                'speed':     ac.get('speed'),
+                'spd_type':  ac.get('spd_type'),
+                'heading':   ac.get('heading'),
+                'vr':        ac.get('vr'),
+                'last_seen': ac.get('last_seen'),
+            })
+        return {
+            'aircraft':  aircraft,
+            'n_bursts':  self._n_bursts,
+            'n_crc_ok':  self._n_crc_ok,
+            'logging':   self._logging_enabled,
+        }

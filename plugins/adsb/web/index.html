@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDRTerm — ADS-B live map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""/>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font: 14px system-ui, sans-serif; }
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+  #hud {
+    position: absolute; top: 0.6em; left: 0.6em; z-index: 500;
+    background: rgba(20, 20, 20, 0.82); color: #eee;
+    padding: 0.5em 0.9em; border-radius: 6px;
+    font-family: monospace; font-size: 12px; line-height: 1.4;
+    pointer-events: none;
+  }
+  #hud b { color: #8cf; }
+  .plane {
+    color: #ff0; font-size: 22px; text-shadow: 0 0 3px #000;
+    text-align: center; line-height: 1;
+    transform-origin: center;
+  }
+  .plane.stale { color: #888; }
+  .leaflet-popup-content { font: 12px monospace; line-height: 1.4; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">
+  <div><b>Aircraft:</b> <span id="ac-count">0</span></div>
+  <div><b>Frames:</b>   <span id="frame-count">0</span></div>
+  <div><b>Peaks:</b>    <span id="peak-count">0</span></div>
+  <div><b>Log:</b>      <span id="log-state">?</span></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""></script>
+<script>
+  // ── map ───────────────────────────────────────────────────────────────
+  const map = L.map('map', {
+    zoomControl: true, worldCopyJump: true,
+  }).setView([52.0, 5.0], 6);
+  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap',
+    maxZoom: 18,
+  }).addTo(map);
+
+  // ── aircraft markers ─────────────────────────────────────────────────
+  const markers = {};   // icao → { marker, poly, coords[] }
+  const STALE_S = 60;   // grey the icon out after this many seconds of silence
+  const TRAIL_MAX = 60; // keep this many recent positions per aircraft
+
+  function planeIcon(headingDeg, isStale) {
+    // ▲ pointed up, rotated by heading (0 = north).
+    const cls = 'plane' + (isStale ? ' stale' : '');
+    const html = `<div class="${cls}" style="transform: rotate(${headingDeg}deg)">▲</div>`;
+    return L.divIcon({ className: '', html, iconSize: [24, 24], iconAnchor: [12, 12] });
+  }
+
+  function popupHtml(ac) {
+    const rows = [
+      ['ICAO',     ac.icao],
+      ['Callsign', ac.callsign || ''],
+      ['Alt',      ac.alt != null ? ac.alt + ' ft' : ''],
+      ['Speed',    ac.speed != null
+                    ? ac.speed + ' kt (' + (ac.spd_type || '?') + ')' : ''],
+      ['Heading',  ac.heading != null ? ac.heading + '°' : ''],
+      ['V.rate',   ac.vr != null ? ac.vr + ' fpm' : ''],
+      ['Lat',      ac.lat != null ? ac.lat.toFixed(4) : ''],
+      ['Lon',      ac.lon != null ? ac.lon.toFixed(4) : ''],
+    ];
+    return rows.filter(r => r[1] !== '')
+               .map(r => `<b>${r[0]}:</b> ${r[1]}`).join('<br>');
+  }
+
+  function updateAircraft(list, now) {
+    const seen = new Set();
+    for (const ac of list) {
+      seen.add(ac.icao);
+      if (ac.lat == null || ac.lon == null) continue;
+      const isStale = ac.last_seen && (now - ac.last_seen) > STALE_S;
+      const heading = ac.heading != null ? ac.heading : 0;
+      const latlng = [ac.lat, ac.lon];
+
+      let entry = markers[ac.icao];
+      if (!entry) {
+        const marker = L.marker(latlng, { icon: planeIcon(heading, isStale) })
+                        .addTo(map).bindPopup(popupHtml(ac));
+        const poly = L.polyline([latlng], { color: '#ff0', weight: 1.5, opacity: 0.7 })
+                      .addTo(map);
+        entry = markers[ac.icao] = { marker, poly, coords: [latlng] };
+      } else {
+        entry.marker.setLatLng(latlng);
+        entry.marker.setIcon(planeIcon(heading, isStale));
+        entry.marker.setPopupContent(popupHtml(ac));
+        // Only extend the trail when the position actually moved.
+        const last = entry.coords[entry.coords.length - 1];
+        if (last[0] !== ac.lat || last[1] !== ac.lon) {
+          entry.coords.push(latlng);
+          if (entry.coords.length > TRAIL_MAX) entry.coords.shift();
+          entry.poly.setLatLngs(entry.coords);
+        }
+      }
+    }
+    // NB: we deliberately do NOT remove markers for aircraft that fall out
+    // of the payload — the backend keeps every ICAO for the whole session,
+    // so an aircraft only disappears if the user hit 'r' to clear.  If the
+    // backend ever drops one, uncomment:
+    //   for (const icao of Object.keys(markers))
+    //     if (!seen.has(icao)) { markers[icao].marker.remove(); ...; delete markers[icao]; }
+  }
+
+  // ── poll ─────────────────────────────────────────────────────────────
+  async function tick() {
+    try {
+      const r = await fetch('/api/adsb', { cache: 'no-store' });
+      if (!r.ok) throw new Error(r.statusText);
+      const d = await r.json();
+      const now = Date.now() / 1000;
+      updateAircraft(d.aircraft || [], now);
+      document.getElementById('ac-count').textContent    = (d.aircraft || []).length;
+      document.getElementById('frame-count').textContent = d.n_crc_ok || 0;
+      document.getElementById('peak-count').textContent  = d.n_bursts || 0;
+      document.getElementById('log-state').textContent   = d.logging ? 'ON' : 'off';
+    } catch (e) {
+      document.getElementById('log-state').textContent = 'error: ' + e.message;
+    }
+  }
+  setInterval(tick, 2000);
+  tick();
+</script>
+</body>
+</html>

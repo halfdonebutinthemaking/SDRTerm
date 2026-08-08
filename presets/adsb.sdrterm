@@ -12,11 +12,13 @@
   "active_decoders": [
     "spectrum",
     "adsb",
-    "peak_marker"
+    "peak_marker",
+    "webserver"
   ],
   "plugin_order": [
     "adsb",
     "peak_marker",
+    "webserver",
     "freqhop",
     "constellation",
     "range-scan",
@@ -33,5 +35,7 @@
     "rtl-tcp-passive",
     "rtl-tcp-active"
   ],
-  "plugin_states": {}
+  "plugin_states": {
+    "webserver": {"enabled": true, "host": "127.0.0.1", "port": 8080}
+  }
 }

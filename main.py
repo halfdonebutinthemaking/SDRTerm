@@ -66,6 +66,12 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         curses.init_pair(1, curses.COLOR_CYAN, -1)
 
     registry = load_plugins()
+    # Give plugins a chance to see the full registry (needed by webserver
+    # and any future cross-plugin coordination). Duck-typed: only plugins
+    # with a wire() method receive it.
+    for _p in registry.values():
+        if hasattr(_p, 'wire') and callable(_p.wire):
+            _p.wire(registry)
     # Discard any preset-loaded decoder names that don't exist in this registry
     state.active_decoders = (state.active_decoders & set(registry.keys())) | {'spectrum'}
     registry['spectrum'].start(state)
