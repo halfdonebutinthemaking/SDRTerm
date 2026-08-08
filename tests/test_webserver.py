@@ -166,6 +166,12 @@ class TestAdsbIntegration:
         assert '/v0/aircraft/' in html
         assert '/v0/callsign/' in html
         assert 'localStorage' in html
+        # Dual-unit display + auto-refresh + zoom-to-fit + selection restore
+        assert 'km/h' in html
+        assert 'm/s'  in html
+        assert 'location.reload' in html
+        assert 'fitBounds' in html
+        assert 'adsb:selected' in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
