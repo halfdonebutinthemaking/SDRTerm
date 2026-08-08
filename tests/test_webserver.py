@@ -161,6 +161,11 @@ class TestAdsbIntegration:
         html = body.decode()
         assert 'leaflet' in html.lower()
         assert '/api/adsb' in html
+        # Enrichment wiring: adsbdb + attribution + localStorage cache
+        assert 'adsbdb.com' in html
+        assert '/v0/aircraft/' in html
+        assert '/v0/callsign/' in html
+        assert 'localStorage' in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
