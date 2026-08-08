@@ -59,9 +59,13 @@
   const map = L.map('map', {
     zoomControl: true, worldCopyJump: true,
   }).setView([52.0, 5.0], 6);
-  L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
-    attribution: '© OpenStreetMap',
-    maxZoom: 18,
+  // CartoDB Positron — a minimal, near-monochrome basemap. Aircraft
+  // markers and route lines stand out clearly against it, and it
+  // renders faster than the full OSM cartography.
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
   }).addTo(map);
 
   // ── unit conversion helpers ──────────────────────────────────────────
@@ -187,15 +191,18 @@
     // Route
     if (route) {
       const o = route.origin, d = route.destination;
-      if (o && d) {
+      if (o && d && o.latitude != null && d.latitude != null) {
         parts.push(
           `<div class="route">${o.iata_code || o.icao_code} → ${d.iata_code || d.icao_code}</div>`
           + `<div style="font-size:11px;color:#aaa">${o.municipality} → ${d.municipality}</div>`
+          + `<div style="font-size:10px;color:#8f8">✓ dashed line drawn on map</div>`
         );
+      } else {
+        parts.push('<div class="footer">callsign found but no airport coords</div>');
       }
       if (route.airline?.name) parts.push(`<div style="font-size:11px;color:#aaa">${route.airline.name}</div>`);
     } else if (route === null && ac.callsign) {
-      parts.push('<div class="footer">no route for this callsign</div>');
+      parts.push('<div class="footer">no route for this callsign (adsbdb 404)</div>');
     } else if (ac.callsign) {
       parts.push('<div class="spinner">looking up route…</div>');
     }
@@ -226,17 +233,25 @@
     if (o.latitude == null || d.latitude == null) return;
     const oLL = [o.latitude, o.longitude];
     const dLL = [d.latitude, d.longitude];
+    // High-contrast red so the route line reads against the pale
+    // basemap; dashed to distinguish it from the yellow past-track
+    // polyline of the same aircraft.
+    const routeStyle = {
+      color: '#e33', weight: 3, opacity: 0.9,
+      dashArray: '10, 6', lineCap: 'round', lineJoin: 'round',
+    };
+    const dotStyle = {
+      radius: 6, color: '#e33', fillColor: '#fff',
+      fillOpacity: 1, weight: 3,
+    };
     activeRoute = L.layerGroup([
-      L.polyline([oLL, currentLatLng, dLL], {
-        color: '#8cf', weight: 2, opacity: 0.65,
-        dashArray: '6, 6', lineCap: 'round', lineJoin: 'round',
-      }),
-      L.circleMarker(oLL, {
-        radius: 5, color: '#8cf', fillColor: '#8cf', fillOpacity: 0.9, weight: 2,
-      }).bindTooltip(`${o.iata_code || o.icao_code} — ${o.municipality}`, { permanent: false }),
-      L.circleMarker(dLL, {
-        radius: 5, color: '#8cf', fillColor: '#8cf', fillOpacity: 0.9, weight: 2,
-      }).bindTooltip(`${d.iata_code || d.icao_code} — ${d.municipality}`, { permanent: false }),
+      L.polyline([oLL, currentLatLng, dLL], routeStyle),
+      L.circleMarker(oLL, dotStyle)
+       .bindTooltip(`${o.iata_code || o.icao_code} — ${o.municipality}`,
+                    { permanent: false, direction: 'top' }),
+      L.circleMarker(dLL, dotStyle)
+       .bindTooltip(`${d.iata_code || d.icao_code} — ${d.municipality}`,
+                    { permanent: false, direction: 'top' }),
     ]).addTo(map);
   }
 
