@@ -5,6 +5,8 @@ mode-s.org so the values (ICAO, callsign, altitude, lat/lon,
 velocity) are known and easy to cross-reference.
 """
 import time
+from datetime import datetime, timedelta, timezone
+
 import numpy as np
 import pytest
 
@@ -222,6 +224,91 @@ class TestCorrelator:
 
 
 # ── end-to-end pipeline smoke test ───────────────────────────────────────────
+
+class TestLogWindowRead:
+    """web_json now reads the CSV log filtered by a from/to time window
+    instead of retaining an in-memory ring buffer."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        return d
+
+    def _write_log(self, tmp_path, rows):
+        """Write a small CSV log the plugin can read.  `rows` is a list of
+        (timestamp, icao, callsign, lat, lon, alt, gs, ias, tas, heading, vr)."""
+        path = tmp_path / 'adsb.csv'
+        with open(path, 'w') as f:
+            f.write('timestamp,icao,callsign,lat,lon,alt,gs,ias,tas,heading,vr\n')
+            for r in rows:
+                f.write(','.join('' if v is None else str(v) for v in r) + '\n')
+        return path
+
+    def test_returns_only_rows_inside_window(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-08T10:00:00.000Z', '4CA1F2', 'RYR1', 51.5, -0.1, 35000, 480, None, None, 90, 0),
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'RYR1', 51.6, -0.1, 35000, 480, None, None, 91, 0),
+            ('2026-08-09T14:05:00.000Z', '4CA1F2', 'RYR1', 51.7, -0.1, 35000, 481, None, None, 91, 0),
+        ])
+        d = self._mk(tmp_path)
+        acs = d._read_log_window('2026-08-09T00:00:00.000Z', None)
+        assert '4CA1F2' in acs
+        assert len(acs['4CA1F2']['track']) == 2       # only the two Aug-9 rows
+        assert acs['4CA1F2']['lat'] == pytest.approx(51.7)   # latest wins
+        assert acs['4CA1F2']['callsign'] == 'RYR1'
+
+    def test_web_json_default_window_last_30_min(self, tmp_path):
+        # Row from an hour ago (outside default) + row from a minute ago (inside)
+        now = datetime.now(timezone.utc)
+        old = (now - timedelta(hours=1)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        new = (now - timedelta(minutes=1)).strftime('%Y-%m-%dT%H:%M:%S.000Z')
+        self._write_log(tmp_path, [
+            (old, '4CA1F2', '', 51.0, 0.0, 30000, None, None, None, None, None),
+            (new, '4CA1F2', '', 52.0, 0.0, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json()          # no query → default 30 min
+        assert len(payload['aircraft']) == 1
+        assert payload['aircraft'][0]['lat'] == pytest.approx(52.0)  # only the new row
+        assert payload['window']['from'] is not None                 # server echoed the default
+
+    def test_explicit_from_to_are_honoured(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T10:00:00.000Z', '4CA1F2', '', 51.0, 0.0, 30000, None, None, None, None, None),
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', '', 52.0, 0.0, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={
+            'from': '2026-08-09T09:00:00.000Z',
+            'to':   '2026-08-09T12:00:00.000Z',
+        })
+        assert len(payload['aircraft']) == 1
+        assert len(payload['aircraft'][0]['track']) == 1
+        assert payload['aircraft'][0]['lat'] == pytest.approx(51.0)
+
+    def test_missing_log_file_returns_empty(self, tmp_path):
+        # No log written — endpoint should still return a well-formed empty payload
+        d = self._mk(tmp_path)
+        payload = d.web_json()
+        assert payload['aircraft'] == []
+        assert 'window' in payload
+
+    def test_speed_slot_wins_by_type(self, tmp_path):
+        # A GS row followed by an IAS row: current 'speed' should be IAS
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', '', 51.0, 0.0, 30000, 400, None, None, 90, 0),
+            ('2026-08-09T14:00:30.000Z', '4CA1F2', '', 51.1, 0.0, 30000, None, 380, None, 90, 0),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={'from': '2026-08-09T13:00:00.000Z', 'to': '2026-08-09T15:00:00.000Z'})
+        ac = payload['aircraft'][0]
+        assert ac['speed'] == 380
+        assert ac['spd_type'] == 'IAS'
+
 
 class TestCsvLogging:
     class _S:

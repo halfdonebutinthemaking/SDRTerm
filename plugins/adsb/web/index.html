@@ -1,0 +1,414 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDRTerm — ADS-B live map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""/>
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; font: 14px system-ui, sans-serif; }
+  #map { position: absolute; top: 0; left: 0; right: 0; bottom: 0; }
+  #hud {
+    position: absolute; top: 0.6em; left: 0.6em; z-index: 500;
+    background: rgba(20, 20, 20, 0.9); color: #eee;
+    padding: 0.6em 0.9em; border-radius: 6px;
+    font-family: monospace; font-size: 12px; line-height: 1.5;
+    box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+  }
+  #hud b { color: #8cf; }
+  #hud select, #hud input, #hud button {
+    background: #222; color: #eee; border: 1px solid #444;
+    padding: 3px 6px; font-family: monospace; font-size: 12px;
+    border-radius: 3px;
+  }
+  #hud button { cursor: pointer; }
+  #hud button:hover { background: #333; }
+  #hud button:disabled { opacity: 0.5; cursor: wait; }
+  #custom-range { display: none; margin-top: 4px; }
+  #custom-range input { width: 12em; }
+  #window-label { color: #aaa; }
+  .plane {
+    width: 28px; height: 28px;
+    color: #d80;
+    filter: drop-shadow(0 0 2px #fff) drop-shadow(0 0 1px #fff);
+    transform-origin: center center;
+    transition: transform 300ms linear;
+  }
+  .plane.stale { color: #999; opacity: 0.7; }
+  .plane svg { display: block; width: 100%; height: 100%; }
+  .plane svg path { fill: currentColor; }
+  .leaflet-popup-content-wrapper { background: #1a1a1a; color: #eee; }
+  .leaflet-popup-tip           { background: #1a1a1a; }
+  .leaflet-popup-content { font: 12px system-ui; line-height: 1.45; margin: 10px 12px; max-width: 260px; }
+  .leaflet-popup-content h3 { margin: 0 0 0.3em 0; color: #8cf; font-size: 14px; }
+  .leaflet-popup-content .telemetry { font-family: monospace; font-size: 11px; color: #ccc; }
+  .leaflet-popup-content .telemetry b { color: #ff0; }
+  .leaflet-popup-content .route { color: #f88; font-weight: 600; margin: 0.4em 0; }
+  .leaflet-popup-content .footer { font-size: 10px; color: #666; margin-top: 0.6em; }
+  .leaflet-popup-content .footer a { color: #666; text-decoration: none; }
+  .leaflet-popup-content img { max-width: 240px; border-radius: 4px; margin-bottom: 0.4em; }
+  .leaflet-popup-content .spinner { font-style: italic; color: #888; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="hud">
+  <div>
+    <b>Show:</b>
+    <select id="window-select">
+      <option value="5m">last 5 minutes</option>
+      <option value="30m" selected>last 30 minutes</option>
+      <option value="1h">last 1 hour</option>
+      <option value="2h">last 2 hours</option>
+      <option value="6h">last 6 hours</option>
+      <option value="today">today</option>
+      <option value="custom">custom range…</option>
+    </select>
+    <button id="refresh-btn" title="Re-scan the log with the current window">↻</button>
+  </div>
+  <div id="custom-range">
+    <div>from <input type="datetime-local" id="range-from" step="1"></div>
+    <div>to&nbsp;&nbsp;<input type="datetime-local" id="range-to"   step="1"></div>
+  </div>
+  <div style="margin-top:6px">
+    <b>Aircraft:</b> <span id="ac-count">0</span>
+    &nbsp;<b>Log:</b> <span id="log-state">?</span>
+  </div>
+  <div><b>Window:</b> <span id="window-label">—</span></div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+        crossorigin=""></script>
+<script>
+  // ── map ───────────────────────────────────────────────────────────────
+  const map = L.map('map', {
+    zoomControl: true, worldCopyJump: true,
+  }).setView([52.0, 5.0], 6);
+  L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+    attribution: '© OpenStreetMap © CARTO',
+    subdomains: 'abcd',
+    maxZoom: 19,
+  }).addTo(map);
+
+  // ── unit conversion helpers ──────────────────────────────────────────
+  const M_PER_FT   = 0.3048;
+  const KMH_PER_KT = 1.852;
+  const MS_PER_FPM = 0.00508;
+  const fmtAlt   = ft  => ft  == null ? '' : `${ft} ft / ${Math.round(ft * M_PER_FT)} m`;
+  const fmtSpeed = kt  => kt  == null ? '' : `${kt} kt / ${Math.round(kt * KMH_PER_KT)} km/h`;
+  const fmtVR    = fpm => fpm == null ? '' : `${fpm} fpm / ${(fpm * MS_PER_FPM).toFixed(1)} m/s`;
+
+  // ── aircraft markers ─────────────────────────────────────────────────
+  const markers = {};   // icao → { marker, poly, coords[], latestAc }
+  const STALE_S = 60;
+
+  const PLANE_SVG = `
+    <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+      <path d="M12 1 L13 9 L22 13 L22 15 L13 13 L13 19 L15 21 L15 22 L12 21 L9 22 L9 21 L11 19 L11 13 L2 15 L2 13 L11 9 Z"/>
+    </svg>`;
+
+  function planeIcon(headingDeg, isStale) {
+    const cls = 'plane' + (isStale ? ' stale' : '');
+    const html =
+      `<div class="${cls}" style="transform: rotate(${headingDeg}deg)">${PLANE_SVG}</div>`;
+    return L.divIcon({ className: '', html, iconSize: [28, 28], iconAnchor: [14, 14] });
+  }
+
+  // ── enrichment cache (in-memory + localStorage TTL) ──────────────────
+  const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
+  const cacheMem = { aircraft: {}, route: {} };
+
+  function cacheGet(kind, key) {
+    if (cacheMem[kind][key] !== undefined) return cacheMem[kind][key];
+    try {
+      const raw = localStorage.getItem(`adsb:${kind}:${key}`);
+      if (!raw) return undefined;
+      const { t, v, neg } = JSON.parse(raw);
+      const ttl = neg ? TTL.negative : TTL[kind];
+      if (Date.now() - t > ttl) { localStorage.removeItem(`adsb:${kind}:${key}`); return undefined; }
+      cacheMem[kind][key] = v;
+      return v;
+    } catch { return undefined; }
+  }
+  function cacheSet(kind, key, value) {
+    cacheMem[kind][key] = value;
+    try {
+      const entry = { t: Date.now(), v: value, neg: value === null };
+      localStorage.setItem(`adsb:${kind}:${key}`, JSON.stringify(entry));
+    } catch {}
+  }
+
+  async function fetchAircraft(icao) {
+    const cached = cacheGet('aircraft', icao);
+    if (cached !== undefined) return cached;
+    try {
+      const r = await fetch(`https://api.adsbdb.com/v0/aircraft/${icao}`);
+      if (r.status === 404) { cacheSet('aircraft', icao, null); return null; }
+      if (!r.ok) return null;
+      const j = await r.json();
+      const a = j?.response?.aircraft || null;
+      cacheSet('aircraft', icao, a);
+      return a;
+    } catch { return null; }
+  }
+  async function fetchRoute(callsign) {
+    const key = callsign.trim().toUpperCase();
+    if (!key) return null;
+    const cached = cacheGet('route', key);
+    if (cached !== undefined) return cached;
+    try {
+      const r = await fetch(`https://api.adsbdb.com/v0/callsign/${key}`);
+      if (r.status === 404) { cacheSet('route', key, null); return null; }
+      if (!r.ok) return null;
+      const j = await r.json();
+      const fr = j?.response?.flightroute || null;
+      cacheSet('route', key, fr);
+      return fr;
+    } catch { return null; }
+  }
+
+  // ── popup rendering ──────────────────────────────────────────────────
+  function popupHtml(ac) {
+    const acInfo = cacheGet('aircraft', ac.icao);
+    const route  = ac.callsign ? cacheGet('route', ac.callsign.trim().toUpperCase()) : undefined;
+    const parts = [];
+    const title = ac.callsign
+                    ? `${ac.callsign}${acInfo?.registration ? ' (' + acInfo.registration + ')' : ''}`
+                    : (acInfo?.registration || ac.icao);
+    parts.push(`<h3>${title}</h3>`);
+    if (acInfo?.url_photo_thumbnail) {
+      parts.push(`<a href="${acInfo.url_photo}" target="_blank" rel="noopener">
+                    <img src="${acInfo.url_photo_thumbnail}" alt="aircraft photo" loading="lazy">
+                  </a>`);
+    }
+    if (acInfo) {
+      const typeLine = [acInfo.manufacturer, acInfo.type].filter(Boolean).join(' ');
+      if (typeLine) parts.push(`<div>${typeLine}</div>`);
+      if (acInfo.registered_owner) parts.push(`<div>${acInfo.registered_owner}</div>`);
+    } else if (acInfo === null) {
+      parts.push('<div class="footer">no metadata for this ICAO</div>');
+    } else {
+      parts.push('<div class="spinner">looking up aircraft…</div>');
+    }
+    if (route) {
+      const o = route.origin, d = route.destination;
+      if (o && d && o.latitude != null && d.latitude != null) {
+        parts.push(
+          `<div class="route">${o.iata_code || o.icao_code} → ${d.iata_code || d.icao_code}</div>`
+          + `<div style="font-size:11px;color:#aaa">${o.municipality} → ${d.municipality}</div>`
+          + `<div style="font-size:10px;color:#8f8">✓ dashed line drawn on map</div>`
+        );
+      } else {
+        parts.push('<div class="footer">callsign found but no airport coords</div>');
+      }
+      if (route.airline?.name) parts.push(`<div style="font-size:11px;color:#aaa">${route.airline.name}</div>`);
+    } else if (route === null && ac.callsign) {
+      parts.push('<div class="footer">no route for this callsign (adsbdb 404)</div>');
+    } else if (ac.callsign) {
+      parts.push('<div class="spinner">looking up route…</div>');
+    }
+    const t = [];
+    if (ac.alt     != null) t.push(`<b>ALT</b> ${fmtAlt(ac.alt)}`);
+    if (ac.speed   != null) t.push(`<b>SPD</b> ${fmtSpeed(ac.speed)} (${ac.spd_type || '?'})`);
+    if (ac.heading != null) t.push(`<b>HDG</b> ${ac.heading}°`);
+    if (ac.vr      != null) t.push(`<b>V/S</b> ${fmtVR(ac.vr)}`);
+    if (ac.lat     != null) t.push(`<b>POS</b> ${ac.lat.toFixed(4)}, ${ac.lon.toFixed(4)}`);
+    if (t.length) parts.push(`<div class="telemetry">${t.join('<br>')}</div>`);
+    parts.push(`<div class="footer">data © <a href="https://www.adsbdb.com" target="_blank" rel="noopener">adsbdb.com</a></div>`);
+    return parts.join('');
+  }
+
+  // ── route line ───────────────────────────────────────────────────────
+  let activeRoute = null;
+  function drawRoute(route, currentLatLng) {
+    clearRoute();
+    if (!route?.origin || !route?.destination) return;
+    const o = route.origin, d = route.destination;
+    if (o.latitude == null || d.latitude == null) return;
+    const oLL = [o.latitude, o.longitude], dLL = [d.latitude, d.longitude];
+    const routeStyle = { color: '#e33', weight: 3, opacity: 0.9,
+                         dashArray: '10, 6', lineCap: 'round', lineJoin: 'round' };
+    const dotStyle = { radius: 6, color: '#e33', fillColor: '#fff', fillOpacity: 1, weight: 3 };
+    activeRoute = L.layerGroup([
+      L.polyline([oLL, currentLatLng, dLL], routeStyle),
+      L.circleMarker(oLL, dotStyle)
+       .bindTooltip(`${o.iata_code || o.icao_code} — ${o.municipality}`, { permanent: false, direction: 'top' }),
+      L.circleMarker(dLL, dotStyle)
+       .bindTooltip(`${d.iata_code || d.icao_code} — ${d.municipality}`, { permanent: false, direction: 'top' }),
+    ]).addTo(map);
+  }
+  function clearRoute() { if (activeRoute) { map.removeLayer(activeRoute); activeRoute = null; } }
+
+  async function enrichOnOpen(icao) {
+    const entry = markers[icao];
+    if (!entry) return;
+    const ac = entry.latestAc;
+    const [_ac, route] = await Promise.all([
+      cacheGet('aircraft', icao) !== undefined
+        ? Promise.resolve(cacheGet('aircraft', icao))
+        : fetchAircraft(icao),
+      ac.callsign
+        ? (cacheGet('route', ac.callsign.trim().toUpperCase()) !== undefined
+            ? Promise.resolve(cacheGet('route', ac.callsign.trim().toUpperCase()))
+            : fetchRoute(ac.callsign))
+        : Promise.resolve(null),
+    ]);
+    if (entry.marker.isPopupOpen()) {
+      entry.marker.setPopupContent(popupHtml(entry.latestAc));
+      if (route && entry.latestAc.lat != null) {
+        drawRoute(route, [entry.latestAc.lat, entry.latestAc.lon]);
+      }
+    }
+  }
+
+  // ── marker layer rebuild ─────────────────────────────────────────────
+  function clearAllMarkers() {
+    for (const icao of Object.keys(markers)) {
+      const e = markers[icao];
+      if (e.marker) e.marker.remove();
+      if (e.poly)   e.poly.remove();
+      delete markers[icao];
+    }
+    clearRoute();
+    selectionRestored = false;
+    boundsFitted = false;
+  }
+
+  function renderAircraft(list, now) {
+    for (const ac of list) {
+      if (ac.lat == null || ac.lon == null) continue;
+      const isStale = ac.last_seen && (now - ac.last_seen) > STALE_S;
+      const heading = ac.heading != null ? ac.heading : 0;
+      const latlng = [ac.lat, ac.lon];
+      const marker = L.marker(latlng, { icon: planeIcon(heading, isStale) })
+                      .addTo(map).bindPopup(popupHtml(ac));
+
+      let coords = [latlng];
+      let poly = null;
+      if (Array.isArray(ac.track) && ac.track.length > 0) {
+        coords = ac.track.map(p => [p.lat, p.lon]);
+        const last = coords[coords.length - 1];
+        if (last[0] !== ac.lat || last[1] !== ac.lon) coords.push(latlng);
+        if (coords.length >= 2) {
+          poly = L.polyline(coords, {
+            color: '#d80', weight: 2, opacity: 0.75,
+            lineCap: 'round', lineJoin: 'round',
+          }).addTo(map);
+        }
+      }
+      const entry = markers[ac.icao] = { marker, poly, coords, latestAc: ac };
+      marker.on('popupopen', () => {
+        try { localStorage.setItem('adsb:selected', ac.icao); } catch {}
+        enrichOnOpen(ac.icao);
+      });
+      marker.on('popupclose', () => {
+        try { localStorage.removeItem('adsb:selected'); } catch {}
+        clearRoute();
+      });
+    }
+  }
+
+  // ── zoom-to-fit + selection restore ──────────────────────────────────
+  let boundsFitted = false;
+  let selectionRestored = false;
+  function maybeFitBounds() {
+    if (boundsFitted) return;
+    const pts = Object.values(markers)
+      .map(e => e.latestAc)
+      .filter(ac => ac.lat != null && ac.lon != null)
+      .map(ac => [ac.lat, ac.lon]);
+    if (pts.length === 0) return;
+    boundsFitted = true;
+    if (pts.length === 1) map.setView(pts[0], Math.max(map.getZoom(), 9));
+    else map.fitBounds(L.latLngBounds(pts), { padding: [50, 50], maxZoom: 11 });
+  }
+  function maybeRestoreSelection() {
+    if (selectionRestored) return;
+    let saved = null;
+    try { saved = localStorage.getItem('adsb:selected'); } catch {}
+    if (!saved) { selectionRestored = true; return; }
+    const entry = markers[saved];
+    if (entry) { selectionRestored = true; entry.marker.openPopup(); }
+  }
+
+  // ── time-window controls ─────────────────────────────────────────────
+  // Presets → returns {from, to} as ISO 8601 UTC.  A "null" bound means
+  // "unbounded on that side" (server treats missing 'to' as latest row).
+  function computeWindow(preset) {
+    const now = new Date();
+    const toIso = now.toISOString();
+    let fromIso = null;
+    switch (preset) {
+      case '5m':    fromIso = new Date(now -   5 * 60 * 1000).toISOString(); break;
+      case '30m':   fromIso = new Date(now -  30 * 60 * 1000).toISOString(); break;
+      case '1h':    fromIso = new Date(now -  60 * 60 * 1000).toISOString(); break;
+      case '2h':    fromIso = new Date(now - 120 * 60 * 1000).toISOString(); break;
+      case '6h':    fromIso = new Date(now - 360 * 60 * 1000).toISOString(); break;
+      case 'today': {
+        const t = new Date(now); t.setHours(0, 0, 0, 0);
+        fromIso = t.toISOString();
+        break;
+      }
+      case 'custom': {
+        const f = document.getElementById('range-from').value;
+        const t = document.getElementById('range-to').value;
+        return {
+          from: f ? new Date(f).toISOString() : null,
+          to:   t ? new Date(t).toISOString() : null,
+        };
+      }
+    }
+    return { from: fromIso, to: toIso };
+  }
+
+  function humanWindow(win) {
+    const f = (win.from || '—').substring(0, 19).replace('T', ' ');
+    const t = (win.to   || 'now').substring(0, 19).replace('T', ' ');
+    return `${f}Z → ${t}${win.to ? 'Z' : ''}`;
+  }
+
+  async function refresh() {
+    const btn = document.getElementById('refresh-btn');
+    btn.disabled = true;
+    try {
+      const preset = document.getElementById('window-select').value;
+      const w = computeWindow(preset);
+      const p = new URLSearchParams();
+      if (w.from) p.set('from', w.from);
+      if (w.to)   p.set('to',   w.to);
+      const r = await fetch('/api/adsb?' + p.toString(), { cache: 'no-store' });
+      if (!r.ok) throw new Error(r.statusText);
+      const d = await r.json();
+      clearAllMarkers();
+      renderAircraft(d.aircraft || [], Date.now() / 1000);
+      maybeFitBounds();
+      maybeRestoreSelection();
+      document.getElementById('ac-count').textContent = (d.aircraft || []).length;
+      document.getElementById('log-state').textContent = d.logging ? 'ON' : 'off';
+      document.getElementById('window-label').textContent = humanWindow(d.window || w);
+    } catch (e) {
+      document.getElementById('log-state').textContent = 'error: ' + e.message;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Wire event listeners for the controls.
+  const sel = document.getElementById('window-select');
+  const cust = document.getElementById('custom-range');
+  sel.addEventListener('change', () => {
+    cust.style.display = sel.value === 'custom' ? 'block' : 'none';
+    if (sel.value !== 'custom') refresh();
+  });
+  document.getElementById('refresh-btn').addEventListener('click', refresh);
+  document.getElementById('range-from').addEventListener('change', refresh);
+  document.getElementById('range-to')  .addEventListener('change', refresh);
+
+  // Kick off initial load with the default window (30 min).
+  refresh();
+</script>
+</body>
+</html>

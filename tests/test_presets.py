@@ -116,7 +116,7 @@ class TestPresetInvariants:
             os.unlink(path)
 
     def test_plugin_states_written_for_plugins_with_state(self, state):
-        from plugins.range_scan import RangeScan
+        from plugins.range_scan.range_scan import RangeScan
         p = RangeScan()
         p._scan_freq_min = 88e6
         with tempfile.NamedTemporaryFile(suffix='.sdrterm', delete=False, mode='w') as f:
@@ -131,7 +131,7 @@ class TestPresetInvariants:
             os.unlink(path)
 
     def test_plugin_states_loaded_on_load(self, state):
-        from plugins.range_scan import RangeScan
+        from plugins.range_scan.range_scan import RangeScan
         p = RangeScan()
         p._scan_freq_min = 88e6
         p._scan_freq_max = 108e6
