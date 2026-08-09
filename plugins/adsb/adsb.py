@@ -387,6 +387,11 @@ class AdsbDecoder(Decoder):
         self._log_file           = None         # opened lazily on first write
         self._log_last: dict     = {}           # icao → dict of last-written field snapshot
         self._logging_enabled    = True         # 's' key toggles at runtime
+        # Receiver location (antenna site) — set via preset plugin_states.
+        # When present, web_json() attaches per-aircraft distance_km and a
+        # summary max_range_km / farthest so the browser can display range.
+        self._location_lat: float = None
+        self._location_lon: float = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -719,11 +724,41 @@ class AdsbDecoder(Decoder):
     # ── persistence ──────────────────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {'logging_enabled': self._logging_enabled}
+        d = {'logging_enabled': self._logging_enabled}
+        if self._location_lat is not None:
+            d['location_lat'] = self._location_lat
+        if self._location_lon is not None:
+            d['location_lon'] = self._location_lon
+        return d
 
     def load_state(self, d: dict) -> None:
         if 'logging_enabled' in d:
             self._logging_enabled = bool(d['logging_enabled'])
+        # Receiver location (decimal degrees).  Both must be set or both
+        # ignored — a lone lat with no lon is meaningless.
+        lat = d.get('location_lat')
+        lon = d.get('location_lon')
+        if lat is not None and lon is not None:
+            try:
+                self._location_lat = float(lat)
+                self._location_lon = float(lon)
+            except (TypeError, ValueError):
+                pass
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float,
+                      lat2: float, lon2: float) -> float:
+        """Great-circle distance between two points on Earth's surface,
+        in kilometres.  Ignores altitude — a plane 10 km overhead is
+        reported as ~0 km, not 10 km, because the ADS-B 'range' is by
+        convention the ground-track distance from the receiver."""
+        R = 6371.0088                            # WGS-84 mean earth radius (km)
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlam = math.radians(lon2 - lon1)
+        a = (math.sin(dphi / 2) ** 2
+             + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     # ── web view (consumed by plugins/webserver) ─────────────────────────────
 
@@ -749,13 +784,24 @@ class AdsbDecoder(Decoder):
 
         acs = self._read_log_window(from_ts, to_ts)
 
+        # Optional receiver-location context.  When the user configured a
+        # (lat, lon) via the preset, tag every located aircraft with its
+        # great-circle distance from the antenna and derive summary
+        # 'max_range_km' + 'farthest' so the browser can show reception
+        # reach in the HUD.
+        has_loc = self._location_lat is not None and self._location_lon is not None
+        max_range_km = 0.0
+        farthest = None
+
         aircraft = []
         for icao, ac in acs.items():
-            aircraft.append({
+            lat = ac.get('lat')
+            lon = ac.get('lon')
+            entry = {
                 'icao':      icao,
                 'callsign':  ac.get('callsign'),
-                'lat':       ac.get('lat'),
-                'lon':       ac.get('lon'),
+                'lat':       lat,
+                'lon':       lon,
                 'alt':       ac.get('alt'),
                 'speed':     ac.get('speed'),
                 'spd_type':  ac.get('spd_type'),
@@ -763,14 +809,31 @@ class AdsbDecoder(Decoder):
                 'vr':        ac.get('vr'),
                 'last_seen': ac.get('last_seen'),
                 'track':     ac.get('track', []),
-            })
+            }
+            if has_loc and lat is not None and lon is not None:
+                d_km = self._haversine_km(
+                    self._location_lat, self._location_lon, lat, lon
+                )
+                entry['distance_km'] = round(d_km, 1)
+                if d_km > max_range_km:
+                    max_range_km = d_km
+                    farthest = {
+                        'icao':        icao,
+                        'callsign':    ac.get('callsign'),
+                        'distance_km': round(d_km, 1),
+                    }
+            aircraft.append(entry)
 
         return {
-            'aircraft':  aircraft,
-            'n_bursts':  self._n_bursts,
-            'n_crc_ok':  self._n_crc_ok,
-            'logging':   self._logging_enabled,
-            'window':    {'from': from_ts, 'to': to_ts},
+            'aircraft':     aircraft,
+            'n_bursts':     self._n_bursts,
+            'n_crc_ok':     self._n_crc_ok,
+            'logging':      self._logging_enabled,
+            'window':       {'from': from_ts, 'to': to_ts},
+            'receiver':     ({'lat': self._location_lat, 'lon': self._location_lon}
+                             if has_loc else None),
+            'max_range_km': round(max_range_km, 1) if has_loc else None,
+            'farthest':     farthest,
         }
 
     def _read_log_window(self, from_iso: str = None, to_iso: str = None) -> dict:

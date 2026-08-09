@@ -36,6 +36,10 @@
     "rtl-tcp-active"
   ],
   "plugin_states": {
-    "webserver": {"enabled": true, "host": "127.0.0.1", "port": 8080}
+    "webserver": {"enabled": true, "host": "127.0.0.1", "port": 8080},
+    "adsb": {
+      "location_lat": 49.740693,
+      "location_lon": 6.660242
+    }
   }
 }

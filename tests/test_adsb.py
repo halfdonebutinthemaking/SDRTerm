@@ -225,6 +225,93 @@ class TestCorrelator:
 
 # ── end-to-end pipeline smoke test ───────────────────────────────────────────
 
+class TestReceiverLocation:
+    """Config-set receiver location adds distance_km per aircraft and a
+    farthest-signal summary to the web_json payload."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path, lat=None, lon=None):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        if lat is not None and lon is not None:
+            d.load_state({'location_lat': lat, 'location_lon': lon})
+        return d
+
+    def _write_log(self, tmp_path, rows):
+        path = tmp_path / 'adsb.csv'
+        with open(path, 'w') as f:
+            f.write('timestamp,icao,callsign,lat,lon,alt,gs,ias,tas,heading,vr\n')
+            for r in rows:
+                f.write(','.join('' if v is None else str(v) for v in r) + '\n')
+        return path
+
+    def test_haversine_known_distance(self, tmp_path):
+        d = self._mk(tmp_path)
+        # Trier → Luxembourg (~40 km)
+        km = d._haversine_km(49.7596, 6.6439, 49.6117, 6.1319)
+        assert km == pytest.approx(38.5, abs=2)
+
+    def test_haversine_receiver_to_paris(self, tmp_path):
+        d = self._mk(tmp_path)
+        # User's coords → Paris CDG (~305 km great-circle)
+        km = d._haversine_km(49.740693, 6.660242, 49.0097, 2.5479)
+        assert km == pytest.approx(305, abs=10)
+
+    def test_load_state_sets_location(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'location_lat': 49.74, 'location_lon': 6.66})
+        assert d._location_lat == pytest.approx(49.74)
+        assert d._location_lon == pytest.approx(6.66)
+
+    def test_load_state_ignores_lone_lat(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'location_lat': 49.74})
+        assert d._location_lat is None
+        assert d._location_lon is None
+
+    def test_save_state_roundtrip(self, tmp_path):
+        d = self._mk(tmp_path, lat=49.74, lon=6.66)
+        saved = d.save_state()
+        assert saved['location_lat'] == pytest.approx(49.74)
+        assert saved['location_lon'] == pytest.approx(6.66)
+        d2 = self._mk(tmp_path)
+        assert 'location_lat' not in d2.save_state()
+
+    def test_web_json_distance_and_farthest(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:01:00.000Z', '4CA2F3', 'FAR',  50.50, 7.50, 35000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path, lat=49.740693, lon=6.660242)
+        payload = d.web_json(query={
+            'from': '2026-08-09T13:00:00.000Z',
+            'to':   '2026-08-09T15:00:00.000Z',
+        })
+        assert payload['receiver'] == {'lat': 49.740693, 'lon': 6.660242}
+        for ac in payload['aircraft']:
+            assert 'distance_km' in ac and ac['distance_km'] > 0
+        assert payload['max_range_km'] > 50
+        assert payload['farthest']['icao']     == '4CA2F3'
+        assert payload['farthest']['callsign'] == 'FAR'
+
+    def test_web_json_no_receiver_when_unset(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.70, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)      # no location configured
+        payload = d.web_json(query={
+            'from': '2026-08-09T13:00:00.000Z',
+            'to':   '2026-08-09T15:00:00.000Z',
+        })
+        assert payload['receiver']     is None
+        assert payload['max_range_km'] is None
+        assert payload['farthest']     is None
+        assert 'distance_km' not in payload['aircraft'][0]
+
+
 class TestLogWindowRead:
     """web_json now reads the CSV log filtered by a from/to time window
     instead of retaining an in-memory ring buffer."""

@@ -60,6 +60,7 @@
     <b>Aircraft:</b> <span id="ac-count">0</span>
     &nbsp;<b>Log:</b> <span id="log-state">?</span>
   </div>
+  <div><b>Farthest:</b> <span id="farthest">—</span></div>
   <div><b>Window:</b> <span id="window-label">—</span></div>
 </div>
 
@@ -114,9 +115,23 @@
   const M_PER_FT   = 0.3048;
   const KMH_PER_KT = 1.852;
   const MS_PER_FPM = 0.00508;
+  const NM_PER_KM  = 0.539957;
   const fmtAlt   = ft  => ft  == null ? '' : `${ft} ft / ${Math.round(ft * M_PER_FT)} m`;
   const fmtSpeed = kt  => kt  == null ? '' : `${kt} kt / ${Math.round(kt * KMH_PER_KT)} km/h`;
   const fmtVR    = fpm => fpm == null ? '' : `${fpm} fpm / ${(fpm * MS_PER_FPM).toFixed(1)} m/s`;
+  const fmtDist  = km  => km  == null ? '' : `${km} km / ${(km * NM_PER_KM).toFixed(0)} nm`;
+
+  // Aircraft silhouette used as the billboard image.  Nose points up
+  // at rotation 0, so the billboard is rotated to match the aircraft's
+  // heading (compass CW from north → Cesium CCW radians = -heading).
+  const PLANE_SVG = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32">
+      <path fill="#ff0" stroke="#000" stroke-width="0.6" stroke-linejoin="round"
+            d="M12 1 L13 9 L22 13 L22 15 L13 13 L13 19 L15 21 L15 22 L12 21 L9 22 L9 21 L11 19 L11 13 L2 15 L2 13 L11 9 Z"/>
+    </svg>`;
+  const PLANE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_SVG);
+  const PLANE_STALE_SVG = PLANE_SVG.replace('fill="#ff0"', 'fill="#999"');
+  const PLANE_STALE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_STALE_SVG);
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
   const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
@@ -210,11 +225,12 @@
     }
 
     const t = [];
-    if (ac.alt     != null) t.push(`ALT ${fmtAlt(ac.alt)}`);
-    if (ac.speed   != null) t.push(`SPD ${fmtSpeed(ac.speed)} (${ac.spd_type || '?'})`);
-    if (ac.heading != null) t.push(`HDG ${ac.heading}°`);
-    if (ac.vr      != null) t.push(`V/S ${fmtVR(ac.vr)}`);
-    if (ac.lat     != null) t.push(`POS ${ac.lat.toFixed(4)}, ${ac.lon.toFixed(4)}`);
+    if (ac.alt         != null) t.push(`ALT ${fmtAlt(ac.alt)}`);
+    if (ac.speed       != null) t.push(`SPD ${fmtSpeed(ac.speed)} (${ac.spd_type || '?'})`);
+    if (ac.heading     != null) t.push(`HDG ${ac.heading}°`);
+    if (ac.vr          != null) t.push(`V/S ${fmtVR(ac.vr)}`);
+    if (ac.lat         != null) t.push(`POS ${ac.lat.toFixed(4)}, ${ac.lon.toFixed(4)}`);
+    if (ac.distance_km != null) t.push(`RNG ${fmtDist(ac.distance_km)}`);
     if (t.length) parts.push(
       `<div style="font-family:monospace;font-size:11px;color:#ccc;margin-top:0.5em">
          ${t.join('<br>')}
@@ -232,11 +248,46 @@
 
   // ── entity containers ────────────────────────────────────────────────
   // Aircraft + tracks live in one data source (easy bulk clear);
-  // routes live in another (independent lifecycle per selection).
-  const acDS    = new Cesium.CustomDataSource('aircraft');
-  const routeDS = new Cesium.CustomDataSource('route');
+  // routes live in another (independent lifecycle per selection);
+  // receiver pin has its own so it survives refresh cycles.
+  const acDS       = new Cesium.CustomDataSource('aircraft');
+  const routeDS    = new Cesium.CustomDataSource('route');
+  const receiverDS = new Cesium.CustomDataSource('receiver');
   viewer.dataSources.add(acDS);
   viewer.dataSources.add(routeDS);
+  viewer.dataSources.add(receiverDS);
+
+  function drawReceiver(rx) {
+    receiverDS.entities.removeAll();
+    if (!rx) return;
+    receiverDS.entities.add({
+      id: '__receiver__',
+      position: Cesium.Cartesian3.fromDegrees(rx.lon, rx.lat, 0),
+      point: {
+        pixelSize: 12,
+        color: Cesium.Color.LIME,
+        outlineColor: Cesium.Color.BLACK,
+        outlineWidth: 2,
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+      label: {
+        text: 'RX',
+        font: 'bold 11px monospace',
+        fillColor: Cesium.Color.LIME,
+        outlineColor: Cesium.Color.BLACK,
+        outlineWidth: 3,
+        style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+        verticalOrigin: Cesium.VerticalOrigin.TOP,
+        pixelOffset: new Cesium.Cartesian2(0, 8),
+        disableDepthTestDistance: Number.POSITIVE_INFINITY,
+      },
+      description:
+        `<div style="font-family:monospace">
+           Receiver antenna<br>
+           ${rx.lat.toFixed(6)}, ${rx.lon.toFixed(6)}
+         </div>`,
+    });
+  }
 
   // Map ICAO → { latestAc, entity } so we can reach entities from
   // events (selection change) and update descriptions after enrichment.
@@ -303,16 +354,21 @@
       const alt_m = (ac.alt != null ? ac.alt * M_PER_FT : 8000);
       const pos = Cesium.Cartesian3.fromDegrees(ac.lon, ac.lat, alt_m);
 
+      const isStale = ac.last_seen && (Date.now() / 1000 - ac.last_seen) > 60;
+      const heading = ac.heading != null ? ac.heading : 0;
+
       const entity = acDS.entities.add({
         id: ac.icao,
         name: ac.callsign || ac.icao,
         position: pos,
-        point: {
-          pixelSize: 12,
-          color: Cesium.Color.YELLOW,
-          outlineColor: Cesium.Color.BLACK,
-          outlineWidth: 2,
+        billboard: {
+          image: isStale ? PLANE_STALE_URL : PLANE_URL,
+          // Cesium billboard rotation is CCW in radians about the screen
+          // normal; aviation heading is CW from north → negate.
+          rotation: Cesium.Math.toRadians(-heading),
+          scale: 0.75,
           disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          heightReference: Cesium.HeightReference.NONE,
         },
         label: {
           text: ac.callsign || ac.icao,
@@ -322,7 +378,7 @@
           outlineWidth: 2,
           style: Cesium.LabelStyle.FILL_AND_OUTLINE,
           verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
-          pixelOffset: new Cesium.Cartesian2(0, -14),
+          pixelOffset: new Cesium.Cartesian2(0, -18),
           disableDepthTestDistance: Number.POSITIVE_INFINITY,
         },
         description: popupHtml(ac),
@@ -450,11 +506,23 @@
       const d = await r.json();
       clearAll();
       renderAircraft(d.aircraft || []);
+      drawReceiver(d.receiver);
       fitToAircraft();
       maybeRestoreSelection();
       document.getElementById('ac-count').textContent = (d.aircraft || []).length;
       document.getElementById('log-state').textContent = d.logging ? 'ON' : 'off';
       document.getElementById('window-label').textContent = humanWindow(d.window || w);
+      // Farthest signal (only when receiver location is configured).
+      const fEl = document.getElementById('farthest');
+      if (d.farthest) {
+        fEl.textContent =
+          `${fmtDist(d.farthest.distance_km)}` +
+          ` (${d.farthest.callsign || d.farthest.icao})`;
+      } else if (d.receiver) {
+        fEl.textContent = '(no located aircraft in window)';
+      } else {
+        fEl.textContent = '(set location_lat/lon in preset)';
+      }
     } catch (e) {
       document.getElementById('log-state').textContent = 'error: ' + e.message;
     } finally {

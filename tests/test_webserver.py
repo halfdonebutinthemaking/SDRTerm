@@ -146,7 +146,8 @@ class TestAdsbIntegration:
         adsb._log_dir = str(tmp_path)
         payload = adsb.web_json()
         assert set(payload.keys()) == {'aircraft', 'n_bursts', 'n_crc_ok',
-                                       'logging', 'window'}
+                                       'logging', 'window',
+                                       'receiver', 'max_range_km', 'farthest'}
         assert isinstance(payload['aircraft'], list)
         assert payload['n_bursts'] == 0
         assert payload['logging'] in (True, False)
@@ -183,6 +184,12 @@ class TestAdsbIntegration:
         # No polling / auto-reload lingers in the page
         assert 'setInterval' not in html
         assert 'location.reload' not in html
+        # Receiver + farthest-signal wiring
+        assert 'drawReceiver' in html
+        assert 'farthest'     in html
+        # Plane silhouette billboard (not just a Cesium point)
+        assert 'PLANE_SVG'    in html
+        assert 'billboard'    in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
