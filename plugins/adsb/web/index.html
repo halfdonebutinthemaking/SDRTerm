@@ -62,6 +62,7 @@
   </div>
   <div><b>Farthest:</b> <span id="farthest">—</span></div>
   <div><b>Window:</b> <span id="window-label">—</span></div>
+  <div><b>Tiles:</b> <span id="tiles-label">—</span></div>
 </div>
 
 <!-- Cesium needs its worker/asset base URL set BEFORE the main script loads. -->
@@ -76,15 +77,16 @@
   // premium tiles/terrain, sign up at https://ion.cesium.com and set:
   //   Cesium.Ion.defaultAccessToken = '<your token>';
 
+  // Placeholder imagery layer — replaced on the first refresh() with
+  // whatever the plugin advertises via /api/adsb's `web_tiles` field.
+  const _placeholderProvider = new Cesium.UrlTemplateImageryProvider({
+    url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+    subdomains: 'abcd',
+    credit: '© OpenStreetMap © CARTO',
+    maximumLevel: 19,
+  });
   const viewer = new Cesium.Viewer('globe', {
-    baseLayer: Cesium.ImageryLayer.fromProviderAsync(
-      Promise.resolve(new Cesium.UrlTemplateImageryProvider({
-        url: 'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
-        subdomains: 'abcd',
-        credit: '© OpenStreetMap © CARTO',
-        maximumLevel: 19,
-      }))
-    ),
+    baseLayer: Cesium.ImageryLayer.fromProviderAsync(Promise.resolve(_placeholderProvider)),
     terrainProvider: new Cesium.EllipsoidTerrainProvider(),
     animation:            false,
     timeline:             false,
@@ -244,6 +246,29 @@
     );
 
     return parts.join('');
+  }
+
+  // ── swappable basemap ────────────────────────────────────────────────
+  // Track the current tile URL so we only rebuild the imagery layer when
+  // the plugin advertises a different provider (via preset).  This keeps
+  // Cesium's tile cache intact across every refresh call.
+  let currentTileUrl = null;
+  let currentTileLayer = viewer.imageryLayers.get(0);
+
+  function ensureTilesMatch(spec) {
+    if (!spec || !spec.url || spec.url === currentTileUrl) return;
+    const provider = new Cesium.UrlTemplateImageryProvider({
+      url:          spec.url,
+      subdomains:   spec.subdomains || undefined,
+      credit:       spec.credit || '',
+      maximumLevel: spec.max_zoom || 19,
+    });
+    // Insert new layer FIRST, then remove the old one — otherwise there's
+    // a visible white flash between removal and add.
+    const newLayer = viewer.imageryLayers.addImageryProvider(provider, 0);
+    if (currentTileLayer) viewer.imageryLayers.remove(currentTileLayer);
+    currentTileLayer = newLayer;
+    currentTileUrl = spec.url;
   }
 
   // ── entity containers ────────────────────────────────────────────────
@@ -504,6 +529,7 @@
       const r = await fetch('/api/adsb?' + p.toString(), { cache: 'no-store' });
       if (!r.ok) throw new Error(r.statusText);
       const d = await r.json();
+      ensureTilesMatch(d.web_tiles);
       clearAll();
       renderAircraft(d.aircraft || []);
       drawReceiver(d.receiver);
@@ -512,6 +538,8 @@
       document.getElementById('ac-count').textContent = (d.aircraft || []).length;
       document.getElementById('log-state').textContent = d.logging ? 'ON' : 'off';
       document.getElementById('window-label').textContent = humanWindow(d.window || w);
+      document.getElementById('tiles-label').textContent =
+        (d.web_tiles && d.web_tiles.name) || '—';
       // Farthest signal (only when receiver location is configured).
       const fEl = document.getElementById('farthest');
       if (d.farthest) {

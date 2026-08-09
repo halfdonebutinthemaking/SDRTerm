@@ -353,6 +353,39 @@ _DEFAULT_WINDOW_MIN = 30                        # default browser time window (m
 _CSV_HEADER        = ('timestamp,icao,callsign,lat,lon,alt,'
                       'gs,ias,tas,heading,vr\n')
 
+# Named tile providers the web view can pick between via preset.  Add a
+# new entry here (any XYZ raster template that Cesium's
+# UrlTemplateImageryProvider understands) and set
+# plugin_states.adsb.web_tiles to its key to use it.  For self-hosted or
+# ad-hoc providers pass a full dict instead of a name.
+_TILE_PROVIDERS = {
+    'cartodb': {
+        'url':        'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+        'subdomains': 'abcd',
+        'credit':     '© OpenStreetMap © CARTO',
+        'max_zoom':   19,
+    },
+    'cartodb-dark': {
+        'url':        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        'subdomains': 'abcd',
+        'credit':     '© OpenStreetMap © CARTO',
+        'max_zoom':   19,
+    },
+    'osm': {
+        'url':        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'subdomains': 'abc',
+        'credit':     '© OpenStreetMap',
+        'max_zoom':   19,
+    },
+    'versatiles': {
+        'url':        'https://tiles.versatiles.org/tiles/osm/{z}/{x}/{y}',
+        'subdomains': '',
+        'credit':     '© OpenStreetMap © VersaTiles',
+        'max_zoom':   15,
+    },
+}
+_DEFAULT_TILES = 'cartodb'
+
 # Fields whose change triggers a new CSV row.  Speed is split into three
 # columns (gs / ias / tas) so a speed-type switch alone does NOT invalidate
 # the previously-reported value in the other slot — see _log_aircraft().
@@ -392,6 +425,11 @@ class AdsbDecoder(Decoder):
         # summary max_range_km / farthest so the browser can display range.
         self._location_lat: float = None
         self._location_lon: float = None
+        # Basemap tile provider for the 3D globe (either a preset name from
+        # _TILE_PROVIDERS or a full dict with 'url' + optional 'subdomains'
+        # / 'credit' / 'max_zoom').  Frontend swaps its imagery layer to
+        # match on refresh.
+        self._web_tiles           = _DEFAULT_TILES
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -729,6 +767,8 @@ class AdsbDecoder(Decoder):
             d['location_lat'] = self._location_lat
         if self._location_lon is not None:
             d['location_lon'] = self._location_lon
+        if self._web_tiles != _DEFAULT_TILES:
+            d['web_tiles'] = self._web_tiles
         return d
 
     def load_state(self, d: dict) -> None:
@@ -744,6 +784,27 @@ class AdsbDecoder(Decoder):
                 self._location_lon = float(lon)
             except (TypeError, ValueError):
                 pass
+        if 'web_tiles' in d:
+            self._web_tiles = d['web_tiles']
+
+    def _resolve_web_tiles(self) -> dict:
+        """Turn a ``web_tiles`` value (either a named preset or an
+        already-full dict) into a concrete config the browser can pass
+        straight to ``Cesium.UrlTemplateImageryProvider``.  Falls back
+        to CartoDB if the name is unknown or the dict is malformed.
+        """
+        spec = self._web_tiles
+        if isinstance(spec, dict) and spec.get('url'):
+            return {
+                'name':       spec.get('name', 'custom'),
+                'url':        spec['url'],
+                'subdomains': spec.get('subdomains', ''),
+                'credit':     spec.get('credit', ''),
+                'max_zoom':   int(spec.get('max_zoom', 19)),
+            }
+        if isinstance(spec, str) and spec in _TILE_PROVIDERS:
+            return {'name': spec, **_TILE_PROVIDERS[spec]}
+        return {'name': _DEFAULT_TILES, **_TILE_PROVIDERS[_DEFAULT_TILES]}
 
     @staticmethod
     def _haversine_km(lat1: float, lon1: float,
@@ -834,6 +895,7 @@ class AdsbDecoder(Decoder):
                              if has_loc else None),
             'max_range_km': round(max_range_km, 1) if has_loc else None,
             'farthest':     farthest,
+            'web_tiles':    self._resolve_web_tiles(),
         }
 
     def _read_log_window(self, from_iso: str = None, to_iso: str = None) -> dict:

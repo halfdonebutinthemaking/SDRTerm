@@ -147,11 +147,13 @@ class TestAdsbIntegration:
         payload = adsb.web_json()
         assert set(payload.keys()) == {'aircraft', 'n_bursts', 'n_crc_ok',
                                        'logging', 'window',
-                                       'receiver', 'max_range_km', 'farthest'}
+                                       'receiver', 'max_range_km', 'farthest',
+                                       'web_tiles'}
         assert isinstance(payload['aircraft'], list)
         assert payload['n_bursts'] == 0
         assert payload['logging'] in (True, False)
         assert 'from' in payload['window']
+        assert payload['web_tiles']['url'] and payload['web_tiles']['name']
 
     def test_adsb_map_html_is_served(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
@@ -190,6 +192,9 @@ class TestAdsbIntegration:
         # Plane silhouette billboard (not just a Cesium point)
         assert 'PLANE_SVG'    in html
         assert 'billboard'    in html
+        # Swappable tile provider
+        assert 'ensureTilesMatch' in html
+        assert 'tiles-label'      in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder

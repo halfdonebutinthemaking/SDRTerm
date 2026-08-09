@@ -312,6 +312,67 @@ class TestReceiverLocation:
         assert 'distance_km' not in payload['aircraft'][0]
 
 
+class TestTileProviderConfig:
+    """The globe's basemap tile URL is configurable via the preset —
+    either by name (cartodb / osm / versatiles / cartodb-dark) or as a
+    full custom dict."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        return d
+
+    def test_default_provider_is_cartodb(self, tmp_path):
+        payload = self._mk(tmp_path).web_json()
+        assert payload['web_tiles']['name'] == 'cartodb'
+        assert 'cartocdn' in payload['web_tiles']['url']
+
+    def test_named_preset_osm(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'osm'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'osm'
+        assert 'openstreetmap' in payload['web_tiles']['url']
+
+    def test_named_preset_versatiles(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'versatiles'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'versatiles'
+        assert 'versatiles.org' in payload['web_tiles']['url']
+
+    def test_unknown_name_falls_back_to_default(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'not-a-provider'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'cartodb'
+
+    def test_custom_dict_wins(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': {
+            'url': 'https://my.tiles/{z}/{x}/{y}.png',
+            'credit': '© Me',
+            'max_zoom': 12,
+        }})
+        payload = d.web_json()
+        assert payload['web_tiles']['url'] == 'https://my.tiles/{z}/{x}/{y}.png'
+        assert payload['web_tiles']['credit'] == '© Me'
+        assert payload['web_tiles']['max_zoom'] == 12
+
+    def test_save_state_omits_default(self, tmp_path):
+        d = self._mk(tmp_path)     # default cartodb
+        assert 'web_tiles' not in d.save_state()
+
+    def test_save_state_includes_non_default(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'versatiles'})
+        assert d.save_state()['web_tiles'] == 'versatiles'
+
+
 class TestLogWindowRead:
     """web_json now reads the CSV log filtered by a from/to time window
     instead of retaining an in-memory ring buffer."""
