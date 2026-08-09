@@ -232,8 +232,11 @@
     const routeStyle = { color: '#e33', weight: 3, opacity: 0.9,
                          dashArray: '10, 6', lineCap: 'round', lineJoin: 'round' };
     const dotStyle = { radius: 6, color: '#e33', fillColor: '#fff', fillOpacity: 1, weight: 3 };
+    // Only draw the "ahead" leg — current position → destination.  The
+    // origin airport is still shown as a small marker (so the user knows
+    // where the flight started) but no dashed line covers the past.
     activeRoute = L.layerGroup([
-      L.polyline([oLL, currentLatLng, dLL], routeStyle),
+      L.polyline([currentLatLng, dLL], routeStyle),
       L.circleMarker(oLL, dotStyle)
        .bindTooltip(`${o.iata_code || o.icao_code} — ${o.municipality}`, { permanent: false, direction: 'top' }),
       L.circleMarker(dLL, dotStyle)
