@@ -13,10 +13,12 @@ Signal chain:
    → aircraft table + on-screen list
 """
 
+import csv
 import math
 import os
 import time
 from collections import deque
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 from scipy.signal import resample_poly
@@ -347,12 +349,7 @@ _CPR_PAIR_MAX_AGE  = 10.0      # global decode requires even+odd within this
 _LOG_DIR_DEFAULT   = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                   'adsb_logs')
 _LOG_FILE_NAME     = 'adsb.csv'                # single append-only file
-
-# In-memory per-aircraft position history (used by the web view to
-# reconstruct trails after a browser reload).  1000 points × 5 floats ≈
-# 40 kB per aircraft; even at 500 aircraft the total is ~20 MB — well
-# within a laptop's headroom.
-_MAX_TRACK_POINTS  = 1000
+_DEFAULT_WINDOW_MIN = 30                        # default browser time window (min)
 _CSV_HEADER        = ('timestamp,icao,callsign,lat,lon,alt,'
                       'gs,ias,tas,heading,vr\n')
 
@@ -607,8 +604,6 @@ class AdsbDecoder(Decoder):
         cpr_key = 'cpr_odd' if odd else 'cpr_even'
         ac[cpr_key] = (lat_cpr, lon_cpr, now)
 
-        prev = (ac.get('lat'), ac.get('lon'))
-
         even = ac.get('cpr_even')
         odd_pair = ac.get('cpr_odd')
         if even is not None and odd_pair is not None and \
@@ -618,7 +613,6 @@ class AdsbDecoder(Decoder):
             pos = _cpr_global(even[0], even[1], odd_pair[0], odd_pair[1], use_odd)
             if pos is not None:
                 ac['lat'], ac['lon'] = pos
-                self._append_track(ac, now, prev)
                 return
 
         # Fallback: local decode from previous position, if any
@@ -627,29 +621,8 @@ class AdsbDecoder(Decoder):
                 ac['lat'], ac['lon'] = _cpr_local(
                     ac['lat'], ac['lon'], lat_cpr, lon_cpr, odd,
                 )
-                self._append_track(ac, now, prev)
             except Exception:
                 pass
-
-    def _append_track(self, ac: dict, now: float, prev_pos) -> None:
-        """Push a new point onto this aircraft's position ring-buffer.
-
-        Called after a successful CPR decode.  Skips no-ops (same coord
-        as the last one) so a stationary aircraft doesn't pad the trail
-        with duplicates.  Each point is (ts, lat, lon, alt, heading) —
-        enough for the browser to draw an altitude-shaded / heading-
-        arrowed trail later without another schema change.
-        """
-        lat = ac.get('lat')
-        lon = ac.get('lon')
-        if lat is None or lon is None:
-            return
-        if (lat, lon) == prev_pos:
-            return
-        track = ac.get('track')
-        if track is None:
-            track = ac['track'] = deque(maxlen=_MAX_TRACK_POINTS)
-        track.append((now, lat, lon, ac.get('alt'), ac.get('heading')))
 
     # ── keys ─────────────────────────────────────────────────────────────────
 
@@ -755,20 +728,30 @@ class AdsbDecoder(Decoder):
     # ── web view (consumed by plugins/webserver) ─────────────────────────────
 
     def web_json(self, query: dict = None) -> dict:
-        """Snapshot for the browser.  Called from an HTTP thread, so return a
-        defensive copy — process() may be mutating the aircraft dict on the
-        SDRTerm worker thread at the same time.
+        """Aircraft observed within the requested time window.
 
-        When called with ?history=1 the response also includes each
-        aircraft's in-memory position trail — used by the browser to
-        rebuild polylines after a page reload.  Regular 2 s polls omit
-        the ?history flag so the wire format stays small.
+        Query params (both optional, ISO 8601 UTC):
+            from  — window start (default: now - 30 min)
+            to    — window end   (default: none = up to newest row)
+
+        Reads the CSV log on demand — no in-memory retention beyond the
+        current session's live decoder state.  For each ICAO seen in the
+        window, returns the latest known telemetry plus the full
+        chronological track of positions in that same window.
         """
         query = query or {}
-        include_history = query.get('history') == '1'
+        from_ts = query.get('from')
+        to_ts   = query.get('to')
+        if not from_ts and not to_ts:
+            now = datetime.now(timezone.utc)
+            from_ts = (now - timedelta(minutes=_DEFAULT_WINDOW_MIN)) \
+                        .strftime('%Y-%m-%dT%H:%M:%S.000Z')
+
+        acs = self._read_log_window(from_ts, to_ts)
+
         aircraft = []
-        for icao, ac in list(self._aircraft.items()):
-            entry = {
+        for icao, ac in acs.items():
+            aircraft.append({
                 'icao':      icao,
                 'callsign':  ac.get('callsign'),
                 'lat':       ac.get('lat'),
@@ -779,18 +762,92 @@ class AdsbDecoder(Decoder):
                 'heading':   ac.get('heading'),
                 'vr':        ac.get('vr'),
                 'last_seen': ac.get('last_seen'),
-            }
-            if include_history:
-                track = ac.get('track')
-                if track:
-                    entry['track'] = [
-                        {'ts': t, 'lat': la, 'lon': lo, 'alt': al, 'heading': hd}
-                        for (t, la, lo, al, hd) in track
-                    ]
-            aircraft.append(entry)
+                'track':     ac.get('track', []),
+            })
+
         return {
             'aircraft':  aircraft,
             'n_bursts':  self._n_bursts,
             'n_crc_ok':  self._n_crc_ok,
             'logging':   self._logging_enabled,
+            'window':    {'from': from_ts, 'to': to_ts},
         }
+
+    def _read_log_window(self, from_iso: str = None, to_iso: str = None) -> dict:
+        """Scan the CSV log and build an {icao → aircraft} dict for rows
+        with ``from_iso <= timestamp <= to_iso``.
+
+        Rows are processed in file order (chronological), so per-field
+        overwrites naturally yield the *latest* value for each attribute
+        of an aircraft within the window.  Position rows are additionally
+        appended to a per-aircraft ``track`` list so the browser can draw
+        the full path.
+
+        Robustness: malformed rows (missing columns, non-numeric fields)
+        are silently skipped rather than aborting the scan.
+        """
+        path = os.path.join(self._log_dir, _LOG_FILE_NAME)
+        if not os.path.isfile(path):
+            return {}
+        aircraft: dict = {}
+        try:
+            with open(path, 'r', newline='') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    ts = row.get('timestamp') or ''
+                    if not ts:
+                        continue
+                    if from_iso and ts < from_iso:
+                        continue
+                    if to_iso and ts > to_iso:
+                        continue
+                    self._merge_log_row(aircraft, row, ts)
+        except OSError:
+            return {}
+        return aircraft
+
+    @staticmethod
+    def _merge_log_row(aircraft: dict, row: dict, ts: str) -> None:
+        """Fold one CSV row into the aircraft-dict under construction."""
+        icao = row.get('icao') or ''
+        if not icao:
+            return
+        ac = aircraft.setdefault(icao, {'icao': icao, 'track': []})
+
+        def _f(k):                                     # float or None
+            v = row.get(k)
+            try:  return float(v) if v not in (None, '') else None
+            except ValueError: return None
+
+        def _i(k):                                     # int or None
+            f = _f(k)
+            return int(f) if f is not None else None
+
+        cs = row.get('callsign')
+        if cs:
+            ac['callsign'] = cs
+        lat, lon = _f('lat'), _f('lon')
+        if lat is not None and lon is not None:
+            ac['lat'], ac['lon'] = lat, lon
+            ac['track'].append({
+                'ts': ts, 'lat': lat, 'lon': lon,
+                'alt':     _i('alt'),
+                'heading': _i('heading'),
+            })
+        for k in ('alt', 'heading', 'vr'):
+            v = _i(k)
+            if v is not None:
+                ac[k] = v
+        # Speed is transmitted in one of three slots; latest present wins.
+        for slot in ('gs', 'ias', 'tas'):
+            v = _i(slot)
+            if v is not None:
+                ac['speed']    = v
+                ac['spd_type'] = slot.upper()
+        # Best-effort Unix timestamp for the display's stale-check.
+        try:
+            ac['last_seen'] = datetime.fromisoformat(
+                ts.replace('Z', '+00:00')
+            ).timestamp()
+        except (ValueError, AttributeError):
+            pass

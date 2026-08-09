@@ -145,10 +145,12 @@ class TestAdsbIntegration:
         adsb = AdsbDecoder()
         adsb._log_dir = str(tmp_path)
         payload = adsb.web_json()
-        assert set(payload.keys()) == {'aircraft', 'n_bursts', 'n_crc_ok', 'logging'}
+        assert set(payload.keys()) == {'aircraft', 'n_bursts', 'n_crc_ok',
+                                       'logging', 'window'}
         assert isinstance(payload['aircraft'], list)
         assert payload['n_bursts'] == 0
         assert payload['logging'] in (True, False)
+        assert 'from' in payload['window']
 
     def test_adsb_map_html_is_served(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
@@ -166,16 +168,19 @@ class TestAdsbIntegration:
         assert '/v0/aircraft/' in html
         assert '/v0/callsign/' in html
         assert 'localStorage' in html
-        # Dual-unit display + auto-refresh + zoom-to-fit + selection restore
+        # Dual-unit display + zoom-to-fit + selection restore.
         assert 'km/h' in html
         assert 'm/s'  in html
-        assert 'location.reload' in html
         assert 'fitBounds' in html
         assert 'adsb:selected' in html
-        # Server-side trail restore: browser asks for ?history=1 on the
-        # first fetch after (re)load.
-        assert '?history=1' in html
-        assert 'ac.track' in html
+        # Time-window selector + manual refresh (no auto-reload / no polling)
+        assert 'window-select' in html
+        assert 'refresh-btn'   in html
+        assert 'last 30 minutes' in html
+        assert 'custom range'   in html
+        # No polling / auto-reload lingers in the page
+        assert 'setInterval' not in html
+        assert 'location.reload' not in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder
@@ -185,32 +190,33 @@ class TestAdsbIntegration:
         assert static is not None
         assert static.endswith('/plugins/adsb/web')
 
-    def test_history_query_produces_tracks(self, server, tmp_path):
-        """End-to-end: ?history=1 over HTTP returns per-aircraft tracks."""
+    def test_time_window_query_reads_csv_log(self, server, tmp_path):
+        """End-to-end: /api/adsb?from=&to= filters aircraft from the CSV log."""
         from plugins.adsb.adsb import AdsbDecoder
+        # Seed a small log the plugin can read
+        (tmp_path / 'adsb.csv').write_text(
+            'timestamp,icao,callsign,lat,lon,alt,gs,ias,tas,heading,vr\n'
+            '2026-08-09T10:00:00.000Z,4CA1F2,RYR1,51.5,-0.1,35000,480,,,90,0\n'
+            '2026-08-09T14:00:00.000Z,4CA1F2,RYR1,51.6,-0.1,35000,480,,,91,0\n'
+        )
         adsb = AdsbDecoder()
         adsb._log_dir = str(tmp_path)
-        # Feed a global-decode pair
-        for hex_frame in ['8D40621D58C382D690C8AC2863A7',
-                          '8D40621D58C386435CC412692AD6']:
-            msg = bytes.fromhex(hex_frame)
-            adsb._parse_df17(msg, __import__('plugins.adsb.adsb',
-                                             fromlist=['_bytes_to_bits'])
-                             ._bytes_to_bits(msg))
         server.wire({'adsb': adsb, 'webserver': server})
         server.start(None)
         time.sleep(0.05)
 
-        # Without history: no track
-        body, _, _ = _get(_base(server) + '/api/adsb')
+        # Window that only covers the 14:00 row
+        body, _, _ = _get(_base(server) +
+            '/api/adsb?from=2026-08-09T13:00:00.000Z&to=2026-08-09T15:00:00.000Z')
         data = json.loads(body)
-        assert 'track' not in data['aircraft'][0]
-
-        # With history: track present
-        body, _, _ = _get(_base(server) + '/api/adsb?history=1')
-        data = json.loads(body)
-        assert 'track' in data['aircraft'][0]
-        assert isinstance(data['aircraft'][0]['track'], list)
+        assert data['window']['from'] == '2026-08-09T13:00:00.000Z'
+        assert data['window']['to']   == '2026-08-09T15:00:00.000Z'
+        assert len(data['aircraft']) == 1
+        ac = data['aircraft'][0]
+        assert ac['icao']     == '4CA1F2'
+        assert ac['callsign'] == 'RYR1'
+        assert len(ac['track']) == 1                    # only the 14:00 row is in-window
+        assert ac['track'][0]['lat'] == 51.6
 
 
 # ── security ─────────────────────────────────────────────────────────────────
