@@ -429,24 +429,39 @@
 
       // Full-window track: connects every point in ac.track at its own altitude.
       // On a sphere this reads clearly as a 3D trail through the sky.
+      let trackEntity = null;
       if (Array.isArray(ac.track) && ac.track.length > 1) {
         const positions = ac.track.map(p =>
           Cesium.Cartesian3.fromDegrees(p.lon, p.lat, (p.alt != null ? p.alt * M_PER_FT : 8000)));
         // Append the current position if it's newer than the last track sample
         const cur = ac.track[ac.track.length - 1];
         if (cur.lat !== ac.lat || cur.lon !== ac.lon) positions.push(pos);
-        acDS.entities.add({
+        trackEntity = acDS.entities.add({
           polyline: {
             positions,
-            width: 2,
-            material: Cesium.Color.ORANGE.withAlpha(0.75),
+            width: TRACK_WIDTH,
+            material: TRACK_COLOR,
             arcType: Cesium.ArcType.GEODESIC,
           },
         });
       }
 
-      acData[ac.icao] = { latestAc: ac, entity };
+      acData[ac.icao] = { latestAc: ac, entity, trackEntity };
     }
+  }
+
+  // Track styling — orange for unselected planes, red + thicker for the
+  // currently-selected one so the highlighted aircraft's path pops out.
+  const TRACK_COLOR       = Cesium.Color.ORANGE.withAlpha(0.75);
+  const TRACK_WIDTH       = 2;
+  const TRACK_SEL_COLOR   = Cesium.Color.fromCssColorString('#e33').withAlpha(0.95);
+  const TRACK_SEL_WIDTH   = 4;
+
+  function setTrackHighlight(icao, highlighted) {
+    const rec = acData[icao];
+    if (!rec || !rec.trackEntity) return;
+    rec.trackEntity.polyline.material = highlighted ? TRACK_SEL_COLOR : TRACK_COLOR;
+    rec.trackEntity.polyline.width    = highlighted ? TRACK_SEL_WIDTH : TRACK_WIDTH;
   }
 
   // ── selection & enrichment ───────────────────────────────────────────
@@ -475,9 +490,14 @@
   }
 
   viewer.selectedEntityChanged.addEventListener(sel => {
-    if (sel && acData[sel.id]) {
-      try { localStorage.setItem('adsb:selected', sel.id); } catch {}
-      enrichOnOpen(sel.id);
+    const selId = sel && acData[sel.id] ? sel.id : null;
+    // Repaint every track so the current selection is the only red one.
+    // O(n) per change; n is at most a few hundred — trivially fast.
+    for (const icao in acData) setTrackHighlight(icao, icao === selId);
+
+    if (selId) {
+      try { localStorage.setItem('adsb:selected', selId); } catch {}
+      enrichOnOpen(selId);
     } else {
       try { localStorage.removeItem('adsb:selected'); } catch {}
       clearRoute();
