@@ -161,17 +161,19 @@ class TestAdsbIntegration:
         time.sleep(0.05)
         body, _, _ = _get(_base(server) + '/tab/adsb')
         html = body.decode()
-        assert 'leaflet' in html.lower()
+        # 3D globe renderer (CesiumJS) with the standard base-URL trick.
+        assert 'cesium' in html.lower()
+        assert 'CESIUM_BASE_URL' in html
         assert '/api/adsb' in html
         # Enrichment wiring: adsbdb + attribution + localStorage cache
         assert 'adsbdb.com' in html
         assert '/v0/aircraft/' in html
         assert '/v0/callsign/' in html
         assert 'localStorage' in html
-        # Dual-unit display + zoom-to-fit + selection restore.
+        # Dual-unit display + camera fit + selection restore.
         assert 'km/h' in html
         assert 'm/s'  in html
-        assert 'fitBounds' in html
+        assert 'flyTo' in html
         assert 'adsb:selected' in html
         # Time-window selector + manual refresh (no auto-reload / no polling)
         assert 'window-select' in html
