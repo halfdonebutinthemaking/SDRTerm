@@ -134,6 +134,9 @@
   const PLANE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_SVG);
   const PLANE_STALE_SVG = PLANE_SVG.replace('fill="#ff0"', 'fill="#999"');
   const PLANE_STALE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_STALE_SVG);
+  // Aircraft is considered stale (icon fades to grey) after this many
+  // seconds of silence since the last decoded position frame.
+  const STALE_SEC = 5 * 60;
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
   const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
@@ -379,7 +382,7 @@
       const alt_m = (ac.alt != null ? ac.alt * M_PER_FT : 8000);
       const pos = Cesium.Cartesian3.fromDegrees(ac.lon, ac.lat, alt_m);
 
-      const isStale = ac.last_seen && (Date.now() / 1000 - ac.last_seen) > 60;
+      const isStale = ac.last_seen && (Date.now() / 1000 - ac.last_seen) > STALE_SEC;
       const heading = ac.heading != null ? ac.heading : 0;
 
       const entity = acDS.entities.add({
