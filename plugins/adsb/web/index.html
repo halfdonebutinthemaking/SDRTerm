@@ -123,6 +123,19 @@
   const fmtVR    = fpm => fpm == null ? '' : `${fpm} fpm / ${(fpm * MS_PER_FPM).toFixed(1)} m/s`;
   const fmtDist  = km  => km  == null ? '' : `${km} km / ${(km * NM_PER_KM).toFixed(0)} nm`;
 
+  function fmtLastSeen(ts) {
+    if (ts == null) return '';
+    const d = new Date(ts * 1000);       // ts is unix seconds (UTC)
+    const iso = d.toISOString().substring(0, 19).replace('T', ' ');
+    const ago = Math.max(0, (Date.now() / 1000 - ts));
+    let human;
+    if      (ago < 60)     human = `${Math.round(ago)}s ago`;
+    else if (ago < 3600)   human = `${Math.round(ago / 60)}m ago`;
+    else if (ago < 86400)  human = `${(ago / 3600).toFixed(1)}h ago`;
+    else                   human = `${(ago / 86400).toFixed(1)}d ago`;
+    return `${iso}Z (${human})`;
+  }
+
   // Aircraft silhouette used as the billboard image.  Nose points up
   // at rotation 0, so the billboard is rotated to match the aircraft's
   // heading (compass CW from north → Cesium CCW radians = -heading).
@@ -236,6 +249,7 @@
     if (ac.vr          != null) t.push(`V/S ${fmtVR(ac.vr)}`);
     if (ac.lat         != null) t.push(`POS ${ac.lat.toFixed(4)}, ${ac.lon.toFixed(4)}`);
     if (ac.distance_km != null) t.push(`RNG ${fmtDist(ac.distance_km)}`);
+    if (ac.last_seen   != null) t.push(`SEEN ${fmtLastSeen(ac.last_seen)}`);
     if (t.length) parts.push(
       `<div style="font-family:monospace;font-size:11px;color:#ccc;margin-top:0.5em">
          ${t.join('<br>')}
@@ -325,7 +339,8 @@
     acDS.entities.removeAll();
     routeDS.entities.removeAll();
     Object.keys(acData).forEach(k => delete acData[k]);
-    selectionRestored = false;
+    // NB: don't reset boundsFitted here — user might have panned/zoomed
+    // manually since first fit; only the initial refresh should fit.
   }
 
   function clearRoute() { routeDS.entities.removeAll(); }
@@ -469,21 +484,26 @@
     }
   });
 
-  // ── camera fit + selection restore (once per refresh) ────────────────
-  let selectionRestored = false;
+  // ── camera fit + selection restore ───────────────────────────────────
+  // Fit fires only on the very first render (the user is in charge of
+  // pan/zoom after that).  Selection restore fires on EVERY refresh so
+  // that clicking ↻ keeps whichever plane is currently open selected
+  // — as long as it's still in the returned data set.
+  let boundsFitted = false;
   function fitToAircraft() {
+    if (boundsFitted) return;
     const entities = acDS.entities.values;
     if (entities.length === 0) return;
+    boundsFitted = true;
     // flyTo on a data source zooms to the collective bounding sphere.
     viewer.flyTo(acDS, { duration: 1.2, offset: new Cesium.HeadingPitchRange(0, -0.9, 0) });
   }
-  function maybeRestoreSelection() {
-    if (selectionRestored) return;
+  function restoreSelection() {
     let saved = null;
     try { saved = localStorage.getItem('adsb:selected'); } catch {}
-    if (!saved) { selectionRestored = true; return; }
+    if (!saved) return;
     const entity = acDS.entities.getById(saved);
-    if (entity) { selectionRestored = true; viewer.selectedEntity = entity; }
+    if (entity) viewer.selectedEntity = entity;
   }
 
   // ── time-window controls ─────────────────────────────────────────────
@@ -537,7 +557,7 @@
       renderAircraft(d.aircraft || []);
       drawReceiver(d.receiver);
       fitToAircraft();
-      maybeRestoreSelection();
+      restoreSelection();
       document.getElementById('ac-count').textContent = (d.aircraft || []).length;
       document.getElementById('log-state').textContent = d.logging ? 'ON' : 'off';
       document.getElementById('window-label').textContent = humanWindow(d.window || w);
