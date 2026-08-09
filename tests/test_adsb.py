@@ -297,6 +297,33 @@ class TestReceiverLocation:
         assert payload['farthest']['icao']     == '4CA2F3'
         assert payload['farthest']['callsign'] == 'FAR'
 
+    def test_farthest_uses_peak_track_distance_not_current(self, tmp_path):
+        # NEAR plane approaches the receiver: two rows, first far away
+        # (lat 50.5, ~90 km) then close (lat 49.75, ~10 km).  FAR plane
+        # only ever appears at 50.0 (~30 km).  Max-across-window should
+        # be NEAR's earlier fix (~90 km), not FAR's ~30 km.  Bug fix:
+        # older code only looked at ac's current position, which for
+        # NEAR is the *closer* row, so FAR would win — reproducing the
+        # user's "why is VOE4CJ the farthest, BAW118 was much further"
+        # observation.
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 50.55, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:01:00.000Z', '4CA2F3', 'FAR',  50.00, 6.65, 35000, None, None, None, None, None),
+            ('2026-08-09T14:02:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.66, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path, lat=49.740693, lon=6.660242)
+        payload = d.web_json(query={
+            'from': '2026-08-09T13:00:00.000Z',
+            'to':   '2026-08-09T15:00:00.000Z',
+        })
+        near = next(ac for ac in payload['aircraft'] if ac['icao'] == '4CA1F2')
+        far  = next(ac for ac in payload['aircraft'] if ac['icao'] == '4CA2F3')
+        assert near['distance_km']     < 5           # last fix is right on top of receiver
+        assert near['max_distance_km'] > 60          # earlier fix was 90+ km away
+        assert near['max_distance_km'] > far['max_distance_km']
+        assert payload['farthest']['icao'] == '4CA1F2'
+        assert payload['farthest']['callsign'] == 'NEAR'
+
     def test_web_json_no_receiver_when_unset(self, tmp_path):
         self._write_log(tmp_path, [
             ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.70, 30000, None, None, None, None, None),

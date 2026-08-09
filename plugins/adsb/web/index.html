@@ -248,8 +248,10 @@
     if (ac.heading     != null) t.push(`HDG ${ac.heading}°`);
     if (ac.vr          != null) t.push(`V/S ${fmtVR(ac.vr)}`);
     if (ac.lat         != null) t.push(`POS ${ac.lat.toFixed(4)}, ${ac.lon.toFixed(4)}`);
-    if (ac.distance_km != null) t.push(`RNG ${fmtDist(ac.distance_km)}`);
-    if (ac.last_seen   != null) t.push(`SEEN ${fmtLastSeen(ac.last_seen)}`);
+    if (ac.distance_km     != null) t.push(`RNG ${fmtDist(ac.distance_km)}`);
+    if (ac.max_distance_km != null && ac.max_distance_km !== ac.distance_km)
+                                    t.push(`MAX RNG ${fmtDist(ac.max_distance_km)} in window`);
+    if (ac.last_seen       != null) t.push(`SEEN ${fmtLastSeen(ac.last_seen)}`);
     if (t.length) parts.push(
       `<div style="font-family:monospace;font-size:11px;color:#ccc;margin-top:0.5em">
          ${t.join('<br>')}

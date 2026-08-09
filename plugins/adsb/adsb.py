@@ -870,6 +870,7 @@ class AdsbDecoder(Decoder):
         for icao, ac in acs.items():
             lat = ac.get('lat')
             lon = ac.get('lon')
+            track = ac.get('track', [])
             entry = {
                 'icao':      icao,
                 'callsign':  ac.get('callsign'),
@@ -881,19 +882,37 @@ class AdsbDecoder(Decoder):
                 'heading':   ac.get('heading'),
                 'vr':        ac.get('vr'),
                 'last_seen': ac.get('last_seen'),
-                'track':     ac.get('track', []),
+                'track':     track,
             }
             if has_loc and lat is not None and lon is not None:
-                d_km = self._haversine_km(
+                # Current-position distance (what the browser shows as "RNG").
+                d_now = self._haversine_km(
                     self._location_lat, self._location_lon, lat, lon
                 )
-                entry['distance_km'] = round(d_km, 1)
-                if d_km > max_range_km:
-                    max_range_km = d_km
+                entry['distance_km'] = round(d_now, 1)
+
+                # Farthest reception EVER for this aircraft in the window.
+                # Scan every position point in the track — the current
+                # position may already be closer than an earlier fix, so
+                # peaking only over 'lat, lon' would understate range.
+                d_max = d_now
+                for pt in track:
+                    pl, pn = pt.get('lat'), pt.get('lon')
+                    if pl is None or pn is None:
+                        continue
+                    d = self._haversine_km(
+                        self._location_lat, self._location_lon, pl, pn
+                    )
+                    if d > d_max:
+                        d_max = d
+                entry['max_distance_km'] = round(d_max, 1)
+
+                if d_max > max_range_km:
+                    max_range_km = d_max
                     farthest = {
                         'icao':        icao,
                         'callsign':    ac.get('callsign'),
-                        'distance_km': round(d_km, 1),
+                        'distance_km': round(d_max, 1),
                     }
             aircraft.append(entry)
 
