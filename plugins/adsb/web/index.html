@@ -29,6 +29,10 @@
   #custom-range { display: none; margin-top: 4px; }
   #custom-range input { width: 12em; }
   #window-label { color: #aaa; }
+  #farthest.clickable {
+    cursor: pointer; color: #8cf; text-decoration: underline dotted;
+  }
+  #farthest.clickable:hover { color: #fff; text-decoration: underline; }
 
   /* Cesium InfoBox theming — the box that appears when you click an entity */
   .cesium-infoBox { background: rgba(20, 20, 20, 0.95); color: #eee; }
@@ -586,15 +590,22 @@
       document.getElementById('tiles-label').textContent =
         (d.web_tiles && d.web_tiles.name) || '—';
       // Farthest signal (only when receiver location is configured).
+      // Clickable: selects the aircraft on the globe + zooms to it.
       const fEl = document.getElementById('farthest');
       if (d.farthest) {
         fEl.textContent =
           `${fmtDist(d.farthest.distance_km)}` +
           ` (${d.farthest.callsign || d.farthest.icao})`;
-      } else if (d.receiver) {
-        fEl.textContent = '(no located aircraft in window)';
+        fEl.dataset.icao = d.farthest.icao;
+        fEl.classList.add('clickable');
+        fEl.title = 'Click to select this aircraft on the globe';
       } else {
-        fEl.textContent = '(set location_lat/lon in preset)';
+        fEl.dataset.icao = '';
+        fEl.classList.remove('clickable');
+        fEl.title = '';
+        fEl.textContent = d.receiver
+          ? '(no located aircraft in window)'
+          : '(set location_lat/lon in preset)';
       }
     } catch (e) {
       document.getElementById('log-state').textContent = 'error: ' + e.message;
@@ -612,6 +623,18 @@
   document.getElementById('refresh-btn').addEventListener('click', refresh);
   document.getElementById('range-from').addEventListener('change', refresh);
   document.getElementById('range-to')  .addEventListener('change', refresh);
+
+  // Click the "Farthest: X km (CALL)" line to jump to and select that plane.
+  document.getElementById('farthest').addEventListener('click', function() {
+    const icao = this.dataset.icao;
+    if (!icao) return;
+    const entity = acDS.entities.getById(icao);
+    if (!entity) return;
+    viewer.selectedEntity = entity;      // fires selectedEntityChanged →
+                                          // opens popup, highlights track red,
+                                          // draws route if callsign is known
+    viewer.flyTo(entity, { duration: 1.2 });
+  });
 
   refresh();
 </script>
