@@ -338,12 +338,23 @@ class TestTileProviderConfig:
         assert payload['web_tiles']['name'] == 'osm'
         assert 'openstreetmap' in payload['web_tiles']['url']
 
-    def test_named_preset_versatiles(self, tmp_path):
+    def test_named_preset_esri_satellite(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'esri-satellite'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'esri-satellite'
+        assert 'arcgisonline' in payload['web_tiles']['url']
+
+    def test_versatiles_name_falls_back(self, tmp_path):
+        # VersaTiles' public endpoint is vector-only and cannot be rendered
+        # by Cesium's UrlTemplateImageryProvider — the 'versatiles' shortcut
+        # was removed to avoid a blank map.  Requesting it should silently
+        # fall back to the default (cartodb) instead of returning a URL
+        # that would produce no imagery.
         d = self._mk(tmp_path)
         d.load_state({'web_tiles': 'versatiles'})
         payload = d.web_json()
-        assert payload['web_tiles']['name'] == 'versatiles'
-        assert 'versatiles.org' in payload['web_tiles']['url']
+        assert payload['web_tiles']['name'] == 'cartodb'
 
     def test_unknown_name_falls_back_to_default(self, tmp_path):
         d = self._mk(tmp_path)

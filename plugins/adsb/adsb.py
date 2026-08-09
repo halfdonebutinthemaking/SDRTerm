@@ -377,11 +377,23 @@ _TILE_PROVIDERS = {
         'credit':     '© OpenStreetMap',
         'max_zoom':   19,
     },
-    'versatiles': {
-        'url':        'https://tiles.versatiles.org/tiles/osm/{z}/{x}/{y}',
+    # NOTE: 'versatiles' entry deliberately omitted.  VersaTiles' public
+    # server at tiles.versatiles.org serves *vector* MVT / pbf tiles,
+    # which Cesium's UrlTemplateImageryProvider cannot render — it only
+    # understands raster PNG/JPG.  To use VersaTiles, self-host with a
+    # raster renderer (versatiles-server has a styles/*.png route) and
+    # add a custom dict pointing at your own URL, e.g.:
+    #   "web_tiles": {
+    #     "url": "http://localhost:8080/tiles/osm-bright/{z}/{x}/{y}.png",
+    #     "credit": "© OpenStreetMap © VersaTiles",
+    #     "max_zoom": 15
+    #   }
+    'esri-satellite': {
+        'url':        ('https://server.arcgisonline.com/ArcGIS/rest/services/'
+                       'World_Imagery/MapServer/tile/{z}/{y}/{x}'),
         'subdomains': '',
-        'credit':     '© OpenStreetMap © VersaTiles',
-        'max_zoom':   15,
+        'credit':     'Tiles © Esri — World Imagery',
+        'max_zoom':   19,
     },
 }
 _DEFAULT_TILES = 'cartodb'
