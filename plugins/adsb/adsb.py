@@ -353,6 +353,51 @@ _DEFAULT_WINDOW_MIN = 30                        # default browser time window (m
 _CSV_HEADER        = ('timestamp,icao,callsign,lat,lon,alt,'
                       'gs,ias,tas,heading,vr\n')
 
+# Named tile providers the web view can pick between via preset.  Add a
+# new entry here (any XYZ raster template that Cesium's
+# UrlTemplateImageryProvider understands) and set
+# plugin_states.adsb.web_tiles to its key to use it.  For self-hosted or
+# ad-hoc providers pass a full dict instead of a name.
+_TILE_PROVIDERS = {
+    'cartodb': {
+        'url':        'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png',
+        'subdomains': 'abcd',
+        'credit':     '© OpenStreetMap © CARTO',
+        'max_zoom':   19,
+    },
+    'cartodb-dark': {
+        'url':        'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png',
+        'subdomains': 'abcd',
+        'credit':     '© OpenStreetMap © CARTO',
+        'max_zoom':   19,
+    },
+    'osm': {
+        'url':        'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+        'subdomains': 'abc',
+        'credit':     '© OpenStreetMap',
+        'max_zoom':   19,
+    },
+    # NOTE: 'versatiles' entry deliberately omitted.  VersaTiles' public
+    # server at tiles.versatiles.org serves *vector* MVT / pbf tiles,
+    # which Cesium's UrlTemplateImageryProvider cannot render — it only
+    # understands raster PNG/JPG.  To use VersaTiles, self-host with a
+    # raster renderer (versatiles-server has a styles/*.png route) and
+    # add a custom dict pointing at your own URL, e.g.:
+    #   "web_tiles": {
+    #     "url": "http://localhost:8080/tiles/osm-bright/{z}/{x}/{y}.png",
+    #     "credit": "© OpenStreetMap © VersaTiles",
+    #     "max_zoom": 15
+    #   }
+    'esri-satellite': {
+        'url':        ('https://server.arcgisonline.com/ArcGIS/rest/services/'
+                       'World_Imagery/MapServer/tile/{z}/{y}/{x}'),
+        'subdomains': '',
+        'credit':     'Tiles © Esri — World Imagery',
+        'max_zoom':   19,
+    },
+}
+_DEFAULT_TILES = 'cartodb'
+
 # Fields whose change triggers a new CSV row.  Speed is split into three
 # columns (gs / ias / tas) so a speed-type switch alone does NOT invalidate
 # the previously-reported value in the other slot — see _log_aircraft().
@@ -387,6 +432,16 @@ class AdsbDecoder(Decoder):
         self._log_file           = None         # opened lazily on first write
         self._log_last: dict     = {}           # icao → dict of last-written field snapshot
         self._logging_enabled    = True         # 's' key toggles at runtime
+        # Receiver location (antenna site) — set via preset plugin_states.
+        # When present, web_json() attaches per-aircraft distance_km and a
+        # summary max_range_km / farthest so the browser can display range.
+        self._location_lat: float = None
+        self._location_lon: float = None
+        # Basemap tile provider for the 3D globe (either a preset name from
+        # _TILE_PROVIDERS or a full dict with 'url' + optional 'subdomains'
+        # / 'credit' / 'max_zoom').  Frontend swaps its imagery layer to
+        # match on refresh.
+        self._web_tiles           = _DEFAULT_TILES
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -719,11 +774,64 @@ class AdsbDecoder(Decoder):
     # ── persistence ──────────────────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {'logging_enabled': self._logging_enabled}
+        d = {'logging_enabled': self._logging_enabled}
+        if self._location_lat is not None:
+            d['location_lat'] = self._location_lat
+        if self._location_lon is not None:
+            d['location_lon'] = self._location_lon
+        if self._web_tiles != _DEFAULT_TILES:
+            d['web_tiles'] = self._web_tiles
+        return d
 
     def load_state(self, d: dict) -> None:
         if 'logging_enabled' in d:
             self._logging_enabled = bool(d['logging_enabled'])
+        # Receiver location (decimal degrees).  Both must be set or both
+        # ignored — a lone lat with no lon is meaningless.
+        lat = d.get('location_lat')
+        lon = d.get('location_lon')
+        if lat is not None and lon is not None:
+            try:
+                self._location_lat = float(lat)
+                self._location_lon = float(lon)
+            except (TypeError, ValueError):
+                pass
+        if 'web_tiles' in d:
+            self._web_tiles = d['web_tiles']
+
+    def _resolve_web_tiles(self) -> dict:
+        """Turn a ``web_tiles`` value (either a named preset or an
+        already-full dict) into a concrete config the browser can pass
+        straight to ``Cesium.UrlTemplateImageryProvider``.  Falls back
+        to CartoDB if the name is unknown or the dict is malformed.
+        """
+        spec = self._web_tiles
+        if isinstance(spec, dict) and spec.get('url'):
+            return {
+                'name':       spec.get('name', 'custom'),
+                'url':        spec['url'],
+                'subdomains': spec.get('subdomains', ''),
+                'credit':     spec.get('credit', ''),
+                'max_zoom':   int(spec.get('max_zoom', 19)),
+            }
+        if isinstance(spec, str) and spec in _TILE_PROVIDERS:
+            return {'name': spec, **_TILE_PROVIDERS[spec]}
+        return {'name': _DEFAULT_TILES, **_TILE_PROVIDERS[_DEFAULT_TILES]}
+
+    @staticmethod
+    def _haversine_km(lat1: float, lon1: float,
+                      lat2: float, lon2: float) -> float:
+        """Great-circle distance between two points on Earth's surface,
+        in kilometres.  Ignores altitude — a plane 10 km overhead is
+        reported as ~0 km, not 10 km, because the ADS-B 'range' is by
+        convention the ground-track distance from the receiver."""
+        R = 6371.0088                            # WGS-84 mean earth radius (km)
+        phi1, phi2 = math.radians(lat1), math.radians(lat2)
+        dphi = math.radians(lat2 - lat1)
+        dlam = math.radians(lon2 - lon1)
+        a = (math.sin(dphi / 2) ** 2
+             + math.cos(phi1) * math.cos(phi2) * math.sin(dlam / 2) ** 2)
+        return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
     # ── web view (consumed by plugins/webserver) ─────────────────────────────
 
@@ -749,28 +857,76 @@ class AdsbDecoder(Decoder):
 
         acs = self._read_log_window(from_ts, to_ts)
 
+        # Optional receiver-location context.  When the user configured a
+        # (lat, lon) via the preset, tag every located aircraft with its
+        # great-circle distance from the antenna and derive summary
+        # 'max_range_km' + 'farthest' so the browser can show reception
+        # reach in the HUD.
+        has_loc = self._location_lat is not None and self._location_lon is not None
+        max_range_km = 0.0
+        farthest = None
+
         aircraft = []
         for icao, ac in acs.items():
-            aircraft.append({
+            lat = ac.get('lat')
+            lon = ac.get('lon')
+            track = ac.get('track', [])
+            entry = {
                 'icao':      icao,
                 'callsign':  ac.get('callsign'),
-                'lat':       ac.get('lat'),
-                'lon':       ac.get('lon'),
+                'lat':       lat,
+                'lon':       lon,
                 'alt':       ac.get('alt'),
                 'speed':     ac.get('speed'),
                 'spd_type':  ac.get('spd_type'),
                 'heading':   ac.get('heading'),
                 'vr':        ac.get('vr'),
                 'last_seen': ac.get('last_seen'),
-                'track':     ac.get('track', []),
-            })
+                'track':     track,
+            }
+            if has_loc and lat is not None and lon is not None:
+                # Current-position distance (what the browser shows as "RNG").
+                d_now = self._haversine_km(
+                    self._location_lat, self._location_lon, lat, lon
+                )
+                entry['distance_km'] = round(d_now, 1)
+
+                # Farthest reception EVER for this aircraft in the window.
+                # Scan every position point in the track — the current
+                # position may already be closer than an earlier fix, so
+                # peaking only over 'lat, lon' would understate range.
+                d_max = d_now
+                for pt in track:
+                    pl, pn = pt.get('lat'), pt.get('lon')
+                    if pl is None or pn is None:
+                        continue
+                    d = self._haversine_km(
+                        self._location_lat, self._location_lon, pl, pn
+                    )
+                    if d > d_max:
+                        d_max = d
+                entry['max_distance_km'] = round(d_max, 1)
+
+                if d_max > max_range_km:
+                    max_range_km = d_max
+                    farthest = {
+                        'icao':        icao,
+                        'callsign':    ac.get('callsign'),
+                        'distance_km': round(d_max, 1),
+                    }
+            aircraft.append(entry)
 
         return {
-            'aircraft':  aircraft,
-            'n_bursts':  self._n_bursts,
-            'n_crc_ok':  self._n_crc_ok,
-            'logging':   self._logging_enabled,
-            'window':    {'from': from_ts, 'to': to_ts},
+            'aircraft':     aircraft,
+            'n_bursts':     self._n_bursts,
+            'n_crc_ok':     self._n_crc_ok,
+            'logging':      self._logging_enabled,
+            'window':       {'from': from_ts, 'to': to_ts},
+            'receiver':     ({'lat': self._location_lat, 'lon': self._location_lon}
+                             if has_loc else None),
+            'max_range_km': round(max_range_km, 1) if has_loc else None,
+            'farthest':     farthest,
+            'web_tiles':    self._resolve_web_tiles(),
         }
 
     def _read_log_window(self, from_iso: str = None, to_iso: str = None) -> dict:

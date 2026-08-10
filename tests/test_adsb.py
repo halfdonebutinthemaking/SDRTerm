@@ -225,6 +225,192 @@ class TestCorrelator:
 
 # ── end-to-end pipeline smoke test ───────────────────────────────────────────
 
+class TestReceiverLocation:
+    """Config-set receiver location adds distance_km per aircraft and a
+    farthest-signal summary to the web_json payload."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path, lat=None, lon=None):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        if lat is not None and lon is not None:
+            d.load_state({'location_lat': lat, 'location_lon': lon})
+        return d
+
+    def _write_log(self, tmp_path, rows):
+        path = tmp_path / 'adsb.csv'
+        with open(path, 'w') as f:
+            f.write('timestamp,icao,callsign,lat,lon,alt,gs,ias,tas,heading,vr\n')
+            for r in rows:
+                f.write(','.join('' if v is None else str(v) for v in r) + '\n')
+        return path
+
+    def test_haversine_known_distance(self, tmp_path):
+        d = self._mk(tmp_path)
+        # Trier → Luxembourg (~40 km)
+        km = d._haversine_km(49.7596, 6.6439, 49.6117, 6.1319)
+        assert km == pytest.approx(38.5, abs=2)
+
+    def test_haversine_receiver_to_paris(self, tmp_path):
+        d = self._mk(tmp_path)
+        # User's coords → Paris CDG (~305 km great-circle)
+        km = d._haversine_km(49.740693, 6.660242, 49.0097, 2.5479)
+        assert km == pytest.approx(305, abs=10)
+
+    def test_load_state_sets_location(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'location_lat': 49.74, 'location_lon': 6.66})
+        assert d._location_lat == pytest.approx(49.74)
+        assert d._location_lon == pytest.approx(6.66)
+
+    def test_load_state_ignores_lone_lat(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'location_lat': 49.74})
+        assert d._location_lat is None
+        assert d._location_lon is None
+
+    def test_save_state_roundtrip(self, tmp_path):
+        d = self._mk(tmp_path, lat=49.74, lon=6.66)
+        saved = d.save_state()
+        assert saved['location_lat'] == pytest.approx(49.74)
+        assert saved['location_lon'] == pytest.approx(6.66)
+        d2 = self._mk(tmp_path)
+        assert 'location_lat' not in d2.save_state()
+
+    def test_web_json_distance_and_farthest(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:01:00.000Z', '4CA2F3', 'FAR',  50.50, 7.50, 35000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path, lat=49.740693, lon=6.660242)
+        payload = d.web_json(query={
+            'from': '2026-08-09T13:00:00.000Z',
+            'to':   '2026-08-09T15:00:00.000Z',
+        })
+        assert payload['receiver'] == {'lat': 49.740693, 'lon': 6.660242}
+        for ac in payload['aircraft']:
+            assert 'distance_km' in ac and ac['distance_km'] > 0
+        assert payload['max_range_km'] > 50
+        assert payload['farthest']['icao']     == '4CA2F3'
+        assert payload['farthest']['callsign'] == 'FAR'
+
+    def test_farthest_uses_peak_track_distance_not_current(self, tmp_path):
+        # NEAR plane approaches the receiver: two rows, first far away
+        # (lat 50.5, ~90 km) then close (lat 49.75, ~10 km).  FAR plane
+        # only ever appears at 50.0 (~30 km).  Max-across-window should
+        # be NEAR's earlier fix (~90 km), not FAR's ~30 km.  Bug fix:
+        # older code only looked at ac's current position, which for
+        # NEAR is the *closer* row, so FAR would win — reproducing the
+        # user's "why is VOE4CJ the farthest, BAW118 was much further"
+        # observation.
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 50.55, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:01:00.000Z', '4CA2F3', 'FAR',  50.00, 6.65, 35000, None, None, None, None, None),
+            ('2026-08-09T14:02:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.66, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path, lat=49.740693, lon=6.660242)
+        payload = d.web_json(query={
+            'from': '2026-08-09T13:00:00.000Z',
+            'to':   '2026-08-09T15:00:00.000Z',
+        })
+        near = next(ac for ac in payload['aircraft'] if ac['icao'] == '4CA1F2')
+        far  = next(ac for ac in payload['aircraft'] if ac['icao'] == '4CA2F3')
+        assert near['distance_km']     < 5           # last fix is right on top of receiver
+        assert near['max_distance_km'] > 60          # earlier fix was 90+ km away
+        assert near['max_distance_km'] > far['max_distance_km']
+        assert payload['farthest']['icao'] == '4CA1F2'
+        assert payload['farthest']['callsign'] == 'NEAR'
+
+    def test_web_json_no_receiver_when_unset(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'NEAR', 49.75, 6.70, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)      # no location configured
+        payload = d.web_json(query={
+            'from': '2026-08-09T13:00:00.000Z',
+            'to':   '2026-08-09T15:00:00.000Z',
+        })
+        assert payload['receiver']     is None
+        assert payload['max_range_km'] is None
+        assert payload['farthest']     is None
+        assert 'distance_km' not in payload['aircraft'][0]
+
+
+class TestTileProviderConfig:
+    """The globe's basemap tile URL is configurable via the preset —
+    either by name (cartodb / osm / versatiles / cartodb-dark) or as a
+    full custom dict."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        return d
+
+    def test_default_provider_is_cartodb(self, tmp_path):
+        payload = self._mk(tmp_path).web_json()
+        assert payload['web_tiles']['name'] == 'cartodb'
+        assert 'cartocdn' in payload['web_tiles']['url']
+
+    def test_named_preset_osm(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'osm'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'osm'
+        assert 'openstreetmap' in payload['web_tiles']['url']
+
+    def test_named_preset_esri_satellite(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'esri-satellite'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'esri-satellite'
+        assert 'arcgisonline' in payload['web_tiles']['url']
+
+    def test_versatiles_name_falls_back(self, tmp_path):
+        # VersaTiles' public endpoint is vector-only and cannot be rendered
+        # by Cesium's UrlTemplateImageryProvider — the 'versatiles' shortcut
+        # was removed to avoid a blank map.  Requesting it should silently
+        # fall back to the default (cartodb) instead of returning a URL
+        # that would produce no imagery.
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'versatiles'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'cartodb'
+
+    def test_unknown_name_falls_back_to_default(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'not-a-provider'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'cartodb'
+
+    def test_custom_dict_wins(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': {
+            'url': 'https://my.tiles/{z}/{x}/{y}.png',
+            'credit': '© Me',
+            'max_zoom': 12,
+        }})
+        payload = d.web_json()
+        assert payload['web_tiles']['url'] == 'https://my.tiles/{z}/{x}/{y}.png'
+        assert payload['web_tiles']['credit'] == '© Me'
+        assert payload['web_tiles']['max_zoom'] == 12
+
+    def test_save_state_omits_default(self, tmp_path):
+        d = self._mk(tmp_path)     # default cartodb
+        assert 'web_tiles' not in d.save_state()
+
+    def test_save_state_includes_non_default(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'versatiles'})
+        assert d.save_state()['web_tiles'] == 'versatiles'
+
+
 class TestLogWindowRead:
     """web_json now reads the CSV log filtered by a from/to time window
     instead of retaining an in-memory ring buffer."""
