@@ -40,6 +40,10 @@ iridium_logs/
 # adsb plugin telemetry logs — user's captures, one CSV appended forever
 plugins/adsb/adsb_logs/
 
+# Meteor plugin satdump captures + fetched TLE cache
+plugins/meteor/web/captures/
+plugins/meteor/tle_cache.txt
+
 # LaTeX build artefacts under plugins/iridium_decoder/docs/
 plugins/iridium_decoder/docs/*.aux
 plugins/iridium_decoder/docs/*.log

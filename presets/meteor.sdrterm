@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "_comment": "Polar-orbiting weather satellites at 137 MHz — covers all six sats the meteor plugin knows about (NOAA 15/18/19 APT + METEOR-M2 2/3/4 LRPT) using the same QFH + SAWbird+NOAA + HackRF hardware. Default tuning is 137.100 MHz (METEOR-M2 3 / NOAA 19); flip to 137.900 MHz (METEOR-M2 2/4 or NOAA 18) via `f 137.9M` when those satellites are the pass. bw_hz is 2 MHz because that's the HackRF minimum; the decoder decimates to 150 kHz internally. gain_db 32 is a starting point for a bias-fed SAWbird — see plugins/adsb/docs/range.tex for the gain-stacking discussion (same principle: keep HackRF's own LNA low so the SAWbird sets the noise figure).",
+  "center_hz": 137100000.0,
+  "bw_hz": 2000000,
+  "gain_db": 32.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": true,
+  "active_decoders": [
+    "spectrum",
+    "meteor",
+    "peak_marker",
+    "webserver",
+    "rtl-tcp-passive"
+  ],
+  "plugin_order": [
+    "meteor",
+    "peak_marker",
+    "webserver",
+    "rtl-tcp-passive",
+    "record",
+    "freqhop",
+    "constellation",
+    "range-scan",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "acars",
+    "adsb",
+    "pocsag",
+    "vdl2",
+    "iridium",
+    "iridium_decode",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {
+    "webserver": {"enabled": true, "host": "127.0.0.1", "port": 8080},
+    "meteor": {
+      "location_lat": 49.740693,
+      "location_lon": 6.660242,
+      "location_alt_km": 0.15,
+      "min_elevation_deg": 15.0,
+      "horizon_hours": 24.0
+    }
+  }
+}
