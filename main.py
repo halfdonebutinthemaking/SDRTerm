@@ -72,6 +72,15 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     for _p in registry.values():
         if hasattr(_p, 'wire') and callable(_p.wire):
             _p.wire(registry)
+    # If --preset was passed on the CLI, its top-level fields (center_hz,
+    # bw_hz, active_decoders, etc.) were already applied to `state` at
+    # argparse time.  Its `plugin_states` couldn't be applied then because
+    # plugins hadn't been loaded yet — do it now.  Silently no-op if the
+    # caller didn't set state.preset_deferred_path (in-app menu load uses
+    # _apply_preset which already handles plugin_states).
+    _deferred = getattr(state, 'preset_deferred_path', None)
+    if _deferred:
+        _load_preset(_deferred, state, list(registry.values()))
     # Discard any preset-loaded decoder names that don't exist in this registry
     state.active_decoders = (state.active_decoders & set(registry.keys())) | {'spectrum'}
     registry['spectrum'].start(state)
@@ -359,10 +368,15 @@ def main() -> None:
                 parser.error('invalid gain value: {}'.format(args.g))
     if args.i:
         state.iq_corr = (args.i == 'on')
-    # --preset overrides everything set above
+    # --preset overrides everything set above.
+    # NOTE: plugin_states in the preset can only be applied after
+    # load_plugins() runs, which happens inside _curses_main.  Stash
+    # the preset path on `state` and let _curses_main re-load with
+    # the full plugin list once they're instantiated.
     if args.preset:
         if not _load_preset(args.preset, state):
             parser.error('cannot load preset: {}'.format(args.preset))
+        state.preset_deferred_path = args.preset
 
     # suppress librtlsdr/libusb noise on stderr for the entire session
     devnull  = os.open(os.devnull, os.O_WRONLY)
