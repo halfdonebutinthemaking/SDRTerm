@@ -10,6 +10,7 @@ dependencies = [
     "scipy",
     "sounddevice",
     "crcmod>=1.7",
+    "pyorbital>=1.12",
 ]
 
 [project.optional-dependencies]
