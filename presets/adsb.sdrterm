@@ -3,7 +3,7 @@
   "_comment": "ADS-B / Mode S reception at 1090 MHz. Requires a bias-tee-powered L-band LNA (e.g. Nooelec SAWbird+ 1090) for reliable decoding — without one the link budget is marginal even overhead. bw_hz is 2 000 000: the adsb plugin's internal working rate is 2 MSPS, so matching the source rate avoids resample_poly overhead per chunk. Gain is set high (42 dB) since ADS-B bursts are very short (~120 µs) and the AGC in SDRTerm cannot react fast enough to per-burst amplitude changes.",
   "center_hz": 1090000000.0,
   "bw_hz": 2000000,
-  "gain_db": 42.0,
+  "gain_db": 13.5,
   "gain_auto": false,
   "iq_corr": true,
   "fm_bw_hz": 100000,
