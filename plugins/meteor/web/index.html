@@ -22,6 +22,18 @@
   .warn { color: #f77; margin: 1em 0; padding: 0.6em 1em; background: rgba(255,80,80,0.1);
           border-left: 3px solid #f77; border-radius: 3px; }
   .refresh-note { color: #666; font-size: 11px; margin-top: 1em; }
+  .gallery { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+             gap: 12px; margin-top: 1em; max-width: 1200px; }
+  .card { background: #1a1a1a; border-radius: 6px; padding: 8px;
+          box-shadow: 0 1px 3px rgba(0,0,0,0.4); }
+  .card img { width: 100%; height: 160px; object-fit: cover; border-radius: 4px;
+              cursor: pointer; background: #000; }
+  .card .name { font-size: 11px; color: #8cf; margin-top: 6px;
+                overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .card .meta2 { font-size: 10px; color: #888; margin-top: 2px; }
+  .card .imgcount { color: #7f7; font-weight: bold; }
+  .empty { color: #666; font-style: italic; padding: 1em 0; }
+  .capturing { color: #fc0; font-weight: bold; }
   button { background: #222; color: #eee; border: 1px solid #444; padding: 4px 10px;
            border-radius: 3px; cursor: pointer; font: 12px monospace; }
   button:hover { background: #333; }
@@ -61,6 +73,16 @@
   Refresh happens automatically every minute; hit ↻ to force a TLE refetch.
 </div>
 
+<h1 style="margin-top:2em">Captures</h1>
+<div class="meta">
+  Auto-capture is <b><span id="cap-state">?</span></b>.
+  Requires the <code>rtl-tcp-passive</code> plugin active on port
+  <span id="cap-port">1234</span>.  satdump writes to
+  <code>plugins/meteor/web/captures/&lt;timestamp&gt;_&lt;sat&gt;/</code>
+  during each pass.
+</div>
+<div id="captures" class="gallery"></div>
+
 <script>
   function fmtDur(secs) {
     const m = Math.floor(secs / 60), s = secs % 60;
@@ -96,6 +118,40 @@
         : (d.auto_tune ? 'auto (idle)' : 'off');
       document.getElementById('tune-label').textContent = `tune: ${tune}`;
       document.getElementById('ts-label').textContent = 'as of ' + fmtTime(d.generated_at) + 'Z';
+
+      // ── Captures gallery ─────────────────────────────────────────────
+      const capState = d.capturing
+        ? `<span class="capturing">CAPTURING ${d.capture_sat || ''}</span>`
+        : (d.auto_capture ? 'ON (idle)' : 'OFF');
+      document.getElementById('cap-state').innerHTML = capState;
+
+      const gal = document.getElementById('captures');
+      gal.innerHTML = '';
+      const captures = d.captures || [];
+      if (captures.length === 0) {
+        gal.innerHTML = '<div class="empty">No captures yet.  Enable auto-capture, '
+          + 'load the meteor preset, activate rtl-tcp-passive, and wait for a pass.</div>';
+      } else {
+        for (const c of captures) {
+          const card = document.createElement('div');
+          card.className = 'card';
+          const preview = c.preview
+            ? `<img src="/static/meteor/captures/${encodeURIComponent(c.dir)}/`
+              + `${encodeURIComponent(c.preview)}" alt="preview"
+                   onclick="window.open(this.src, '_blank')">`
+            : '<div style="height:160px;background:#222;border-radius:4px;'
+              + 'display:flex;align-items:center;justify-content:center;color:#666">'
+              + 'no image yet</div>';
+          const mtime = new Date(c.mtime * 1000)
+                          .toISOString().substring(0, 19).replace('T', ' ');
+          card.innerHTML = preview
+            + `<div class="name">${c.dir}</div>`
+            + `<div class="meta2">${mtime}Z &middot; `
+            + `<span class="imgcount">${c.images.length}</span> image`
+            + `${c.images.length === 1 ? '' : 's'}</div>`;
+          gal.appendChild(card);
+        }
+      }
 
       const warnEl = document.getElementById('warn');
       warnEl.innerHTML = '';

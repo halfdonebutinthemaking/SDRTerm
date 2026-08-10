@@ -13,12 +13,14 @@
     "spectrum",
     "meteor",
     "peak_marker",
-    "webserver"
+    "webserver",
+    "rtl-tcp-passive"
   ],
   "plugin_order": [
     "meteor",
     "peak_marker",
     "webserver",
+    "rtl-tcp-passive",
     "record",
     "freqhop",
     "constellation",

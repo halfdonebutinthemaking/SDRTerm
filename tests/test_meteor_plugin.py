@@ -73,7 +73,9 @@ class TestWebJson:
         payload = d.web_json()
         assert set(payload.keys()) == {'passes', 'receiver', 'satdump',
                                        'known_sats', 'generated_at',
-                                       'auto_tune', 'tuned_sat', 'tuned_freq_hz'}
+                                       'auto_tune', 'auto_capture',
+                                       'tuned_sat', 'tuned_freq_hz',
+                                       'capturing', 'capture_sat', 'captures'}
         assert payload['receiver'] is None
         assert payload['passes'] == []
         assert 'METEOR-M2 3' in payload['known_sats']
@@ -206,3 +208,166 @@ class TestAutoTune:
         d._passes_cache = []
         d.process(None, state, sdr=sdr)
         assert d._tuned_sat is None
+
+
+class _FakeStateWithDecoders(_FakeState):
+    def __init__(self, center_hz=100_000_000, bw_hz=2_000_000, active=('rtl-tcp-passive',)):
+        super().__init__(center_hz)
+        self.bw_hz = bw_hz
+        self.active_decoders = set(active)
+
+
+class TestAutoCapture:
+    """process() should launch satdump on pass rise and terminate on fall."""
+
+    def _pass(self, sat='METEOR-M2 3', offset_min=(-1, +5)):
+        now = datetime.now(timezone.utc)
+        return {
+            'sat':        sat,
+            'rise':       now + timedelta(minutes=offset_min[0]),
+            'peak':       now + timedelta(minutes=(offset_min[0] + offset_min[1]) / 2),
+            'fall':       now + timedelta(minutes=offset_min[1]),
+            'max_elev':   50.0, 'max_az': 180.0, 'rise_az': 90.0,
+            'duration_s': int((offset_min[1] - offset_min[0]) * 60),
+        }
+
+    def _mk(self, passes, tmp_path):
+        # Redirect the capture root to tmp so tests never write to the
+        # real plugins/meteor/web/captures directory.
+        import plugins.meteor.meteor as mod
+        d = MeteorDecoder()
+        d._passes_cache = passes
+        d._passes_cache_time = 1e18
+        # Monkey-patch _HERE for this instance's file operations by
+        # patching the module constant referenced inside meteor.py.
+        return d, mod, str(tmp_path)
+
+    def test_capture_launches_on_pass_rise(self, tmp_path, monkeypatch):
+        d, mod, root = self._mk([self._pass()], tmp_path)
+        monkeypatch.setattr(mod, '_HERE', root)
+        # Capture the Popen call without actually spawning satdump
+        captured_args = {}
+        class _FakeProc:
+            def __init__(self): self._alive = True
+            def poll(self): return None if self._alive else 0
+            def terminate(self): self._alive = False
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+        def _fake_popen(args, **kw):
+            captured_args['argv'] = args
+            captured_args['kw'] = kw
+            return _FakeProc()
+        monkeypatch.setattr(mod.subprocess, 'Popen', _fake_popen)
+        monkeypatch.setattr(mod.shutil, 'which', lambda name: '/usr/local/bin/satdump')
+
+        state = _FakeStateWithDecoders()
+        result = d.process(None, state)
+        assert result['capturing'] is True
+        assert result['capture_sat'] == 'METEOR-M2 3'
+        assert 'satdump' in captured_args['argv'][0]
+        assert 'live' in captured_args['argv']
+        assert 'meteor_m2-x_lrpt' in captured_args['argv']
+        assert '--source' in captured_args['argv']
+        assert 'rtltcp' in captured_args['argv']
+        assert '137100000' in captured_args['argv']
+
+    def test_capture_terminates_on_pass_fall(self, tmp_path, monkeypatch):
+        d, mod, root = self._mk([self._pass()], tmp_path)
+        monkeypatch.setattr(mod, '_HERE', root)
+        terminated = {'flag': False}
+        class _FakeProc:
+            def poll(self): return None
+            def terminate(self): terminated['flag'] = True
+            def wait(self, timeout=None): pass
+            def kill(self): pass
+        monkeypatch.setattr(mod.subprocess, 'Popen', lambda *a, **kw: _FakeProc())
+        monkeypatch.setattr(mod.shutil, 'which', lambda name: '/x/satdump')
+        state = _FakeStateWithDecoders()
+        d.process(None, state)              # rise
+        assert d._capture_proc is not None
+        # Pass ends
+        d._passes_cache = []
+        d.process(None, state)
+        assert terminated['flag'] is True
+        assert d._capture_proc is None
+
+    def test_no_capture_when_rtltcp_not_active(self, tmp_path, monkeypatch):
+        d, mod, root = self._mk([self._pass()], tmp_path)
+        monkeypatch.setattr(mod, '_HERE', root)
+        called = {'flag': False}
+        monkeypatch.setattr(mod.subprocess, 'Popen', lambda *a, **kw: called.update(flag=True))
+        monkeypatch.setattr(mod.shutil, 'which', lambda name: '/x/satdump')
+        state = _FakeStateWithDecoders(active=())  # rtl-tcp-passive NOT active
+        d.process(None, state)
+        assert called['flag'] is False
+        assert d._capture_proc is None
+
+    def test_no_capture_when_satdump_missing(self, tmp_path, monkeypatch):
+        d, mod, root = self._mk([self._pass()], tmp_path)
+        monkeypatch.setattr(mod, '_HERE', root)
+        called = {'flag': False}
+        monkeypatch.setattr(mod.subprocess, 'Popen', lambda *a, **kw: called.update(flag=True))
+        monkeypatch.setattr(mod.shutil, 'which', lambda name: None)
+        state = _FakeStateWithDecoders()
+        d.process(None, state)
+        assert called['flag'] is False
+
+    def test_auto_capture_toggle_disables(self, tmp_path, monkeypatch):
+        d, mod, root = self._mk([self._pass()], tmp_path)
+        monkeypatch.setattr(mod, '_HERE', root)
+        d._auto_capture = False
+        called = {'flag': False}
+        monkeypatch.setattr(mod.subprocess, 'Popen', lambda *a, **kw: called.update(flag=True))
+        monkeypatch.setattr(mod.shutil, 'which', lambda name: '/x/satdump')
+        state = _FakeStateWithDecoders()
+        d.process(None, state)
+        assert called['flag'] is False
+
+    def test_c_key_toggles_capture(self, monkeypatch):
+        d = MeteorDecoder()
+        assert d._auto_capture is True
+        d.handle_key(ord('c'), None, None)
+        assert d._auto_capture is False
+        d.handle_key(ord('c'), None, None)
+        assert d._auto_capture is True
+
+    def test_save_load_state_capture_options(self):
+        d = MeteorDecoder()
+        d.load_state({'auto_capture': False, 'rtltcp_port': 9999,
+                      'rtltcp_host': '10.0.0.5'})
+        assert d._auto_capture is False
+        assert d._rtltcp_port == 9999
+        assert d._rtltcp_host == '10.0.0.5'
+        s = d.save_state()
+        assert s['auto_capture'] is False
+        assert s['rtltcp_port'] == 9999
+        assert s['rtltcp_host'] == '10.0.0.5'
+
+
+class TestListCaptures:
+    def test_returns_empty_when_dir_missing(self, tmp_path, monkeypatch):
+        import plugins.meteor.meteor as mod
+        monkeypatch.setattr(mod, '_HERE', str(tmp_path))
+        d = MeteorDecoder()
+        assert d._list_captures() == []
+
+    def test_lists_pngs_sorted_by_mtime(self, tmp_path, monkeypatch):
+        import plugins.meteor.meteor as mod
+        monkeypatch.setattr(mod, '_HERE', str(tmp_path))
+        # Two capture dirs, three PNGs total.
+        cap_root = tmp_path / 'web' / 'captures'
+        cap_root.mkdir(parents=True)
+        (cap_root / '2026-08-10T10-00-00Z_METEOR-M2_3').mkdir()
+        (cap_root / '2026-08-10T10-00-00Z_METEOR-M2_3' / 'ir.png').write_bytes(b'fake')
+        (cap_root / '2026-08-10T10-00-00Z_METEOR-M2_3' / 'vis.png').write_bytes(b'fake')
+        import time as time_mod
+        time_mod.sleep(0.01)                 # ensure the second is newer
+        (cap_root / '2026-08-10T11-00-00Z_NOAA_19').mkdir()
+        (cap_root / '2026-08-10T11-00-00Z_NOAA_19' / 'apt.png').write_bytes(b'fake')
+        d = MeteorDecoder()
+        caps = d._list_captures()
+        assert len(caps) == 2
+        assert caps[0]['dir'].startswith('2026-08-10T11-')      # newer first
+        assert caps[0]['images'] == ['apt.png']
+        assert caps[1]['preview'] == 'ir.png'
+        assert len(caps[1]['images']) == 2
