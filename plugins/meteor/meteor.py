@@ -39,7 +39,7 @@ _PASSES_DIR = os.path.join(_HERE, 'passes')
 class MeteorDecoder(Decoder):
     name            = 'meteor'
     key             = 'l'                         # 'l' = LRPT
-    key_help        = 'r=refresh'
+    key_help        = 'r=refresh  a=auto-tune'
     min_sample_rate = 200_000                     # what LRPT needs post-decimation
     realtime        = False
     bg_queue_depth  = 4
@@ -58,10 +58,14 @@ class MeteorDecoder(Decoder):
         self._location_alt_km      = 0.0
         self._min_elevation_deg    = 15.0
         self._horizon_hours        = 24.0
+        self._auto_tune            = True         # retune SDR to pass freq on rise
         # Runtime state — passes are computed on demand and cached briefly
         self._passes_cache         = None         # list of pass dicts
         self._passes_cache_time    = 0.0          # monotonic timestamp
         self._passes_cache_ttl     = 5 * 60       # recompute every 5 min
+        # Track the currently-tuned pass so we don't re-tune every process() call
+        self._tuned_sat            = None
+        self._tuned_freq_hz        = None
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -71,12 +75,61 @@ class MeteorDecoder(Decoder):
     def stop(self) -> None:
         pass
 
-    # ── DSP (phase 2 will add IQ capture here) ───────────────────────────────
+    # ── DSP + auto-tune ──────────────────────────────────────────────────────
 
     def process(self, samples, state: AppState, results=None, sdr=None):
-        # No-op for phase 1.  Returns a stub result so the plugin behaves
-        # like the other Decoders in status_text / rendering.
-        return {'active': False}
+        """No IQ processing yet (phase 2 will land it).  What this DOES do is
+        auto-tune the SDR to a pass's advertised frequency the moment that
+        pass becomes active — so the user doesn't have to remember whether
+        the current NOAA/Meteor pair is on 137.100, 137.620 or 137.9125.
+        """
+        cur = _passes.find_current_pass(self._get_passes()) if state is not None else None
+
+        if cur is None:
+            # No pass in progress — release the "tuned to a pass" flag so
+            # the next pass triggers a fresh retune, and leave state.center_hz
+            # alone (user can tune wherever they like between passes).
+            self._tuned_sat = None
+            self._tuned_freq_hz = None
+            return {'active': False, 'current_sat': None, 'auto_tune': self._auto_tune}
+
+        target_hz = _passes.SATELLITES.get(cur['sat'], {}).get('freq_hz')
+        already_on_pass = (self._tuned_sat == cur['sat']
+                           and self._tuned_freq_hz == target_hz)
+
+        if (self._auto_tune and target_hz is not None
+                and state is not None and not already_on_pass):
+            self._retune(state, sdr, target_hz)
+            self._tuned_sat = cur['sat']
+            self._tuned_freq_hz = target_hz
+
+        return {
+            'active':        True,
+            'current_sat':   cur['sat'],
+            'current_freq':  target_hz,
+            'auto_tune':     self._auto_tune,
+        }
+
+    def _retune(self, state, sdr, target_hz: int) -> None:
+        """Move both the AppState's tuned frequency and (if available) the
+        live SDR to `target_hz`.  Safe to call when the frequency is
+        already close — a 1 kHz tolerance avoids twiddling for rounding
+        noise.
+        """
+        try:
+            current = float(state.center_hz)
+        except AttributeError:
+            return
+        if abs(current - target_hz) < 1000:
+            return
+        state.center_hz = float(target_hz)
+        if sdr is not None:
+            try:
+                sdr.center_freq = float(target_hz)
+            except Exception:
+                # Some SDR backends can't retune mid-stream; the state
+                # update alone will apply at the next reconfig.
+                pass
 
     def status_text(self, state: AppState, result: dict) -> str:
         cur = self._current_or_next_summary()
@@ -92,6 +145,11 @@ class MeteorDecoder(Decoder):
             self._passes_cache = None
             self._passes_cache_time = 0.0
             return True
+        if key == ord('a'):
+            self._auto_tune = not self._auto_tune
+            # Toggling off doesn't retune away; toggling on will fire on
+            # the next process() call if a pass is active.
+            return True
         return False
 
     # ── persistence ──────────────────────────────────────────────────────────
@@ -103,6 +161,7 @@ class MeteorDecoder(Decoder):
         if self._location_alt_km:           d['location_alt_km'] = self._location_alt_km
         if self._min_elevation_deg != 15.0: d['min_elevation_deg'] = self._min_elevation_deg
         if self._horizon_hours     != 24.0: d['horizon_hours'] = self._horizon_hours
+        if not self._auto_tune:             d['auto_tune'] = False
         return d
 
     def load_state(self, d: dict) -> None:
@@ -123,6 +182,8 @@ class MeteorDecoder(Decoder):
         if 'horizon_hours' in d:
             try:    self._horizon_hours = float(d['horizon_hours'])
             except (TypeError, ValueError): pass
+        if 'auto_tune' in d:
+            self._auto_tune = bool(d['auto_tune'])
 
     # ── pass computation (with light caching) ────────────────────────────────
 
@@ -188,5 +249,8 @@ class MeteorDecoder(Decoder):
                               if self._location_lat is not None else None),
             'satdump':       shutil.which('satdump') is not None,
             'known_sats':    list(_passes.SATELLITES.keys()),
+            'auto_tune':     self._auto_tune,
+            'tuned_sat':     self._tuned_sat,
+            'tuned_freq_hz': self._tuned_freq_hz,
             'generated_at':  now.strftime('%Y-%m-%dT%H:%M:%SZ'),
         }

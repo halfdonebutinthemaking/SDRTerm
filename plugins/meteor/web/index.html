@@ -34,6 +34,8 @@
   &nbsp;·&nbsp;
   <span id="satdump-label">satdump: ?</span>
   &nbsp;·&nbsp;
+  <span id="tune-label">tune: ?</span>
+  &nbsp;·&nbsp;
   <span id="ts-label">—</span>
   &nbsp;<button id="refresh-btn" title="Re-fetch TLEs and recompute">↻ refresh</button>
 </div>
@@ -89,6 +91,10 @@
         : 'receiver: not configured — set plugin_states.meteor in the preset';
       document.getElementById('satdump-label').textContent =
         `satdump: ${d.satdump ? 'installed' : 'NOT installed'}`;
+      const tune = d.tuned_sat && d.tuned_freq_hz
+        ? `→ ${d.tuned_sat} @ ${(d.tuned_freq_hz / 1e6).toFixed(4)} MHz`
+        : (d.auto_tune ? 'auto (idle)' : 'off');
+      document.getElementById('tune-label').textContent = `tune: ${tune}`;
       document.getElementById('ts-label').textContent = 'as of ' + fmtTime(d.generated_at) + 'Z';
 
       const warnEl = document.getElementById('warn');
