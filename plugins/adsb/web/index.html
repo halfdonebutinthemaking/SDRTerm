@@ -280,6 +280,7 @@
     if (ac.max_distance_km != null && ac.max_distance_km !== ac.distance_km)
                                     t.push(`MAX RNG ${fmtDist(ac.max_distance_km)} in window`);
     if (ac.last_seen       != null) t.push(`SEEN ${fmtLastSeen(ac.last_seen)}`);
+    if (Array.isArray(ac.track))    t.push(`FIXES ${ac.track.length} in window`);
     if (t.length) parts.push(
       `<div style="font-family:monospace;font-size:11px;color:#ccc;margin-top:0.5em">
          ${t.join('<br>')}
