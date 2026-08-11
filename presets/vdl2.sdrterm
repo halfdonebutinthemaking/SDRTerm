@@ -1,0 +1,50 @@
+{
+  "version": 1,
+  "_comment": "VDL Mode 2 reception on 136.900 MHz — one of the common European VDL2 channels (also used: 136.775, 136.825, 136.875, 136.925, 136.975).  D8PSK at 10.5 kSym/s ≈ 31.5 kbit/s, ~24 kHz wide bursts, HDLC/AVLC framing.  Same hardware as the meteor preset works well here: any 137 MHz antenna + SAWbird+NOAA (its passband easily covers 136.9).  bw_hz 2 MHz is the HackRF minimum; the plugin decimates to 8 samples/symbol internally.  Gain 32 is a starting point — dial up if the constellation-view donut is faint, dial down if it looks like a chunky blob (compression).",
+  "center_hz": 136900000.0,
+  "bw_hz": 2000000,
+  "gain_db": 32.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": true,
+  "active_decoders": [
+    "spectrum",
+    "vdl2",
+    "constellation",
+    "peak_marker",
+    "webserver"
+  ],
+  "plugin_order": [
+    "vdl2",
+    "constellation",
+    "peak_marker",
+    "webserver",
+    "freqhop",
+    "range-scan",
+    "record",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "acars",
+    "adsb",
+    "pocsag",
+    "iridium",
+    "iridium_decode",
+    "meteor",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {
+    "webserver": {"enabled": true, "host": "0.0.0.0", "port": 8080},
+    "constellation": {
+      "symrate": 10500,
+      "m": 8,
+      "ref_angle": 0.0,
+      "differential": true,
+      "gating": true
+    }
+  }
+}
