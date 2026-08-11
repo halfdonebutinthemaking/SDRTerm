@@ -157,20 +157,44 @@
     return `${iso}Z (${human})`;
   }
 
-  // Aircraft silhouette used as the billboard image.  Nose points up
-  // at rotation 0, so the billboard is rotated to match the aircraft's
-  // heading (compass CW from north → Cesium CCW radians = -heading).
-  const PLANE_SVG = `
-    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32">
-      <path fill="#ff0" stroke="#000" stroke-width="0.6" stroke-linejoin="round"
-            d="M12 1 L13 9 L22 13 L22 15 L13 13 L13 19 L15 21 L15 22 L12 21 L9 22 L9 21 L11 19 L11 13 L2 15 L2 13 L11 9 Z"/>
-    </svg>`;
-  const PLANE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_SVG);
-  const PLANE_STALE_SVG = PLANE_SVG.replace('fill="#ff0"', 'fill="#999"');
-  const PLANE_STALE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_STALE_SVG);
   // Aircraft is considered stale (icon fades to grey) after this many
   // seconds of silence since the last decoded position frame.
   const STALE_SEC = 5 * 60;
+  // Plane silhouette dimensions (metres) — a simple 3-vertex arrow drawn
+  // as an entity.polygon lying tangent to the sphere.  Rotates naturally
+  // with the globe because the vertices live in world space, not screen
+  // space.  Sized generously so it's still readable at country-scale
+  // zoom without being absurd at close-in.
+  const PLANE_NOSE_M = 15000;
+  const PLANE_TAIL_M = -8000;
+  const PLANE_WING_M = 12000;
+
+  // Compute the three ECEF vertices of the plane-arrow polygon for a
+  // given (lat, lon, alt) + heading.  Uses the local East-North-Up
+  // frame so the polygon lies flat on the tangent plane at the
+  // aircraft's position — that's why it tilts correctly when the globe
+  // is rotated in 3D.
+  function planePolygonPositions(lat, lon, alt_m, headingDeg) {
+    const center = Cesium.Cartesian3.fromDegrees(lon, lat, alt_m);
+    const enu    = Cesium.Transforms.eastNorthUpToFixedFrame(center);
+    const hRad   = Cesium.Math.toRadians(headingDeg);
+    const sH = Math.sin(hRad), cH = Math.cos(hRad);
+    // Local (forward, right) coords per vertex → rotate by heading →
+    // ENU (east, north, 0) → ECEF (multiplyByPoint).
+    function ecef(fwd, right) {
+      const east  = fwd * sH + right * cH;
+      const north = fwd * cH - right * sH;
+      return Cesium.Matrix4.multiplyByPoint(
+        enu, new Cesium.Cartesian3(east, north, 0),
+        new Cesium.Cartesian3(),
+      );
+    }
+    return [
+      ecef(PLANE_NOSE_M, 0),
+      ecef(PLANE_TAIL_M, -PLANE_WING_M),
+      ecef(PLANE_TAIL_M,  PLANE_WING_M),
+    ];
+  }
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
   const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
@@ -253,7 +277,6 @@
         parts.push(
           `<div style="color:#f88;font-weight:bold;margin-top:0.4em">${o.iata_code || o.icao_code} → ${d.iata_code || d.icao_code}</div>`
           + `<div style="color:#aaa;font-size:11px">${o.municipality} → ${d.municipality}</div>`
-          + `<div style="color:#8f8;font-size:10px">✓ dashed line drawn on globe</div>`
         );
       }
       if (route.airline?.name) parts.push(`<div style="color:#aaa;font-size:11px">${route.airline.name}</div>`);
@@ -427,14 +450,15 @@
         id: ac.icao,
         name: ac.callsign || ac.icao,
         position: pos,
-        billboard: {
-          image: isStale ? PLANE_STALE_URL : PLANE_URL,
-          // Cesium billboard rotation is CCW in radians about the screen
-          // normal; aviation heading is CW from north → negate.
-          rotation: Cesium.Math.toRadians(-heading),
-          scale: 0.75,
-          disableDepthTestDistance: Number.POSITIVE_INFINITY,
-          heightReference: Cesium.HeightReference.NONE,
+        polygon: {
+          // Tangent-to-sphere plane arrow — replaces the earlier
+          // screen-space billboard so the icon tilts with the globe.
+          hierarchy: planePolygonPositions(ac.lat, ac.lon, alt_m, heading),
+          material: (isStale
+            ? Cesium.Color.fromCssColorString('#999').withAlpha(0.75)
+            : Cesium.Color.YELLOW.withAlpha(0.9)),
+          perPositionHeight: true,
+          outline: false,       // WebGL polygon outlines are 1 px only
         },
         label: {
           text: ac.callsign || ac.icao,
