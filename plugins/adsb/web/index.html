@@ -175,7 +175,7 @@
   ];
   const PLANE_SVG_CX = 12;    // SVG centre X
   const PLANE_SVG_CY = 12;    // SVG centre Y
-  const PLANE_SCALE_M = 400;  // metres per SVG unit → wingspan 8 km, length ~9 km
+  const PLANE_SCALE_M = 250;  // metres per SVG unit → wingspan 5 km, length ~5.5 km
 
   // Compute ECEF vertices of the plane-silhouette polygon for a given
   // (lat, lon, alt) + heading.  Uses the local East-North-Up frame so
@@ -462,7 +462,8 @@
           hierarchy: planePolygonPositions(ac.lat, ac.lon, alt_m, heading),
           material: (isStale
             ? Cesium.Color.fromCssColorString('#999').withAlpha(0.75)
-            : Cesium.Color.YELLOW.withAlpha(0.9)),
+            : Cesium.Color.fromCssColorString('#daa520').withAlpha(0.95)),   // goldenrod
+
           perPositionHeight: true,
           outline: false,       // WebGL polygon outlines are 1 px only
         },
