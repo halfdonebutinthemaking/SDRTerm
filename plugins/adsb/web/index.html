@@ -161,46 +161,24 @@
   // seconds of silence since the last decoded position frame.
   const STALE_SEC = 5 * 60;
 
-  // Plane silhouette — same shape as the retired SVG billboard (16
-  // vertices tracing fuselage + wings + tail stabilisers), but rendered
-  // as a Cesium polygon lying tangent to the sphere so it *tilts with
-  // the globe* in 3D.  Coords are in the SVG's original 24×24 viewBox;
-  // planePolygonPositions() below translates them to metres in the
-  // local ENU frame at each aircraft's position.  Cesium handles the
-  // ~16 vertices per plane × ~few dozen planes trivially.
-  const PLANE_SVG_VERTS = [
-    [12,  1], [13,  9], [22, 13], [22, 15], [13, 13],
-    [13, 19], [15, 21], [15, 22], [12, 21], [ 9, 22],
-    [ 9, 21], [11, 19], [11, 13], [ 2, 15], [ 2, 13], [11,  9],
-  ];
-  const PLANE_SVG_CX = 12;    // SVG centre X
-  const PLANE_SVG_CY = 12;    // SVG centre Y
-  const PLANE_SCALE_M = 250;  // metres per SVG unit → wingspan 5 km, length ~5.5 km
-
-  // Compute ECEF vertices of the plane-silhouette polygon for a given
-  // (lat, lon, alt) + heading.  Uses the local East-North-Up frame so
-  // the polygon lies flat on the tangent plane at that position — that's
-  // why the whole silhouette tilts correctly when the globe is rotated
-  // in 3D.  Heading rotates the shape in the tangent plane.
-  function planePolygonPositions(lat, lon, alt_m, headingDeg) {
-    const center = Cesium.Cartesian3.fromDegrees(lon, lat, alt_m);
-    const enu    = Cesium.Transforms.eastNorthUpToFixedFrame(center);
-    const hRad   = Cesium.Math.toRadians(headingDeg);
-    const sH     = Math.sin(hRad), cH = Math.cos(hRad);
-    return PLANE_SVG_VERTS.map(([svgX, svgY]) => {
-      // (right, forward) in metres — SVG y grows downward, so
-      // "forward" (toward north for a plane at heading 0) is -svgY.
-      const right   = (svgX - PLANE_SVG_CX) * PLANE_SCALE_M;
-      const forward = (PLANE_SVG_CY - svgY) * PLANE_SCALE_M;
-      // Rotate (right, forward) by heading into (east, north)
-      const east  = forward * sH + right * cH;
-      const north = forward * cH - right * sH;
-      return Cesium.Matrix4.multiplyByPoint(
-        enu, new Cesium.Cartesian3(east, north, 0),
-        new Cesium.Cartesian3(),
-      );
-    });
-  }
+  // Plane silhouette — the original SVG that looked good.  Rendered as
+  // a Cesium billboard, which is always screen-space (faces the
+  // camera).  This means the icon does NOT tilt when the user rotates
+  // the globe in 3D — that's the classic trade-off: crisp SVG
+  // rendering vs tangent-to-sphere orientation.  Every mainstream
+  // ADS-B tracker (FR24, ADSBExchange, tar1090) makes the same
+  // choice, because a screen-space icon is far more readable at all
+  // zoom levels.  If we ever want the icon to tilt with the globe
+  // too, drop in an entity.model that references a small GLB — see
+  // notes/adsb-icon-3d.md (not yet written).
+  const PLANE_SVG = `
+    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24">
+      <path fill="#daa520" stroke="#000" stroke-width="0.6" stroke-linejoin="round"
+            d="M12 1 L13 9 L22 13 L22 15 L13 13 L13 19 L15 21 L15 22 L12 21 L9 22 L9 21 L11 19 L11 13 L2 15 L2 13 L11 9 Z"/>
+    </svg>`;
+  const PLANE_STALE_SVG = PLANE_SVG.replace('fill="#daa520"', 'fill="#999"');
+  const PLANE_URL       = 'data:image/svg+xml;base64,' + btoa(PLANE_SVG);
+  const PLANE_STALE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_STALE_SVG);
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
   const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
@@ -452,35 +430,20 @@
       const isStale = ac.last_seen && (Date.now() / 1000 - ac.last_seen) > STALE_SEC;
       const heading = ac.heading != null ? ac.heading : 0;
 
-      // Compute vertex positions once; polygon uses them for fill,
-      // polyline draws the outline (polygon.outline is 1 px in WebGL
-      // so we use a separate polyline for a genuine thick outline).
-      const planeVerts = planePolygonPositions(ac.lat, ac.lon, alt_m, heading);
-      const outlineVerts = planeVerts.concat([planeVerts[0]]);   // close the loop
-
       const entity = acDS.entities.add({
         id: ac.icao,
         name: ac.callsign || ac.icao,
         position: pos,
-        polygon: {
-          // Tangent-to-sphere plane silhouette — replaces the earlier
-          // screen-space billboard so the icon tilts with the globe.
-          hierarchy: planeVerts,
-          material: (isStale
-            ? Cesium.Color.fromCssColorString('#999').withAlpha(0.75)
-            : Cesium.Color.fromCssColorString('#daa520').withAlpha(0.95)),   // goldenrod
-          perPositionHeight: true,
-          outline: false,
-        },
-        polyline: {
-          // Thick outline that WebGL polygon.outline can't provide.
-          // arcType RHUMB is cheap for our short (~km) segments — no
-          // need for geodesic interpolation between adjacent vertices.
-          positions: outlineVerts,
-          width: 2,
-          material: Cesium.Color.BLACK.withAlpha(0.85),
-          arcType: Cesium.ArcType.RHUMB,
-          clampToGround: false,
+        billboard: {
+          // Screen-space SVG plane silhouette — always faces the camera
+          // (does not tilt with the globe).  See the comment on
+          // PLANE_SVG above for the trade-off.  scale 0.75 keeps the
+          // icon compact but still readable at any zoom.
+          image:    isStale ? PLANE_STALE_URL : PLANE_URL,
+          rotation: Cesium.Math.toRadians(-heading),
+          scale:    0.75,
+          disableDepthTestDistance: Number.POSITIVE_INFINITY,
+          heightReference: Cesium.HeightReference.NONE,
         },
         label: {
           text: ac.callsign || ac.icao,
