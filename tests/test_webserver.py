@@ -189,9 +189,9 @@ class TestAdsbIntegration:
         # Receiver + farthest-signal wiring
         assert 'drawReceiver' in html
         assert 'farthest'     in html
-        # Plane silhouette billboard (not just a Cesium point)
-        assert 'PLANE_SVG'    in html
-        assert 'billboard'    in html
+        # Plane silhouette as tangent-to-sphere polygon (rotates with the globe)
+        assert 'planePolygonPositions'   in html
+        assert 'eastNorthUpToFixedFrame' in html
         # Swappable tile provider
         assert 'ensureTilesMatch' in html
         assert 'tiles-label'      in html
