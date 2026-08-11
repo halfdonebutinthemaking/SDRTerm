@@ -160,40 +160,46 @@
   // Aircraft is considered stale (icon fades to grey) after this many
   // seconds of silence since the last decoded position frame.
   const STALE_SEC = 5 * 60;
-  // Plane silhouette dimensions (metres) — a simple 3-vertex arrow drawn
-  // as an entity.polygon lying tangent to the sphere.  Rotates naturally
-  // with the globe because the vertices live in world space, not screen
-  // space.  Sized generously so it's still readable at country-scale
-  // zoom without being absurd at close-in.
-  const PLANE_NOSE_M = 15000;
-  const PLANE_TAIL_M = -8000;
-  const PLANE_WING_M = 12000;
 
-  // Compute the three ECEF vertices of the plane-arrow polygon for a
-  // given (lat, lon, alt) + heading.  Uses the local East-North-Up
-  // frame so the polygon lies flat on the tangent plane at the
-  // aircraft's position — that's why it tilts correctly when the globe
-  // is rotated in 3D.
+  // Plane silhouette — same shape as the retired SVG billboard (16
+  // vertices tracing fuselage + wings + tail stabilisers), but rendered
+  // as a Cesium polygon lying tangent to the sphere so it *tilts with
+  // the globe* in 3D.  Coords are in the SVG's original 24×24 viewBox;
+  // planePolygonPositions() below translates them to metres in the
+  // local ENU frame at each aircraft's position.  Cesium handles the
+  // ~16 vertices per plane × ~few dozen planes trivially.
+  const PLANE_SVG_VERTS = [
+    [12,  1], [13,  9], [22, 13], [22, 15], [13, 13],
+    [13, 19], [15, 21], [15, 22], [12, 21], [ 9, 22],
+    [ 9, 21], [11, 19], [11, 13], [ 2, 15], [ 2, 13], [11,  9],
+  ];
+  const PLANE_SVG_CX = 12;    // SVG centre X
+  const PLANE_SVG_CY = 12;    // SVG centre Y
+  const PLANE_SCALE_M = 400;  // metres per SVG unit → wingspan 8 km, length ~9 km
+
+  // Compute ECEF vertices of the plane-silhouette polygon for a given
+  // (lat, lon, alt) + heading.  Uses the local East-North-Up frame so
+  // the polygon lies flat on the tangent plane at that position — that's
+  // why the whole silhouette tilts correctly when the globe is rotated
+  // in 3D.  Heading rotates the shape in the tangent plane.
   function planePolygonPositions(lat, lon, alt_m, headingDeg) {
     const center = Cesium.Cartesian3.fromDegrees(lon, lat, alt_m);
     const enu    = Cesium.Transforms.eastNorthUpToFixedFrame(center);
     const hRad   = Cesium.Math.toRadians(headingDeg);
-    const sH = Math.sin(hRad), cH = Math.cos(hRad);
-    // Local (forward, right) coords per vertex → rotate by heading →
-    // ENU (east, north, 0) → ECEF (multiplyByPoint).
-    function ecef(fwd, right) {
-      const east  = fwd * sH + right * cH;
-      const north = fwd * cH - right * sH;
+    const sH     = Math.sin(hRad), cH = Math.cos(hRad);
+    return PLANE_SVG_VERTS.map(([svgX, svgY]) => {
+      // (right, forward) in metres — SVG y grows downward, so
+      // "forward" (toward north for a plane at heading 0) is -svgY.
+      const right   = (svgX - PLANE_SVG_CX) * PLANE_SCALE_M;
+      const forward = (PLANE_SVG_CY - svgY) * PLANE_SCALE_M;
+      // Rotate (right, forward) by heading into (east, north)
+      const east  = forward * sH + right * cH;
+      const north = forward * cH - right * sH;
       return Cesium.Matrix4.multiplyByPoint(
         enu, new Cesium.Cartesian3(east, north, 0),
         new Cesium.Cartesian3(),
       );
-    }
-    return [
-      ecef(PLANE_NOSE_M, 0),
-      ecef(PLANE_TAIL_M, -PLANE_WING_M),
-      ecef(PLANE_TAIL_M,  PLANE_WING_M),
-    ];
+    });
   }
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
