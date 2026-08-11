@@ -38,6 +38,23 @@
   .cesium-infoBox { background: rgba(20, 20, 20, 0.95); color: #eee; }
   .cesium-infoBox-title { color: #8cf; }
   .cesium-infoBox-iframe { background: #1a1a1a; }
+  /* Portrait viewports (phone held upright) — the default top-right
+     InfoBox hides the plane you just tapped.  Reposition to bottom-left
+     and cap height so the map stays usable behind it. */
+  @media (orientation: portrait) {
+    .cesium-infoBox {
+      top:    auto  !important;
+      right:  auto  !important;
+      bottom: 0.6em !important;
+      left:   0.6em !important;
+      max-width:  calc(100vw - 1.2em) !important;
+      max-height: 45vh              !important;
+      width:      calc(100vw - 1.2em) !important;
+    }
+    /* HUD is top-left; on portrait shrink so both panels fit the
+       narrow screen without one overlapping the other. */
+    #hud { max-width: calc(100vw - 1.2em); font-size: 11px; }
+  }
 </style>
 </head>
 <body>
