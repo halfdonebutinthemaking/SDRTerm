@@ -452,20 +452,35 @@
       const isStale = ac.last_seen && (Date.now() / 1000 - ac.last_seen) > STALE_SEC;
       const heading = ac.heading != null ? ac.heading : 0;
 
+      // Compute vertex positions once; polygon uses them for fill,
+      // polyline draws the outline (polygon.outline is 1 px in WebGL
+      // so we use a separate polyline for a genuine thick outline).
+      const planeVerts = planePolygonPositions(ac.lat, ac.lon, alt_m, heading);
+      const outlineVerts = planeVerts.concat([planeVerts[0]]);   // close the loop
+
       const entity = acDS.entities.add({
         id: ac.icao,
         name: ac.callsign || ac.icao,
         position: pos,
         polygon: {
-          // Tangent-to-sphere plane arrow — replaces the earlier
+          // Tangent-to-sphere plane silhouette — replaces the earlier
           // screen-space billboard so the icon tilts with the globe.
-          hierarchy: planePolygonPositions(ac.lat, ac.lon, alt_m, heading),
+          hierarchy: planeVerts,
           material: (isStale
             ? Cesium.Color.fromCssColorString('#999').withAlpha(0.75)
             : Cesium.Color.fromCssColorString('#daa520').withAlpha(0.95)),   // goldenrod
-
           perPositionHeight: true,
-          outline: false,       // WebGL polygon outlines are 1 px only
+          outline: false,
+        },
+        polyline: {
+          // Thick outline that WebGL polygon.outline can't provide.
+          // arcType RHUMB is cheap for our short (~km) segments — no
+          // need for geodesic interpolation between adjacent vertices.
+          positions: outlineVerts,
+          width: 2,
+          material: Cesium.Color.BLACK.withAlpha(0.85),
+          arcType: Cesium.ArcType.RHUMB,
+          clampToGround: false,
         },
         label: {
           text: ac.callsign || ac.icao,
@@ -548,13 +563,17 @@
     // Repaint every track so the current selection is the only red one.
     // O(n) per change; n is at most a few hundred — trivially fast.
     for (const icao in acData) setTrackHighlight(icao, icao === selId);
+    // ALWAYS clear the route line on any selection change.  Previously
+    // we only cleared on deselect; if the new selection had no adsbdb
+    // route, enrichOnOpen would silently skip drawRoute and the OLD
+    // dashed line stuck around.
+    clearRoute();
 
     if (selId) {
       try { localStorage.setItem('adsb:selected', selId); } catch {}
-      enrichOnOpen(selId);
+      enrichOnOpen(selId);      // may or may not re-draw the route
     } else {
       try { localStorage.removeItem('adsb:selected'); } catch {}
-      clearRoute();
     }
   });
 
