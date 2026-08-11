@@ -190,8 +190,8 @@ class TestAdsbIntegration:
         assert 'drawReceiver' in html
         assert 'farthest'     in html
         # Plane silhouette as tangent-to-sphere polygon (rotates with the globe)
-        assert 'planePolygonPositions'   in html
-        assert 'eastNorthUpToFixedFrame' in html
+        assert 'PLANE_SVG' in html
+        assert 'billboard' in html
         # Swappable tile provider
         assert 'ensureTilesMatch' in html
         assert 'tiles-label'      in html
