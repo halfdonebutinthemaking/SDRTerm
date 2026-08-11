@@ -549,3 +549,103 @@ plugin runs into CPU headroom limits:
   iridium-toolkit's output on the same input files
 - Doc pass: one section in `plugins/README.md` explaining the three
   tiers so future contributors know which one to pick
+
+---
+
+## 7. Beast Output Plugin — feed ADS-B decoded frames to aggregators
+
+**Status:** Not started
+**Dependencies:** None (stdlib TCP + bytes)
+
+### Rationale
+
+The `plugins/adsb` decoder already produces valid 112-bit Mode-S frames
+that pass CRC-24.  Every open ADS-B aggregator (ADSBExchange, adsb.fi,
+airplanes.live, RadarBox, OpenSky) ingests the same standard
+**Beast binary format** used by dump1090 and readsb.  A Beast TCP server
+plugin lets SDRTerm feed all of them via one interface, without
+reinventing per-aggregator upload logic or the MLAT/registration
+choreography.
+
+### Architecture
+
+```
+SDRTerm/adsb → decoded Mode-S frames
+                     ↓
+             plugins/beast_out → Beast TCP :30005
+                                      ↓
+                    readsb / adsbexchange-feeder / dump1090-fa client
+                                      ↓
+                            feed.adsbexchange.com
+                            feed.adsb.fi
+                            feed.airplanes.live
+                            feed.radarbox.com
+                            opensky
+```
+
+Users install the aggregator's official feeder software (a Docker
+container or a `.deb` — every aggregator ships one).  That software
+connects to `localhost:30005` as a Beast client and handles the actual
+upload, MLAT coordination, health-checking, and account registration
+with the aggregator.
+
+We stay firmly on our side of the line: we produce a standards-compliant
+local Beast stream, they handle everything else.
+
+### Wire format (per frame)
+
+```
+0x1a 0x33 <6-byte 12MHz timestamp> <1-byte RSSI> <14-byte long-Mode-S>
+```
+
+- Prefix `0x1a 0x33` marks a long-format frame; `0x1a 0x32` for short (56-bit)
+- Timestamp: 6 bytes, big-endian, 12 MHz tick counter
+- RSSI: 1 byte, 0-255, proxied from the correlator's peak strength
+  divided into the current chunk's noise floor
+- Payload: the raw 14 bytes we already have in `_parse_df17`
+- Any `0x1a` in the timestamp, RSSI or payload is escaped by doubling
+  (`0x1a 0x1a` per occurrence)
+
+### Plugin skeleton
+
+Same pattern as `rtl-tcp-passive`:
+
+- `name = 'beast-out'`, `key = ...` (something free)
+- `save_state` / `load_state` for `port` (default 30005), `enabled`
+- `start()`: bind TCP server on 0.0.0.0:30005, spawn accept thread
+- Cross-plugin hook: adsb plugin calls `beast_out.publish(msg_bytes, rssi)`
+  for every CRC-passing DF17 frame.  Duck-typed via
+  `getattr(registry['beast-out'], 'publish', None)`.
+- Broadcast: on `publish`, format Beast bytes, `sendall` to every
+  connected client (drop on error, remove from client set)
+
+Small enough that no LaTeX walkthrough is warranted — the wire format
+comment above is the whole spec.
+
+### Rough cost
+
+- Beast formatter: ~30 LOC (byte packing + escape loop)
+- TCP server + accept thread + client set: ~60 LOC (mostly matching
+  `rtl-tcp-passive`'s socket handling)
+- adsb-plugin hook: 3 lines in `_parse_df17` — `if beast_out: beast_out.publish(msg, rssi)`
+- Tests: publish → connect → receive → assert bytes match spec.  ~50 LOC.
+- Preset addition: put `beast-out` in `active_decoders`.
+
+Total: ~150 LOC + ~50 LOC tests.
+
+### Non-goals
+
+- **No direct upload to aggregators.**  Each has its own auth flow,
+  MLAT sync, retry semantics.  Their official feeder software solves
+  that correctly; we don't need to.
+- **No Beast client mode.**  If a user has an existing Beast source
+  (external dump1090, a KiwiSDR, whatever) they can already point
+  their feeder at that; we don't need to broker.
+- **No web view for this plugin.**  Status is "connected clients: N"
+  — display in the SDRTerm status bar is enough.
+
+### Related — client-side inputs
+
+adsbdb + hexdb + planespotters (see the enrichment discussion) are all
+INPUT sources — they read.  This plugin is the corresponding OUTPUT:
+it publishes.  Together they close the ADS-B loop end-to-end.
