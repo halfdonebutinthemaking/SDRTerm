@@ -417,59 +417,92 @@
     } else {
       parts.push('<div style="color:#888;font-style:italic">looking up aircraft…</div>');
     }
-    if (route) {
-      const o = route.origin, d = route.destination;
-      if (o && d && o.latitude != null && d.latitude != null) {
-        parts.push(
-          `<div style="color:#f88;font-weight:bold;margin-top:0.4em">${o.iata_code || o.icao_code} → ${d.iata_code || d.icao_code}</div>`
-          + `<div style="color:#aaa;font-size:11px">${o.municipality} → ${d.municipality}</div>`
-        );
-      }
-      if (route.airline?.name) parts.push(`<div style="color:#aaa;font-size:11px">${route.airline.name}</div>`);
+    // ── route: show both sources side-by-side so the user picks ──────
+    // adsbdb: rich (origin/dest objects with iata + municipality + airline)
+    // hexdb.io: minimal (ICAO codes only, but often fresher on route changes)
+    // When the two agree, collapse to a single line labelled '(adsbdb, hexdb.io)'.
+    // When they disagree, list both — the user judges from the plane's actual
+    // heading / trajectory which looks right.
+    const csKey = ac.callsign ? ac.callsign.trim().toUpperCase() : null;
+    const hex   = csKey ? cacheGet('route_hexdb', csKey) : undefined;
 
-      // ── sanity check 1: heading vs bearing to destination ──────────
-      // Skip when we can't compute (missing heading/position) or when
-      // the plane is on approach (< 30 km from dest) — near the field
-      // it's being vectored, so heading naturally diverges.  Threshold
-      // of 45° is generous enough to absorb wind correction and en-
-      // route direct-to shortcuts.
-      if (ac.heading != null && ac.lat != null && ac.lon != null
-          && d?.latitude != null && d?.longitude != null) {
-        const dKm = _haversineKm(ac.lat, ac.lon, d.latitude, d.longitude);
-        if (dKm > 30) {
-          const expected = _bearingDeg(ac.lat, ac.lon, d.latitude, d.longitude);
-          const diff = _angDiffDeg(ac.heading, expected);
-          if (diff > 45) {
-            parts.push(
-              `<div style="color:#fc0;font-size:11px;margin-top:0.3em">
-                 ⚠ Heading ${Math.round(ac.heading)}° is ${Math.round(diff)}° off
-                 the expected bearing to ${d.iata_code || d.icao_code}
-                 (${Math.round(expected)}°) — possibly diverted, holding, or stale route
-               </div>`
-            );
-          }
-        }
-      }
+    const adsbOrig = route?.origin?.icao_code || null;
+    const adsbDest = route?.destination?.icao_code || null;
+    const adsbLbl  = (route?.origin?.iata_code || adsbOrig)
+                   + ' → '
+                   + (route?.destination?.iata_code || adsbDest);
+    const hexLbl   = (hex?.origin && hex?.destination)
+                       ? `${hex.origin} → ${hex.destination}` : null;
+    const adsbHas  = adsbOrig && adsbDest;
+    const hexHas   = !!hexLbl;
+    const agree    = adsbHas && hexHas
+                     && hex.origin      === adsbOrig
+                     && hex.destination === adsbDest;
 
-      // ── sanity check 2: cross-reference with hexdb.io ──────────────
-      // Compare the airport ICAO codes; disagreement is a signal that
-      // one of the two DBs is stale.  We show hexdb's opinion so the
-      // user can judge which looks right for the plane's current path.
-      const csKey = ac.callsign ? ac.callsign.trim().toUpperCase() : null;
-      const hex = csKey ? cacheGet('route_hexdb', csKey) : undefined;
-      if (hex && o?.icao_code && d?.icao_code) {
-        if (hex.origin !== o.icao_code || hex.destination !== d.icao_code) {
+    const _routeLine = (label, source) => `
+      <div style="color:#f88;font-weight:bold;margin-top:0.3em">${label}
+        <span style="color:#888;font-size:10px;font-weight:normal"> (${source})</span>
+      </div>`;
+    const _muniLine = (route?.origin?.municipality || route?.destination?.municipality)
+      ? `<div style="color:#aaa;font-size:11px">
+           ${route.origin.municipality || route.origin.icao_code}
+           → ${route.destination.municipality || route.destination.icao_code}
+         </div>`
+      : '';
+    const _airlineLine = route?.airline?.name
+      ? `<div style="color:#aaa;font-size:11px">${route.airline.name}</div>`
+      : '';
+
+    if (adsbHas && hexHas && agree) {
+      parts.push(_routeLine(adsbLbl, 'adsbdb, hexdb.io'));
+      if (_muniLine)    parts.push(_muniLine);
+      if (_airlineLine) parts.push(_airlineLine);
+    } else if (adsbHas && hexHas) {
+      // Disagreement — show both routes as peers so user can decide.
+      parts.push(_routeLine(adsbLbl, 'adsbdb'));
+      if (_muniLine)    parts.push(_muniLine);
+      if (_airlineLine) parts.push(_airlineLine);
+      parts.push(_routeLine(hexLbl, 'hexdb.io'));
+    } else if (adsbHas) {
+      parts.push(_routeLine(adsbLbl, 'adsbdb'));
+      if (_muniLine)    parts.push(_muniLine);
+      if (_airlineLine) parts.push(_airlineLine);
+      if (hex === null) {
+        parts.push('<div style="color:#888;font-size:11px">hexdb.io: no data</div>');
+      }
+    } else if (hexHas) {
+      parts.push(_routeLine(hexLbl, 'hexdb.io'));
+      if (route === null) {
+        parts.push('<div style="color:#888;font-size:11px">adsbdb: no data</div>');
+      }
+    } else if (route === null && hex === null && ac.callsign) {
+      parts.push('<div style="color:#888;font-size:11px">no route for this callsign (both DBs 404)</div>');
+    } else if (ac.callsign) {
+      parts.push('<div style="color:#888;font-style:italic">looking up route…</div>');
+    }
+
+    // ── heading-vs-bearing sanity check (adsbdb dest only — hexdb has
+    // no coords).  Skips when heading/position missing or when the
+    // plane is on approach (< 30 km from dest, being vectored).
+    // 45° threshold absorbs normal wind correction + en-route direct-to.
+    if (adsbHas && ac.heading != null && ac.lat != null && ac.lon != null
+        && route.destination.latitude != null
+        && route.destination.longitude != null) {
+      const d = route.destination;
+      const dKm = _haversineKm(ac.lat, ac.lon, d.latitude, d.longitude);
+      if (dKm > 30) {
+        const expected = _bearingDeg(ac.lat, ac.lon, d.latitude, d.longitude);
+        const diff = _angDiffDeg(ac.heading, expected);
+        if (diff > 45) {
           parts.push(
-            `<div style="color:#fc0;font-size:11px">
-               ⚠ hexdb.io disagrees: ${hex.origin} → ${hex.destination}
+            `<div style="color:#fc0;font-size:11px;margin-top:0.3em">
+               ⚠ Heading ${Math.round(ac.heading)}° is ${Math.round(diff)}° off
+               the expected bearing to ${d.iata_code || d.icao_code}
+               (${Math.round(expected)}°) — possibly diverted, holding, or stale route
              </div>`
           );
         }
       }
-    } else if (route === null && ac.callsign) {
-      parts.push('<div style="color:#888;font-size:11px">no route for this callsign (adsbdb 404)</div>');
-    } else if (ac.callsign) {
-      parts.push('<div style="color:#888;font-style:italic">looking up route…</div>');
     }
 
     const t = [];
