@@ -704,9 +704,13 @@
       if (Array.isArray(ac.track) && ac.track.length > 1) {
         const positions = ac.track.map(p =>
           Cesium.Cartesian3.fromDegrees(p.lon, p.lat, (p.alt != null ? p.alt * M_PER_FT : 8000)));
-        // Append the current position if it's newer than the last track sample
-        const cur = ac.track[ac.track.length - 1];
-        if (cur.lat !== ac.lat || cur.lon !== ac.lon) positions.push(pos);
+        // Force the polyline's last vertex to equal the icon's position.
+        // Otherwise the two can visibly disconnect when the most recent CSV
+        // row has (lat, lon) but no altitude — the track vertex falls back
+        // to the 8000 m default while the icon still uses the aircraft's
+        // last-known real altitude from an earlier row.  On a 3D globe
+        // this shows up as an icon floating detached above the trail.
+        positions[positions.length - 1] = pos;
         trackEntity = acDS.entities.add({
           polyline: {
             positions,
