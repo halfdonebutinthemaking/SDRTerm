@@ -56,6 +56,15 @@
   #search-row label { margin-left: 6px; font-size: 11px; color: #aaa;
                        user-select: none; vertical-align: middle; }
   #search-row input[type=checkbox] { vertical-align: middle; }
+  #search-spinner {
+    display: inline-block; width: 9px; height: 9px;
+    margin-left: 6px; vertical-align: middle;
+    border: 1.5px solid #333; border-top-color: #8cf;
+    border-radius: 50%;
+    animation: search-spin 700ms linear infinite;
+  }
+  #search-spinner[hidden] { display: none; }
+  @keyframes search-spin { to { transform: rotate(360deg); } }
 
   /* Cesium InfoBox theming — the box that appears when you click an entity */
   .cesium-infoBox { background: rgba(20, 20, 20, 0.95); color: #eee; }
@@ -118,6 +127,7 @@
     <label title="If checked, search the whole log (from/to are set to the matched span).">
       <input type="checkbox" id="search-global"> global
     </label>
+    <span id="search-spinner" hidden title="Searching…"></span>
   </div>
 </div>
 
@@ -740,14 +750,21 @@
     document.getElementById('ac-count').textContent = c[currentFilter].geo;
   }
 
+  // In-flight counter for search fetches — a global scan can take a
+  // moment on a large log, and if the user keeps typing we don't want
+  // the spinner to blink off between overlapping requests.
+  let _searchInFlight = 0;
+
   async function refresh() {
     const btn = document.getElementById('refresh-btn');
     btn.disabled = true;
+    const qStr     = (document.getElementById('search-q').value || '').trim();
+    const isGlobal = document.getElementById('search-global').checked;
+    const spinner  = document.getElementById('search-spinner');
+    if (qStr) { _searchInFlight++; spinner.hidden = false; }
     try {
       const preset = document.getElementById('window-select').value;
       const w = computeWindow(preset);
-      const qStr     = (document.getElementById('search-q').value || '').trim();
-      const isGlobal = document.getElementById('search-global').checked;
       const p = new URLSearchParams();
       if (!(qStr && isGlobal)) {
         // Global search ignores the time filter — no point sending it.
@@ -809,6 +826,10 @@
       document.getElementById('log-state').textContent = 'error: ' + e.message;
     } finally {
       btn.disabled = false;
+      if (qStr) {
+        _searchInFlight = Math.max(0, _searchInFlight - 1);
+        if (_searchInFlight === 0) spinner.hidden = true;
+      }
     }
   }
 
