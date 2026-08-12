@@ -206,28 +206,24 @@
   // practice — false positives are mostly ex-military / test /
   // calibration airframes flown under civilian ops.
   //
-  // Ranges below match readsb's is_military() list — conservative, so
-  // no civil-block overlaps.  Removed earlier bogus entries that caught
-  // Ryanair (4CA400-4CA7FF was labelled NATO E-3A but actually sits in
-  // the Irish civil block 4CA000-4CAFFF) and Russian civil traffic
-  // (150000-1FFFFF was too broad).  NATO E-3As can't be identified
-  // reliably by ICAO alone — they're in the Luxembourg civil block —
-  // callsign match ('MAGMA', 'NATO') catches them instead.
+  // Only ranges I'm truly confident are mil-only.  Previous iterations
+  // catalogued more countries but several of those "military" sub-blocks
+  // actually overlap civil allocations for the same country, producing
+  // false positives:
+  //   484000-484FFF   Dutch — actually Dutch civil (KLM/Transavia/etc.)
+  //   86D000-86FFFF   Japan — overlaps ANA/JAL civil
+  //   4B8000-4B8FFF   labelled Swiss but is actually the Turkish civil
+  //                   block (Turkish Airlines / Pegasus / some Corendon)
+  //   A80000-AF3B9F   labelled US Coast Guard but is inside US civil
+  //                   (Delta / United / American et al.)
+  //   3EA000-3EBFFF   German — sub-allocation is more nuanced than this
+  // For those countries the callsign pattern + adsbdb registered_owner
+  // still catch military traffic reliably; we just miss a few until
+  // adsbdb enrichment finishes.  Better than misclassifying airliners.
   // Format: [lo, hi, label].
   const MILITARY_ICAO_RANGES = [
-    ['ADF7C8', 'AFFFFF', 'US Military'],           // biggest & most common
-    ['3EA000', '3EBFFF', 'German Bundeswehr'],
-    ['43C000', '43CFFF', 'UK Royal Air Force'],
-    ['484000', '484FFF', 'Netherlands Air Force'],
-    ['33FF00', '33FFFF', 'Italian Air Force'],
-    ['3B7000', '3B7FFF', 'French Air Force'],
-    ['44F000', '44FFFF', 'Belgian Air Force'],
-    ['4B8000', '4B8FFF', 'Swiss Air Force'],
-    ['86D000', '86FFFF', 'Japan ASDF'],
-    ['C87F00', 'C87FFF', 'RNZAF'],
-    ['7C822D', '7C8AAF', 'Australian ADF'],
-    ['0D0700', '0D07FF', 'Mexican military'],
-    ['A80000', 'AF3B9F', 'US Coast Guard'],         // narrower than full 'A' block
+    ['ADF7C8', 'AFFFFF', 'US Military'],       // canonical, above ADF7C7 US-civil boundary
+    ['43C000', '43CFFF', 'UK Royal Air Force'], // clean sub-block within UK allocation
   ];
   const MILITARY_CALLSIGN_PATTERNS = [
     /^RCH\d/,   /^GAF\d/,   /^ASCOT/,  /^RRR\d/,  /^NAF\d/,
