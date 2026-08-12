@@ -206,26 +206,28 @@
   // practice — false positives are mostly ex-military / test /
   // calibration airframes flown under civilian ops.
   //
-  // Ranges below are non-exhaustive; add more as you spot missing ones.
-  // Format: [lo, hi, label].  Comparison is uppercase-hex string lex,
-  // which matches the ICAO field's format so we don't need to parseInt.
+  // Ranges below match readsb's is_military() list — conservative, so
+  // no civil-block overlaps.  Removed earlier bogus entries that caught
+  // Ryanair (4CA400-4CA7FF was labelled NATO E-3A but actually sits in
+  // the Irish civil block 4CA000-4CAFFF) and Russian civil traffic
+  // (150000-1FFFFF was too broad).  NATO E-3As can't be identified
+  // reliably by ICAO alone — they're in the Luxembourg civil block —
+  // callsign match ('MAGMA', 'NATO') catches them instead.
+  // Format: [lo, hi, label].
   const MILITARY_ICAO_RANGES = [
-    ['ADF7C8', 'AFFFFF', 'US Military'],        // biggest & most common
-    ['3EA000', '3EBFFF', 'German Air Force'],
+    ['ADF7C8', 'AFFFFF', 'US Military'],           // biggest & most common
+    ['3EA000', '3EBFFF', 'German Bundeswehr'],
     ['43C000', '43CFFF', 'UK Royal Air Force'],
     ['484000', '484FFF', 'Netherlands Air Force'],
     ['33FF00', '33FFFF', 'Italian Air Force'],
     ['3B7000', '3B7FFF', 'French Air Force'],
-    ['3407C1', '3407FF', 'Spanish Air Force'],
-    ['738000', '73FFFF', 'Israeli Air Force'],
-    ['150000', '1FFFFF', 'Russian mil (approx)'],
-    ['780000', '7BFFFF', 'Chinese PLAAF'],
+    ['44F000', '44FFFF', 'Belgian Air Force'],
+    ['4B8000', '4B8FFF', 'Swiss Air Force'],
     ['86D000', '86FFFF', 'Japan ASDF'],
-    ['4B8000', '4B8FFF', 'NATO'],
-    ['4CA400', '4CA7FF', 'NATO E-3A AWACS'],
     ['C87F00', 'C87FFF', 'RNZAF'],
     ['7C822D', '7C8AAF', 'Australian ADF'],
     ['0D0700', '0D07FF', 'Mexican military'],
+    ['A80000', 'AF3B9F', 'US Coast Guard'],         // narrower than full 'A' block
   ];
   const MILITARY_CALLSIGN_PATTERNS = [
     /^RCH\d/,   /^GAF\d/,   /^ASCOT/,  /^RRR\d/,  /^NAF\d/,
