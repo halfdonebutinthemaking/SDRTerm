@@ -27,7 +27,9 @@
   #hud button:hover { background: #333; }
   #hud button:disabled { opacity: 0.5; cursor: wait; }
   #custom-range { display: none; margin-top: 4px; }
-  #custom-range input { width: 12em; }
+  /* Wide enough to show the full 'YYYY-MM-DD HH:MM:SS' representation
+     plus the browser's calendar/clock icon without truncating the time. */
+  #custom-range input { width: 18em; font-family: monospace; }
   #window-label { color: #aaa; }
   #farthest.clickable {
     cursor: pointer; color: #8cf; text-decoration: underline dotted;
@@ -106,8 +108,12 @@
     <button id="refresh-btn" title="Re-scan the log with the current window">↻</button>
   </div>
   <div id="custom-range">
-    <div>from <input type="datetime-local" id="range-from" step="1"></div>
-    <div>to&nbsp;&nbsp;<input type="datetime-local" id="range-to"   step="1"></div>
+    <!-- lang="en-GB" forces the browser to render the time in 24-hour
+         format (no AM/PM); the OS locale would otherwise decide.  The
+         `datetime-local` input type is a combined date+time picker on
+         all modern browsers — one widget, one popup, one value. -->
+    <div>from <input type="datetime-local" id="range-from" step="1" lang="en-GB"></div>
+    <div>to&nbsp;&nbsp;<input type="datetime-local" id="range-to"   step="1" lang="en-GB"></div>
   </div>
   <div style="margin-top:6px">
     <b>Aircraft:</b> <span id="ac-count">0</span>
