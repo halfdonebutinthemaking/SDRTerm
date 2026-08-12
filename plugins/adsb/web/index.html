@@ -27,9 +27,14 @@
   #hud button:hover { background: #333; }
   #hud button:disabled { opacity: 0.5; cursor: wait; }
   #custom-range { display: none; margin-top: 4px; }
-  /* Wide enough to show the full 'YYYY-MM-DD HH:MM:SS' representation
-     plus the browser's calendar/clock icon without truncating the time. */
-  #custom-range input { width: 18em; font-family: monospace; }
+  /* Split into separate date + time inputs so we can force 24-hour
+     format via lang="en-GB" on the time input specifically — the
+     combined datetime-local widget ignores that hint on some browsers
+     and falls back to the OS locale (12h AM/PM), which then rejects
+     '00' as an hour.  Each input independently sized. */
+  #custom-range input           { font-family: monospace; margin-right: 4px; }
+  #custom-range input[type=date] { width: 9.5em; }
+  #custom-range input[type=time] { width: 8em; }
   #window-label { color: #aaa; }
   #farthest.clickable {
     cursor: pointer; color: #8cf; text-decoration: underline dotted;
@@ -108,12 +113,21 @@
     <button id="refresh-btn" title="Re-scan the log with the current window">↻</button>
   </div>
   <div id="custom-range">
-    <!-- lang="en-GB" forces the browser to render the time in 24-hour
-         format (no AM/PM); the OS locale would otherwise decide.  The
-         `datetime-local` input type is a combined date+time picker on
-         all modern browsers — one widget, one popup, one value. -->
-    <div>from <input type="datetime-local" id="range-from" step="1" lang="en-GB"></div>
-    <div>to&nbsp;&nbsp;<input type="datetime-local" id="range-to"   step="1" lang="en-GB"></div>
+    <!-- Split date + time.  A single <input type=datetime-local> is
+         tidier UX but its 24h/12h rendering is only partly influenced
+         by lang= on some browsers; if the OS locale is US the widget
+         may still render 12h AM/PM, which then treats '00' as an
+         invalid hour ('01' is the min).  A separate <input type=time>
+         with lang="en-GB" reliably renders 24h across Chromium and
+         Firefox, so midnight (00:00:00) is selectable. -->
+    <div>from
+      <input type="date"                        id="range-from-date">
+      <input type="time" step="1" lang="en-GB"  id="range-from-time">
+    </div>
+    <div>to&nbsp;&nbsp;
+      <input type="date"                        id="range-to-date">
+      <input type="time" step="1" lang="en-GB"  id="range-to-time">
+    </div>
   </div>
   <div style="margin-top:6px">
     <b>Aircraft:</b> <span id="ac-count">0</span>
@@ -834,11 +848,9 @@
         break;
       }
       case 'custom': {
-        const f = document.getElementById('range-from').value;
-        const t = document.getElementById('range-to').value;
         return {
-          from: f ? new Date(f).toISOString() : null,
-          to:   t ? new Date(t).toISOString() : null,
+          from: _getRangeIso('range-from'),
+          to:   _getRangeIso('range-to'),
         };
       }
     }
@@ -944,10 +956,8 @@
       // 'global' checkbox off to keep exploring that same range).
       if (qStr && isGlobal && d.matched_window
           && d.matched_window.from && d.matched_window.to) {
-        document.getElementById('range-from').value =
-          _localIso(new Date(d.matched_window.from));
-        document.getElementById('range-to').value =
-          _localIso(new Date(d.matched_window.to));
+        _setRangePair('range-from', new Date(d.matched_window.from));
+        _setRangePair('range-to',   new Date(d.matched_window.to));
       }
       // Prefer the matched window label when a search was run — it
       // shows the true span of results, not the full unbounded query.
@@ -985,12 +995,25 @@
   const sel = document.getElementById('window-select');
   const cust = document.getElementById('custom-range');
 
-  // Helper: fill a datetime-local input from a Date, in local time
-  // (that's what the input's value convention is).
-  function _localIso(d) {
+  // Read a from/to input pair (date + time) and convert to a UTC ISO
+  // string.  Empty time defaults to midnight; missing seconds get :00.
+  function _getRangeIso(prefix) {
+    const d = document.getElementById(prefix + '-date').value;
+    let   t = document.getElementById(prefix + '-time').value;
+    if (!d) return null;
+    if (!t)              t  = '00:00:00';
+    else if (t.length === 5) t += ':00';   // HH:MM → HH:MM:SS
+    return new Date(`${d}T${t}`).toISOString();
+  }
+
+  // Write a Date into the corresponding date + time input pair, in
+  // local time (that's what these inputs' value convention is).
+  function _setRangePair(prefix, date) {
     const pad = n => String(n).padStart(2, '0');
-    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
-         + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+    document.getElementById(prefix + '-date').value =
+      date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate());
+    document.getElementById(prefix + '-time').value =
+      pad(date.getHours()) + ':' + pad(date.getMinutes()) + ':' + pad(date.getSeconds());
   }
 
   sel.addEventListener('change', () => {
@@ -1000,18 +1023,22 @@
       // Pre-fill with sensible defaults so the user can't accidentally
       // ship one empty half of the range.  Only fills empty fields —
       // preserves whatever's already there.
-      const fromEl = document.getElementById('range-from');
-      const toEl   = document.getElementById('range-to');
       const now = new Date();
-      if (!fromEl.value) fromEl.value = _localIso(new Date(now - 24 * 3600 * 1000));
-      if (!toEl.value)   toEl.value   = _localIso(now);
+      if (!document.getElementById('range-from-date').value) {
+        _setRangePair('range-from', new Date(now - 24 * 3600 * 1000));
+      }
+      if (!document.getElementById('range-to-date').value) {
+        _setRangePair('range-to', now);
+      }
     } else {
       refresh();
     }
   });
   document.getElementById('refresh-btn').addEventListener('click', refresh);
-  document.getElementById('range-from').addEventListener('change', refresh);
-  document.getElementById('range-to')  .addEventListener('change', refresh);
+  ['range-from-date', 'range-from-time',
+   'range-to-date',   'range-to-time'].forEach(id => {
+    document.getElementById(id).addEventListener('change', refresh);
+  });
 
   // Search box — debounced so we don't refetch on every keystroke.
   // 'global' checkbox refreshes immediately (no debounce needed).
