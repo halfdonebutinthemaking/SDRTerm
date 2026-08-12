@@ -53,6 +53,16 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
     curses.curs_set(0)
     stdscr.nodelay(True)
     stdscr.keypad(True)
+    # Immediately paint 'initializing…' — curses.wrapper's setup clears
+    # the terminal (including the pre-curses print), and load_plugins()
+    # below can take a beat on the Pi as it imports every plugin module.
+    # A visible message here bridges the gap so the user isn't staring
+    # at an empty black screen.
+    try:
+        stdscr.addstr(0, 0, 'sdrterm: initializing plugins…')
+        stdscr.refresh()
+    except curses.error:
+        pass
     # Note: NOT enabling curses.mousemask.  Doing so puts the terminal
     # in mouse-reporting mode which captures ALL clicks (including
     # drag-select), breaking copy/paste in Terminal.app / iTerm2 unless
@@ -377,6 +387,13 @@ def main() -> None:
         if not _load_preset(args.preset, state):
             parser.error('cannot load preset: {}'.format(args.preset))
         state.preset_deferred_path = args.preset
+
+    # Give the user something to look at right away — device probing
+    # (USB enumeration, librtlsdr open) can take a second or two, and a
+    # frozen-looking terminal is the wrong first impression.  This print
+    # lands on stdout before curses takes over, so it's visible in the
+    # gap between here and the first curses refresh().
+    print('sdrterm: initializing…', flush=True)
 
     # suppress librtlsdr/libusb noise on stderr for the entire session
     devnull  = os.open(os.devnull, os.O_WRONLY)
