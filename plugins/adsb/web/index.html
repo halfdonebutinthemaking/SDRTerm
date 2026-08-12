@@ -682,9 +682,9 @@
   }
 
   function humanWindow(win) {
-    const f = (win.from || '—').substring(0, 19).replace('T', ' ');
-    const t = (win.to   || 'now').substring(0, 19).replace('T', ' ');
-    return `${f}Z → ${t}${win.to ? 'Z' : ''}`;
+    const f = win.from ? win.from.substring(0, 19).replace('T', ' ') + 'Z' : '—';
+    const t = win.to   ? win.to  .substring(0, 19).replace('T', ' ') + 'Z' : 'now';
+    return `${f} → ${t}`;
   }
 
   // Cache the latest aircraft payload so filter-pill clicks can re-render
@@ -782,9 +782,30 @@
 
   const sel = document.getElementById('window-select');
   const cust = document.getElementById('custom-range');
+
+  // Helper: fill a datetime-local input from a Date, in local time
+  // (that's what the input's value convention is).
+  function _localIso(d) {
+    const pad = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate())
+         + 'T' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  }
+
   sel.addEventListener('change', () => {
-    cust.style.display = sel.value === 'custom' ? 'block' : 'none';
-    if (sel.value !== 'custom') refresh();
+    const custom = sel.value === 'custom';
+    cust.style.display = custom ? 'block' : 'none';
+    if (custom) {
+      // Pre-fill with sensible defaults so the user can't accidentally
+      // ship one empty half of the range.  Only fills empty fields —
+      // preserves whatever's already there.
+      const fromEl = document.getElementById('range-from');
+      const toEl   = document.getElementById('range-to');
+      const now = new Date();
+      if (!fromEl.value) fromEl.value = _localIso(new Date(now - 24 * 3600 * 1000));
+      if (!toEl.value)   toEl.value   = _localIso(now);
+    } else {
+      refresh();
+    }
   });
   document.getElementById('refresh-btn').addEventListener('click', refresh);
   document.getElementById('range-from').addEventListener('change', refresh);
