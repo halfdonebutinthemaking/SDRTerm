@@ -146,13 +146,15 @@ class TestAdsbIntegration:
         adsb._log_dir = str(tmp_path)
         payload = adsb.web_json()
         assert set(payload.keys()) == {'aircraft', 'n_bursts', 'n_crc_ok',
-                                       'logging', 'window',
+                                       'logging', 'window', 'matched_window',
                                        'receiver', 'max_range_km', 'farthest',
                                        'web_tiles'}
         assert isinstance(payload['aircraft'], list)
         assert payload['n_bursts'] == 0
         assert payload['logging'] in (True, False)
         assert 'from' in payload['window']
+        # No search was issued → matched_window is None.
+        assert payload['matched_window'] is None
         assert payload['web_tiles']['url'] and payload['web_tiles']['name']
 
     def test_adsb_map_html_is_served(self, server, tmp_path):
