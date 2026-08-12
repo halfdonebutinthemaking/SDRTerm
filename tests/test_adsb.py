@@ -339,6 +339,99 @@ class TestReceiverLocation:
         assert 'distance_km' not in payload['aircraft'][0]
 
 
+class TestWebJsonSearch:
+    """`q` (grep) + `global` (bypass time filter) params on web_json."""
+
+    class _S:
+        bw_hz = 2_000_000
+
+    def _mk(self, tmp_path):
+        d = AdsbDecoder()
+        d._log_dir = str(tmp_path)
+        d.start(self._S())
+        return d
+
+    def _write_log(self, tmp_path, rows):
+        path = tmp_path / 'adsb.csv'
+        with open(path, 'w') as f:
+            f.write('timestamp,icao,callsign,lat,lon,alt,gs,ias,tas,heading,vr\n')
+            for r in rows:
+                f.write(','.join('' if v is None else str(v) for v in r) + '\n')
+        return path
+
+    def test_no_search_returns_matched_window_none(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'RYR12', 49.75, 6.70, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={'from': '2026-08-09T13:00:00.000Z',
+                                     'to':   '2026-08-09T15:00:00.000Z'})
+        assert payload['matched_window'] is None
+        assert len(payload['aircraft']) == 1
+
+    def test_q_filters_by_callsign_substring(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', 'AAAAAA', 'RYR12',   49.75, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:01:00.000Z', 'BBBBBB', 'BAW118',  49.80, 6.75, 30000, None, None, None, None, None),
+            ('2026-08-09T14:02:00.000Z', 'CCCCCC', 'RYR9CX',  49.85, 6.80, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={'from': '2026-08-09T13:00:00.000Z',
+                                     'to':   '2026-08-09T15:00:00.000Z',
+                                     'q':    'ryr'})       # case-insensitive
+        icaos = {ac['icao'] for ac in payload['aircraft']}
+        assert icaos == {'AAAAAA', 'CCCCCC'}
+        assert payload['matched_window']['from'] == '2026-08-09T14:00:00.000Z'
+        assert payload['matched_window']['to']   == '2026-08-09T14:02:00.000Z'
+
+    def test_q_filters_by_icao_substring(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', '4CA1F2', 'AAA', 49.75, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:01:00.000Z', '3C6789', 'BBB', 49.80, 6.75, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={'from': '2026-08-09T13:00:00.000Z',
+                                     'to':   '2026-08-09T15:00:00.000Z',
+                                     'q':    '4ca'})
+        assert {ac['icao'] for ac in payload['aircraft']} == {'4CA1F2'}
+
+    def test_global_bypasses_time_window(self, tmp_path):
+        # Two rows: one inside a narrow window, one WAY outside.
+        # Without global, only the inside row matches.  With global,
+        # both match and matched_window spans the full range.
+        self._write_log(tmp_path, [
+            ('2026-06-01T10:00:00.000Z', '4CA1F2', 'RYR1', 49.75, 6.70, 30000, None, None, None, None, None),
+            ('2026-08-09T14:00:00.000Z', '4CA2F3', 'RYR2', 49.80, 6.75, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+
+        # Windowed — only RYR2 hits.
+        p1 = d.web_json(query={'from': '2026-08-09T13:00:00.000Z',
+                                'to':   '2026-08-09T15:00:00.000Z',
+                                'q':    'ryr'})
+        assert {ac['icao'] for ac in p1['aircraft']} == {'4CA2F3'}
+
+        # Global — both hit; matched_window spans June → August.
+        p2 = d.web_json(query={'from': '2026-08-09T13:00:00.000Z',
+                                'to':   '2026-08-09T15:00:00.000Z',
+                                'q':    'ryr',
+                                'global': '1'})
+        assert {ac['icao'] for ac in p2['aircraft']} == {'4CA1F2', '4CA2F3'}
+        assert p2['matched_window']['from'] == '2026-06-01T10:00:00.000Z'
+        assert p2['matched_window']['to']   == '2026-08-09T14:00:00.000Z'
+
+    def test_q_with_no_matches_returns_null_matched_window(self, tmp_path):
+        self._write_log(tmp_path, [
+            ('2026-08-09T14:00:00.000Z', 'AAAAAA', 'BAW1', 49.75, 6.70, 30000, None, None, None, None, None),
+        ])
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={'from': '2026-08-09T13:00:00.000Z',
+                                     'to':   '2026-08-09T15:00:00.000Z',
+                                     'q':    'nonexistent'})
+        assert payload['aircraft'] == []
+        assert payload['matched_window'] is None
+
+
 class TestTileProviderConfig:
     """The globe's basemap tile URL is configurable via the preset —
     either by name (cartodb / osm / versatiles / cartodb-dark) or as a

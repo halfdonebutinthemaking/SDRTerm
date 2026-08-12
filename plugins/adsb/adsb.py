@@ -838,24 +838,51 @@ class AdsbDecoder(Decoder):
     def web_json(self, query: dict = None) -> dict:
         """Aircraft observed within the requested time window.
 
-        Query params (both optional, ISO 8601 UTC):
-            from  — window start (default: now - 30 min)
-            to    — window end   (default: none = up to newest row)
+        Query params (all optional):
+            from    — ISO 8601 UTC window start (default: now - 30 min)
+            to      — ISO 8601 UTC window end   (default: none = up to newest row)
+            q       — case-insensitive substring match against icao + callsign
+            global  — if truthy, ignore from/to and search the whole log
+                      (only meaningful together with q)
 
         Reads the CSV log on demand — no in-memory retention beyond the
         current session's live decoder state.  For each ICAO seen in the
         window, returns the latest known telemetry plus the full
         chronological track of positions in that same window.
+
+        When ``q`` is present, the response also carries a
+        ``matched_window`` field with the first/last row timestamps of
+        the matched aircraft, so the browser can show the actual span
+        of the hits (particularly useful with ``global=1``).
         """
         query = query or {}
-        from_ts = query.get('from')
-        to_ts   = query.get('to')
-        if not from_ts and not to_ts:
+        from_ts   = query.get('from')
+        to_ts     = query.get('to')
+        q         = (query.get('q') or '').strip().upper()
+        is_global = str(query.get('global') or '').lower() in ('1', 'true', 'yes', 'on')
+
+        if is_global:
+            from_ts = None
+            to_ts   = None
+        elif not from_ts and not to_ts:
             now = datetime.now(timezone.utc)
             from_ts = (now - timedelta(minutes=_DEFAULT_WINDOW_MIN)) \
                         .strftime('%Y-%m-%dT%H:%M:%S.000Z')
 
         acs = self._read_log_window(from_ts, to_ts)
+
+        matched_window = None
+        if q:
+            acs = {icao: ac for icao, ac in acs.items()
+                   if q in icao.upper()
+                      or q in (ac.get('callsign') or '').upper()}
+            if acs:
+                firsts = [a.get('_first_ts') for a in acs.values()
+                          if a.get('_first_ts')]
+                lasts  = [a.get('_last_ts')  for a in acs.values()
+                          if a.get('_last_ts')]
+                if firsts and lasts:
+                    matched_window = {'from': min(firsts), 'to': max(lasts)}
 
         # Optional receiver-location context.  When the user configured a
         # (lat, lon) via the preset, tag every located aircraft with its
@@ -917,16 +944,17 @@ class AdsbDecoder(Decoder):
             aircraft.append(entry)
 
         return {
-            'aircraft':     aircraft,
-            'n_bursts':     self._n_bursts,
-            'n_crc_ok':     self._n_crc_ok,
-            'logging':      self._logging_enabled,
-            'window':       {'from': from_ts, 'to': to_ts},
-            'receiver':     ({'lat': self._location_lat, 'lon': self._location_lon}
-                             if has_loc else None),
-            'max_range_km': round(max_range_km, 1) if has_loc else None,
-            'farthest':     farthest,
-            'web_tiles':    self._resolve_web_tiles(),
+            'aircraft':       aircraft,
+            'n_bursts':       self._n_bursts,
+            'n_crc_ok':       self._n_crc_ok,
+            'logging':        self._logging_enabled,
+            'window':         {'from': from_ts, 'to': to_ts},
+            'matched_window': matched_window,
+            'receiver':       ({'lat': self._location_lat, 'lon': self._location_lon}
+                               if has_loc else None),
+            'max_range_km':   round(max_range_km, 1) if has_loc else None,
+            'farthest':       farthest,
+            'web_tiles':      self._resolve_web_tiles(),
         }
 
     def _read_log_window(self, from_iso: str = None, to_iso: str = None) -> dict:
@@ -969,6 +997,9 @@ class AdsbDecoder(Decoder):
         if not icao:
             return
         ac = aircraft.setdefault(icao, {'icao': icao, 'track': []})
+        if '_first_ts' not in ac:
+            ac['_first_ts'] = ts
+        ac['_last_ts'] = ts
 
         def _f(k):                                     # float or None
             v = row.get(k)
