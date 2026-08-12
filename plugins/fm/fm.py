@@ -36,6 +36,17 @@ class FMDecoder(Decoder):
         self._zi_if_i = None
         self._zi_if_q = None
 
+        # DC-blocker — first-order IIR high-pass at ~30 Hz corner.  Kept
+        # per-instance so state carries across chunks (unlike a naive
+        # per-chunk mean-subtract, which introduces a step at every
+        # chunk boundary as the DC estimate drifts, showing up as
+        # audible crackle at ~chunk-rate Hz).  Rebuilt when sample rate
+        # changes so the corner stays constant regardless of bw_hz.
+        self._dc_b    = None
+        self._dc_a    = None
+        self._zi_dc_i = None
+        self._zi_dc_q = None
+
         # Rational resample ratio reduced by gcd(sample_rate, AUDIO_RATE)
         self._resamp_up = 1
         self._resamp_dn = 1
@@ -83,17 +94,38 @@ class FMDecoder(Decoder):
         lf = self._lfilter
         sr = int(state.bw_hz)
 
-        # DC-blocker — subtract the chunk mean before the IF filter.  On
-        # direct-conversion radios (HackRF), LO leakage puts a huge spike
-        # right at the tuned centre frequency, which for a station tuned
-        # at its actual carrier lands smack in the middle of the FM
-        # signal and dominates the arctangent phase demod (hum, hiss,
-        # crackly distortion).  Superhet radios (RTL-SDR) don't have
-        # that spike, but their ADC/amp path still carries a mV-scale
-        # residual DC offset that this quietly cleans up too — either
-        # way FM audio is phase-encoded and completely blind to a
-        # constant DC term, so this is safe unconditionally.
-        samples = samples - samples.mean()
+        # DC-blocker — first-order IIR high-pass at ~30 Hz corner,
+        # applied to I and Q separately with state preserved across
+        # chunks.  On direct-conversion radios (HackRF) LO leakage
+        # puts a big spike at DC that dominates the arctangent phase
+        # demod; superhet radios (RTL-SDR) don't have the spike but
+        # a low-Hz HP is a harmless no-op for them either way (FM is
+        # phase-encoded, blind to DC).
+        #
+        # Why not just samples - samples.mean(): the per-chunk mean
+        # drifts a little between chunks as the HackRF's actual DC
+        # offset shifts with gain-settling / thermal effects, so
+        # mean-subtract leaves a small step at every chunk boundary —
+        # audible as ~8 Hz crackle at 2 MSPS with 262 k chunks.  A
+        # stateful HP is continuous across chunks with no boundary
+        # artefact.
+        if self._dc_b is None or self._sr != sr:
+            _fc = 30.0                                          # Hz
+            _R  = float(np.exp(-2 * np.pi * _fc / sr))          # → ~0.9999 at 2 MSPS
+            self._dc_b = np.array([1.0, -1.0], dtype=np.float64)
+            self._dc_a = np.array([1.0, -_R],  dtype=np.float64)
+            self._zi_dc_i = None
+            self._zi_dc_q = None
+        i_raw = samples.real.astype(np.float64)
+        q_raw = samples.imag.astype(np.float64)
+        if self._zi_dc_i is None:
+            # Seed at the first sample's value so the very first chunk
+            # doesn't start with a huge transient from 0.
+            self._zi_dc_i = self._lfilter_zi(self._dc_b, self._dc_a) * i_raw[0]
+            self._zi_dc_q = self._lfilter_zi(self._dc_b, self._dc_a) * q_raw[0]
+        i_dc, self._zi_dc_i = lf(self._dc_b, self._dc_a, i_raw, zi=self._zi_dc_i)
+        q_dc, self._zi_dc_q = lf(self._dc_b, self._dc_a, q_raw, zi=self._zi_dc_q)
+        samples = i_dc + 1j * q_dc
 
         # Rebuild IF filter and resample ratio when fm_bw_hz or sample rate changes
         if state.fm_bw_hz != self._if_bw or sr != self._sr:
@@ -157,6 +189,10 @@ class FMDecoder(Decoder):
         self._sr      = None
         self._zi_if_i = None
         self._zi_if_q = None
+        self._zi_dc_i = None
+        self._zi_dc_q = None
+        self._dc_b    = None
+        self._dc_a    = None
         self._zi_lpf  = np.zeros(len(self._lpf_b) - 1, dtype=np.float32)
         self._zi_de   = np.zeros(1,                    dtype=np.float32)
         with self._buf_lock:

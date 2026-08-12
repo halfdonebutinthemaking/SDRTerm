@@ -82,3 +82,37 @@ class TestDcBlocker:
             f"Clean FM signal came out too quiet (rms={r['rms']:.4f}) — "
             f"DC blocker may be over-correcting"
         )
+
+    def test_dc_drift_between_chunks_does_not_click(self):
+        # Regression test for the crackle bug: a naïve per-chunk
+        # samples - samples.mean() approach leaves a step at every
+        # chunk boundary when the actual DC drifts between chunks
+        # (e.g., HackRF gain-settling / thermal effects).  The stateful
+        # IIR HP filter should be continuous across chunks with no
+        # boundary spike, even when the DC offset shifts abruptly.
+        dec = _fresh_decoder()
+        st  = _mk_state(self.SR)
+        # Two chunks of the same FM signal but with very different DC
+        # biases — modelling a step in the receiver's DC leakage.
+        base = _make_fm_signal(self.SR, self.N, audio_hz=1_000, deviation_hz=50_000)
+        chunk_a = base + (0.10 + 0.05j)
+        chunk_b = base + (0.30 + 0.25j)   # 3× the DC offset
+        # Warm up the DC filter and audio pipeline on chunk A, then
+        # measure chunk B — the transient at the very start of B's
+        # audio is what would 'click' if the DC handler were per-chunk.
+        _ = dec.process(chunk_a, st)
+        r_b = dec.process(chunk_b, st)
+        # Look at the first ~10 ms of B's audio (long enough to include
+        # any boundary transient, short enough not to average it away).
+        head    = r_b['audio'][: int(0.010 * 48_000)]
+        tail    = r_b['audio'][int(0.020 * 48_000):]
+        head_pk = float(np.max(np.abs(head))) if len(head) else 0.0
+        tail_pk = float(np.max(np.abs(tail))) if len(tail) else 0.0
+        # Head shouldn't massively exceed the steady-state peak — a
+        # click from a chunk-boundary DC step would show up as a much
+        # louder spike here than in the settled audio.
+        assert head_pk < 1.5 * tail_pk + 0.05, (
+            f"Chunk-boundary DC step produced a click "
+            f"(head peak={head_pk:.3f}, tail peak={tail_pk:.3f}) — "
+            f"DC blocker probably back to per-chunk mean-subtract"
+        )
