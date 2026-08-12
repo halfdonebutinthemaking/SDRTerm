@@ -290,8 +290,9 @@
   }
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
-  const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
-  const cacheMem = { aircraft: {}, route: {} };
+  const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000,
+                route_hexdb: 6*60*60*1000, negative: 60*60*1000 };
+  const cacheMem = { aircraft: {}, route: {}, route_hexdb: {} };
   function cacheGet(kind, key) {
     if (cacheMem[kind][key] !== undefined) return cacheMem[kind][key];
     try {
@@ -340,6 +341,58 @@
     } catch { return null; }
   }
 
+  // Second-opinion route lookup — hexdb.io returns { flight, route,
+  // updatetime } where `route` is a '-'-separated ICAO airport list
+  // like "EGLL-KJFK" or "LEBL-LFPO-EGLL" for multi-leg.  We
+  // canonicalise to {origin, destination} using first + last hop.
+  async function fetchRouteHexdb(callsign) {
+    const key = callsign.trim().toUpperCase();
+    if (!key) return null;
+    const cached = cacheGet('route_hexdb', key);
+    if (cached !== undefined) return cached;
+    try {
+      const r = await fetch(`https://hexdb.io/api/v1/route/icao/${key}`);
+      if (r.status === 404 || !r.ok) {
+        cacheSet('route_hexdb', key, null); return null;
+      }
+      const j = await r.json();
+      let parsed = null;
+      const routeStr = j?.route;
+      if (typeof routeStr === 'string') {
+        const hops = routeStr.split('-').map(s => s.trim()).filter(Boolean);
+        if (hops.length >= 2) {
+          parsed = { origin: hops[0], destination: hops[hops.length - 1],
+                     raw: routeStr };
+        }
+      }
+      cacheSet('route_hexdb', key, parsed);
+      return parsed;
+    } catch { cacheSet('route_hexdb', key, null); return null; }
+  }
+
+  // ── geodesic helpers for route sanity checks ─────────────────────────
+  function _bearingDeg(lat1, lon1, lat2, lon2) {
+    const p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+    const dl = (lon2 - lon1) * Math.PI / 180;
+    const y = Math.sin(dl) * Math.cos(p2);
+    const x = Math.cos(p1) * Math.sin(p2)
+            - Math.sin(p1) * Math.cos(p2) * Math.cos(dl);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+  }
+  function _angDiffDeg(a, b) {
+    const d = Math.abs(a - b) % 360;
+    return d > 180 ? 360 - d : d;
+  }
+  function _haversineKm(lat1, lon1, lat2, lon2) {
+    const R = 6371;
+    const p1 = lat1 * Math.PI / 180, p2 = lat2 * Math.PI / 180;
+    const dp = (lat2 - lat1) * Math.PI / 180;
+    const dl = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dp / 2) ** 2
+            + Math.cos(p1) * Math.cos(p2) * Math.sin(dl / 2) ** 2;
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
   // ── HTML for the InfoBox that Cesium opens on entity click ───────────
   function popupHtml(ac) {
     const acInfo = cacheGet('aircraft', ac.icao);
@@ -373,6 +426,46 @@
         );
       }
       if (route.airline?.name) parts.push(`<div style="color:#aaa;font-size:11px">${route.airline.name}</div>`);
+
+      // ── sanity check 1: heading vs bearing to destination ──────────
+      // Skip when we can't compute (missing heading/position) or when
+      // the plane is on approach (< 30 km from dest) — near the field
+      // it's being vectored, so heading naturally diverges.  Threshold
+      // of 45° is generous enough to absorb wind correction and en-
+      // route direct-to shortcuts.
+      if (ac.heading != null && ac.lat != null && ac.lon != null
+          && d?.latitude != null && d?.longitude != null) {
+        const dKm = _haversineKm(ac.lat, ac.lon, d.latitude, d.longitude);
+        if (dKm > 30) {
+          const expected = _bearingDeg(ac.lat, ac.lon, d.latitude, d.longitude);
+          const diff = _angDiffDeg(ac.heading, expected);
+          if (diff > 45) {
+            parts.push(
+              `<div style="color:#fc0;font-size:11px;margin-top:0.3em">
+                 ⚠ Heading ${Math.round(ac.heading)}° is ${Math.round(diff)}° off
+                 the expected bearing to ${d.iata_code || d.icao_code}
+                 (${Math.round(expected)}°) — possibly diverted, holding, or stale route
+               </div>`
+            );
+          }
+        }
+      }
+
+      // ── sanity check 2: cross-reference with hexdb.io ──────────────
+      // Compare the airport ICAO codes; disagreement is a signal that
+      // one of the two DBs is stale.  We show hexdb's opinion so the
+      // user can judge which looks right for the plane's current path.
+      const csKey = ac.callsign ? ac.callsign.trim().toUpperCase() : null;
+      const hex = csKey ? cacheGet('route_hexdb', csKey) : undefined;
+      if (hex && o?.icao_code && d?.icao_code) {
+        if (hex.origin !== o.icao_code || hex.destination !== d.icao_code) {
+          parts.push(
+            `<div style="color:#fc0;font-size:11px">
+               ⚠ hexdb.io disagrees: ${hex.origin} → ${hex.destination}
+             </div>`
+          );
+        }
+      }
     } else if (route === null && ac.callsign) {
       parts.push('<div style="color:#888;font-size:11px">no route for this callsign (adsbdb 404)</div>');
     } else if (ac.callsign) {
@@ -614,14 +707,20 @@
     const rec = acData[icao];
     if (!rec) return;
     const ac = rec.latestAc;
-    const [_ac, route] = await Promise.all([
+    const csKey = ac.callsign ? ac.callsign.trim().toUpperCase() : null;
+    const [_ac, route, _hex] = await Promise.all([
       cacheGet('aircraft', icao) !== undefined
         ? Promise.resolve(cacheGet('aircraft', icao))
         : fetchAircraft(icao),
-      ac.callsign
-        ? (cacheGet('route', ac.callsign.trim().toUpperCase()) !== undefined
-            ? Promise.resolve(cacheGet('route', ac.callsign.trim().toUpperCase()))
+      csKey
+        ? (cacheGet('route', csKey) !== undefined
+            ? Promise.resolve(cacheGet('route', csKey))
             : fetchRoute(ac.callsign))
+        : Promise.resolve(null),
+      csKey
+        ? (cacheGet('route_hexdb', csKey) !== undefined
+            ? Promise.resolve(cacheGet('route_hexdb', csKey))
+            : fetchRouteHexdb(ac.callsign))
         : Promise.resolve(null),
     ]);
     // Rebuild the InfoBox HTML if this entity is still the selected one.
