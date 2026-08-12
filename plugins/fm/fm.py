@@ -83,6 +83,18 @@ class FMDecoder(Decoder):
         lf = self._lfilter
         sr = int(state.bw_hz)
 
+        # DC-blocker — subtract the chunk mean before the IF filter.  On
+        # direct-conversion radios (HackRF), LO leakage puts a huge spike
+        # right at the tuned centre frequency, which for a station tuned
+        # at its actual carrier lands smack in the middle of the FM
+        # signal and dominates the arctangent phase demod (hum, hiss,
+        # crackly distortion).  Superhet radios (RTL-SDR) don't have
+        # that spike, but their ADC/amp path still carries a mV-scale
+        # residual DC offset that this quietly cleans up too — either
+        # way FM audio is phase-encoded and completely blind to a
+        # constant DC term, so this is safe unconditionally.
+        samples = samples - samples.mean()
+
         # Rebuild IF filter and resample ratio when fm_bw_hz or sample rate changes
         if state.fm_bw_hz != self._if_bw or sr != self._sr:
             from scipy.signal import cheby1
