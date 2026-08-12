@@ -127,7 +127,7 @@
     <label title="If checked, search the whole log (from/to are set to the matched span).">
       <input type="checkbox" id="search-global"> global
     </label>
-    <span id="search-spinner" hidden title="Searching…"></span>
+    <span id="search-spinner" hidden title="Loading…"></span>
   </div>
 </div>
 
@@ -750,18 +750,28 @@
     document.getElementById('ac-count').textContent = c[currentFilter].geo;
   }
 
-  // In-flight counter for search fetches — a global scan can take a
-  // moment on a large log, and if the user keeps typing we don't want
-  // the spinner to blink off between overlapping requests.
-  let _searchInFlight = 0;
+  // In-flight counter for data-loading activity — a global scan can
+  // take a moment on a large log, and if two fetches overlap (e.g.
+  // the user keeps typing) we don't want the spinner to blink off
+  // between them.  Also used by pill re-renders and range changes.
+  let _activityInFlight = 0;
+  function _beginActivity() {
+    _activityInFlight++;
+    document.getElementById('search-spinner').hidden = false;
+  }
+  function _endActivity() {
+    _activityInFlight = Math.max(0, _activityInFlight - 1);
+    if (_activityInFlight === 0) {
+      document.getElementById('search-spinner').hidden = true;
+    }
+  }
 
   async function refresh() {
     const btn = document.getElementById('refresh-btn');
     btn.disabled = true;
     const qStr     = (document.getElementById('search-q').value || '').trim();
     const isGlobal = document.getElementById('search-global').checked;
-    const spinner  = document.getElementById('search-spinner');
-    if (qStr) { _searchInFlight++; spinner.hidden = false; }
+    _beginActivity();
     try {
       const preset = document.getElementById('window-select').value;
       const w = computeWindow(preset);
@@ -826,10 +836,7 @@
       document.getElementById('log-state').textContent = 'error: ' + e.message;
     } finally {
       btn.disabled = false;
-      if (qStr) {
-        _searchInFlight = Math.max(0, _searchInFlight - 1);
-        if (_searchInFlight === 0) spinner.hidden = true;
-      }
+      _endActivity();
     }
   }
 
@@ -886,6 +893,9 @@
   });
 
   // Filter pills — clicking one narrows the on-map set without a refetch.
+  // Re-render is essentially instant; the ~120 ms spinner flash exists
+  // purely to confirm the click was registered on large aircraft lists
+  // where the wipe-and-redraw isn't quite free.
   let currentFilter = 'all';
   document.querySelectorAll('#filter-row .pill').forEach(pill => {
     pill.addEventListener('click', () => {
@@ -893,7 +903,9 @@
               .forEach(p => p.classList.remove('active'));
       pill.classList.add('active');
       currentFilter = pill.dataset.filter;
+      _beginActivity();
       rerenderFromCache();
+      setTimeout(_endActivity, 120);
     });
   });
 
