@@ -691,24 +691,41 @@
   // without a network round-trip.
   let lastAircraft = [];
 
+  const _hasGeo = ac => ac.lat != null && ac.lon != null;
+
+  // Returns {all: {tot, geo}, civ: {tot, geo}, mil: {tot, geo}, unk: {tot, geo}}
+  function classCounts(list) {
+    const c = {all: {tot: 0, geo: 0}, civ: {tot: 0, geo: 0},
+               mil: {tot: 0, geo: 0}, unk: {tot: 0, geo: 0}};
+    for (const ac of list) {
+      const cls = classifyAircraft(ac);
+      const g = _hasGeo(ac);
+      c.all.tot += 1; if (g) c.all.geo += 1;
+      c[cls].tot += 1; if (g) c[cls].geo += 1;
+    }
+    return c;
+  }
+
   function updatePillCounts(list) {
-    const counts = {all: list.length, civ: 0, mil: 0, unk: 0};
-    for (const ac of list) counts[classifyAircraft(ac)] += 1;
-    document.getElementById('cnt-all').textContent = counts.all;
-    document.getElementById('cnt-civ').textContent = counts.civ;
-    document.getElementById('cnt-mil').textContent = counts.mil;
-    document.getElementById('cnt-unk').textContent = counts.unk;
+    const c = classCounts(list);
+    for (const k of ['all', 'civ', 'mil', 'unk']) {
+      const el = document.getElementById('cnt-' + k);
+      // "N" when everyone in the class has a position on the map,
+      // "N/M" when some don't — highlights the gap that used to be
+      // confusing (pill said 3 but only 1 plane visible).
+      el.textContent = (c[k].geo === c[k].tot)
+        ? String(c[k].tot)
+        : c[k].geo + '/' + c[k].tot;
+    }
   }
 
   function rerenderFromCache() {
     clearAll();
     renderAircraft(lastAircraft);
     restoreSelection();
-    // ac-count reflects what's currently RENDERED, not the raw fetch total.
-    const shown = currentFilter === 'all'
-      ? lastAircraft.length
-      : lastAircraft.filter(ac => classifyAircraft(ac) === currentFilter).length;
-    document.getElementById('ac-count').textContent = shown;
+    // ac-count reflects what's currently RENDERED (has geo AND matches filter).
+    const c = classCounts(lastAircraft);
+    document.getElementById('ac-count').textContent = c[currentFilter].geo;
   }
 
   async function refresh() {
@@ -731,10 +748,8 @@
       fitToAircraft();
       restoreSelection();
       updatePillCounts(lastAircraft);
-      const shown = currentFilter === 'all'
-        ? lastAircraft.length
-        : lastAircraft.filter(ac => classifyAircraft(ac) === currentFilter).length;
-      document.getElementById('ac-count').textContent = shown;
+      document.getElementById('ac-count').textContent =
+        classCounts(lastAircraft)[currentFilter].geo;
       document.getElementById('log-state').textContent = d.logging ? 'ON' : 'off';
       document.getElementById('window-label').textContent = humanWindow(d.window || w);
       document.getElementById('tiles-label').textContent =
