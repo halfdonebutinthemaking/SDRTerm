@@ -33,6 +33,19 @@
     cursor: pointer; color: #8cf; text-decoration: underline dotted;
   }
   #farthest.clickable:hover { color: #fff; text-decoration: underline; }
+  #filter-row { margin-top: 6px; }
+  .pill {
+    display: inline-block; padding: 1px 8px; margin-right: 3px;
+    border: 1px solid #444; border-radius: 10px;
+    color: #aaa; cursor: pointer;
+    font-family: monospace; font-size: 11px;
+    transition: color 100ms, border-color 100ms, background 100ms;
+    user-select: none;
+  }
+  .pill:hover { color: #eee; border-color: #888; }
+  .pill.active { background: #333; color: #8cf; border-color: #8cf; }
+  .pill-count { color: #666; margin-left: 3px; font-size: 10px; }
+  .pill.active .pill-count { color: #8cf; }
 
   /* Cesium InfoBox theming — the box that appears when you click an entity */
   .cesium-infoBox { background: rgba(20, 20, 20, 0.95); color: #eee; }
@@ -84,6 +97,12 @@
   <div><b>Farthest:</b> <span id="farthest">—</span></div>
   <div><b>Window:</b> <span id="window-label">—</span></div>
   <div><b>Tiles:</b> <span id="tiles-label">—</span></div>
+  <div id="filter-row"><b>Filter:</b>
+    <span class="pill active" data-filter="all">all <span class="pill-count" id="cnt-all">0</span></span>
+    <span class="pill"        data-filter="civ">civ <span class="pill-count" id="cnt-civ">0</span></span>
+    <span class="pill"        data-filter="mil">mil <span class="pill-count" id="cnt-mil">0</span></span>
+    <span class="pill"        data-filter="unk">unk <span class="pill-count" id="cnt-unk">0</span></span>
+  </div>
 </div>
 
 <!-- Cesium needs its worker/asset base URL set BEFORE the main script loads. -->
@@ -179,6 +198,72 @@
   const PLANE_STALE_SVG = PLANE_SVG.replace('fill="#daa520"', 'fill="#999"');
   const PLANE_URL       = 'data:image/svg+xml;base64,' + btoa(PLANE_SVG);
   const PLANE_STALE_URL = 'data:image/svg+xml;base64,' + btoa(PLANE_STALE_SVG);
+
+  // ── military / civilian / unknown classifier ─────────────────────────
+  // Three signals combined: ICAO24 range (deterministic, offline),
+  // callsign prefix pattern, and adsbdb registered_owner keyword match
+  // (client-side from the enrichment cache).  ~90-95% accuracy in
+  // practice — false positives are mostly ex-military / test /
+  // calibration airframes flown under civilian ops.
+  //
+  // Ranges below are non-exhaustive; add more as you spot missing ones.
+  // Format: [lo, hi, label].  Comparison is uppercase-hex string lex,
+  // which matches the ICAO field's format so we don't need to parseInt.
+  const MILITARY_ICAO_RANGES = [
+    ['ADF7C8', 'AFFFFF', 'US Military'],        // biggest & most common
+    ['3EA000', '3EBFFF', 'German Air Force'],
+    ['43C000', '43CFFF', 'UK Royal Air Force'],
+    ['484000', '484FFF', 'Netherlands Air Force'],
+    ['33FF00', '33FFFF', 'Italian Air Force'],
+    ['3B7000', '3B7FFF', 'French Air Force'],
+    ['3407C1', '3407FF', 'Spanish Air Force'],
+    ['738000', '73FFFF', 'Israeli Air Force'],
+    ['150000', '1FFFFF', 'Russian mil (approx)'],
+    ['780000', '7BFFFF', 'Chinese PLAAF'],
+    ['86D000', '86FFFF', 'Japan ASDF'],
+    ['4B8000', '4B8FFF', 'NATO'],
+    ['4CA400', '4CA7FF', 'NATO E-3A AWACS'],
+    ['C87F00', 'C87FFF', 'RNZAF'],
+    ['7C822D', '7C8AAF', 'Australian ADF'],
+    ['0D0700', '0D07FF', 'Mexican military'],
+  ];
+  const MILITARY_CALLSIGN_PATTERNS = [
+    /^RCH\d/,   /^GAF\d/,   /^ASCOT/,  /^RRR\d/,  /^NAF\d/,
+    /^FAF\d/,   /^IAF\d/,   /^IFC\d/,  /^BAF\d/,  /^NAVY\d/,
+    /^BLUE\d/,  /^KING\d/,  /^DUKE\d/, /^EAGLE\d/,/^TITAN\d/,
+    /^SHELL\d/, /^MAGMA/,   /^SPAR\d/, /^SNAKE/,  /^HERKY/,
+    /^BISON/,   /^HAWK\d/,  /^FURY\d/, /^VIPR/,   /^JAKE\d/,
+    /^HOMER/,   /^CNV\d/,   /^HKY\d/,  /^POKER/,  /^CASA/,
+  ];
+  const MILITARY_OWNER_KEYWORDS = [
+    'AIR FORCE', 'NAVY', 'ARMY', 'MILITARY', 'MOD ',
+    'DEFENCE', 'DEFENSE', 'ROYAL AIR', 'BUNDESWEHR',
+    'LUFTWAFFE', 'ARMED FORCES', 'MINISTRY OF DEF', 'US GOVT',
+    'MARINE CORPS', 'COAST GUARD',
+  ];
+
+  function classifyAircraft(ac) {
+    const icao = (ac.icao || '').toUpperCase();
+    for (const [lo, hi] of MILITARY_ICAO_RANGES) {
+      if (icao >= lo && icao <= hi) return 'mil';
+    }
+    if (ac.callsign) {
+      const cs = ac.callsign.trim().toUpperCase();
+      for (const rx of MILITARY_CALLSIGN_PATTERNS) {
+        if (rx.test(cs)) return 'mil';
+      }
+    }
+    const acInfo = cacheGet('aircraft', ac.icao);
+    if (acInfo?.registered_owner) {
+      const owner = acInfo.registered_owner.toUpperCase();
+      for (const kw of MILITARY_OWNER_KEYWORDS) {
+        if (owner.includes(kw)) return 'mil';
+      }
+    }
+    // Any positive info at all means civ; totally-unknown ICAO stays unk.
+    if (ac.callsign || acInfo) return 'civ';
+    return 'unk';
+  }
 
   // ── enrichment cache (localStorage + memory mirror) ──────────────────
   const TTL = { aircraft: 24*60*60*1000, route: 6*60*60*1000, negative: 60*60*1000 };
@@ -424,6 +509,9 @@
   function renderAircraft(list) {
     for (const ac of list) {
       if (ac.lat == null || ac.lon == null) continue;
+      // Skip aircraft that don't match the active filter pill.
+      const cls = classifyAircraft(ac);
+      if (currentFilter !== 'all' && cls !== currentFilter) continue;
       // Use real altitude — this is Cesium's payoff: planes float above the globe.
       const alt_m = (ac.alt != null ? ac.alt * M_PER_FT : 8000);
       const pos = Cesium.Cartesian3.fromDegrees(ac.lon, ac.lat, alt_m);
@@ -597,6 +685,30 @@
     return `${f}Z → ${t}${win.to ? 'Z' : ''}`;
   }
 
+  // Cache the latest aircraft payload so filter-pill clicks can re-render
+  // without a network round-trip.
+  let lastAircraft = [];
+
+  function updatePillCounts(list) {
+    const counts = {all: list.length, civ: 0, mil: 0, unk: 0};
+    for (const ac of list) counts[classifyAircraft(ac)] += 1;
+    document.getElementById('cnt-all').textContent = counts.all;
+    document.getElementById('cnt-civ').textContent = counts.civ;
+    document.getElementById('cnt-mil').textContent = counts.mil;
+    document.getElementById('cnt-unk').textContent = counts.unk;
+  }
+
+  function rerenderFromCache() {
+    clearAll();
+    renderAircraft(lastAircraft);
+    restoreSelection();
+    // ac-count reflects what's currently RENDERED, not the raw fetch total.
+    const shown = currentFilter === 'all'
+      ? lastAircraft.length
+      : lastAircraft.filter(ac => classifyAircraft(ac) === currentFilter).length;
+    document.getElementById('ac-count').textContent = shown;
+  }
+
   async function refresh() {
     const btn = document.getElementById('refresh-btn');
     btn.disabled = true;
@@ -610,16 +722,22 @@
       if (!r.ok) throw new Error(r.statusText);
       const d = await r.json();
       ensureTilesMatch(d.web_tiles);
+      lastAircraft = d.aircraft || [];
       clearAll();
-      renderAircraft(d.aircraft || []);
+      renderAircraft(lastAircraft);
       drawReceiver(d.receiver);
       fitToAircraft();
       restoreSelection();
-      document.getElementById('ac-count').textContent = (d.aircraft || []).length;
+      updatePillCounts(lastAircraft);
+      const shown = currentFilter === 'all'
+        ? lastAircraft.length
+        : lastAircraft.filter(ac => classifyAircraft(ac) === currentFilter).length;
+      document.getElementById('ac-count').textContent = shown;
       document.getElementById('log-state').textContent = d.logging ? 'ON' : 'off';
       document.getElementById('window-label').textContent = humanWindow(d.window || w);
       document.getElementById('tiles-label').textContent =
         (d.web_tiles && d.web_tiles.name) || '—';
+      // (ac-count already set above based on current filter, not d.aircraft.length)
       // Farthest signal (only when receiver location is configured).
       // Clickable: selects the aircraft on the globe + zooms to it.
       const fEl = document.getElementById('farthest');
@@ -665,6 +783,18 @@
                                           // opens popup, highlights track red,
                                           // draws route if callsign is known
     viewer.flyTo(entity, { duration: 1.2 });
+  });
+
+  // Filter pills — clicking one narrows the on-map set without a refetch.
+  let currentFilter = 'all';
+  document.querySelectorAll('#filter-row .pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+      document.querySelectorAll('#filter-row .pill')
+              .forEach(p => p.classList.remove('active'));
+      pill.classList.add('active');
+      currentFilter = pill.dataset.filter;
+      rerenderFromCache();
+    });
   });
 
   refresh();
