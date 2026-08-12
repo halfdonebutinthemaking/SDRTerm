@@ -27,14 +27,17 @@
   #hud button:hover { background: #333; }
   #hud button:disabled { opacity: 0.5; cursor: wait; }
   #custom-range { display: none; margin-top: 4px; }
-  /* Split into separate date + time inputs so we can force 24-hour
-     format via lang="en-GB" on the time input specifically — the
-     combined datetime-local widget ignores that hint on some browsers
-     and falls back to the OS locale (12h AM/PM), which then rejects
-     '00' as an hour.  Each input independently sized. */
+  /* Date input stays native (YYYY-MM-DD is language-agnostic).  Time
+     is a plain text input rather than <input type="time"> because
+     Chromium's native time widget always renders in the OS locale's
+     format regardless of lang="en-GB", so US-locale machines get
+     12h AM/PM and can't type '00' as an hour.  A plain text input
+     with a HH:MM:SS pattern side-steps that entirely: always 24h,
+     always accepts 00, no browser drama. */
   #custom-range input           { font-family: monospace; margin-right: 4px; }
   #custom-range input[type=date] { width: 9.5em; }
-  #custom-range input[type=time] { width: 8em; }
+  #custom-range input.time24     { width: 6.5em; text-align: center; }
+  #custom-range input.time24:invalid { border-color: #c44; }
   #window-label { color: #aaa; }
   #farthest.clickable {
     cursor: pointer; color: #8cf; text-decoration: underline dotted;
@@ -113,20 +116,25 @@
     <button id="refresh-btn" title="Re-scan the log with the current window">↻</button>
   </div>
   <div id="custom-range">
-    <!-- Split date + time.  A single <input type=datetime-local> is
-         tidier UX but its 24h/12h rendering is only partly influenced
-         by lang= on some browsers; if the OS locale is US the widget
-         may still render 12h AM/PM, which then treats '00' as an
-         invalid hour ('01' is the min).  A separate <input type=time>
-         with lang="en-GB" reliably renders 24h across Chromium and
-         Firefox, so midnight (00:00:00) is selectable. -->
+    <!-- Date input is native (YYYY-MM-DD, unambiguous everywhere).
+         Time is a plain text input, not <input type="time"> — Chromium
+         renders type="time" in the OS locale's format regardless of
+         lang="en-GB", so US-locale users got 12h AM/PM with 01 as
+         the min hour.  Text + pattern = always 24h, always accepts
+         midnight, no browser locale drama. -->
     <div>from
-      <input type="date"                        id="range-from-date">
-      <input type="time" step="1" lang="en-GB"  id="range-from-time">
+      <input type="date" id="range-from-date">
+      <input type="text" class="time24" id="range-from-time"
+             placeholder="HH:MM:SS" maxlength="8"
+             pattern="([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+             inputmode="numeric" title="24-hour time, e.g. 14:30:00">
     </div>
     <div>to&nbsp;&nbsp;
-      <input type="date"                        id="range-to-date">
-      <input type="time" step="1" lang="en-GB"  id="range-to-time">
+      <input type="date" id="range-to-date">
+      <input type="text" class="time24" id="range-to-time"
+             placeholder="HH:MM:SS" maxlength="8"
+             pattern="([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]"
+             inputmode="numeric" title="24-hour time, e.g. 14:30:00">
     </div>
   </div>
   <div style="margin-top:6px">
