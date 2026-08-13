@@ -1,0 +1,56 @@
+{
+  "version": 1,
+  "_comment": "Airband voice recorder — captures AM voice on a fixed list of frequencies within the VHF airband (118-136.975 MHz).  Sample preset centred at 122 MHz with 8 MHz bandwidth covers 118-126 MHz, which fits most VFR/tower/ground/approach clusters plus the guard channel 121.500.  Edit plugin_states.airband_recorder.channels for YOUR local airport frequencies (look up on airnav.com, openaip.net, LiveATC, or your national AIP).  Set 'output_dir' to where you want the WAV files + index.csv; default 'airband_recordings' sits next to sdrterm's working directory.  Squelch is dBFS on the AM envelope after demod — start at -55 and drop if you're missing weak stations, raise if you're getting false triggers from noise bursts.  Hardware: airband voice needs a wideband antenna (discone / 1/4-wave for ~127 MHz) WITHOUT the SAWbird+NOAA filter, which would kill everything below 135 MHz.",
+  "center_hz": 122000000.0,
+  "bw_hz": 8000000,
+  "gain_db": 20.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": true,
+  "active_decoders": [
+    "spectrum",
+    "airband_recorder",
+    "webserver"
+  ],
+  "plugin_order": [
+    "airband_recorder",
+    "webserver",
+    "peak_marker",
+    "constellation",
+    "freqhop",
+    "range-scan",
+    "record",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "acars",
+    "vdl2",
+    "adsb",
+    "pocsag",
+    "iridium",
+    "iridium_decode",
+    "meteor",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {
+    "webserver": {"enabled": true, "host": "0.0.0.0", "port": 8080},
+    "airband_recorder": {
+      "enabled": true,
+      "output_dir": "airband_recordings",
+      "squelch_dbfs": -55.0,
+      "silence_hangover_s": 2.0,
+      "audio_rate_hz": 8000,
+      "channels": [
+        {"freq": 118100000, "name": "Tower"},
+        {"freq": 118905000, "name": "Approach"},
+        {"freq": 121500000, "name": "Guard"},
+        {"freq": 121900000, "name": "Ground"},
+        {"freq": 124750000, "name": "ATIS"}
+      ]
+    }
+  }
+}
