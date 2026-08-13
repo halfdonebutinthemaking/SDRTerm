@@ -97,7 +97,7 @@ class _ChannelState:
 
 class AirbandRecorderDecoder(Decoder):
     name            = 'airband_recorder'
-    key             = 'A'
+    key             = 'x'                    # 'x' — not otherwise assigned
     key_help        = 'r=reset stats'
     min_sample_rate = 2_000_000       # need enough BW to span the channel list
     realtime        = False
