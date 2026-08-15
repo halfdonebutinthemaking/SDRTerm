@@ -1,0 +1,761 @@
+% SDRTerm — Weather-satellite pass planner + LRPT/APT capture walkthrough
+%
+% Build with:  pdflatex pipeline.tex   (twice, so ToC + refs resolve)
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[margin=2cm]{geometry}
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{arrows.meta, positioning, shapes.geometric, calc,
+                decorations.pathreplacing, backgrounds, fit, patterns}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{parskip}
+\usepackage{eurosym}      % for \EUR
+\newcommand{\EUR}[1]{\officialeuro\,#1}
+
+\hypersetup{
+  colorlinks=true,
+  linkcolor=blue!70!black,
+  urlcolor=blue!60!black,
+  citecolor=black,
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  frame=single,
+  breaklines=true,
+  showstringspaces=false,
+  columns=fullflexible,
+  keepspaces=true,
+  backgroundcolor=\color{gray!5},
+}
+
+\title{Weather Satellites at 137\,MHz\\
+       \large A Walkthrough of SDRTerm's \texttt{meteor} Plugin\\
+       (For Amateurs Who Want Pictures of Clouds from Space)}
+\author{SDRTerm project}
+\date{\today}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\vspace{2em}
+
+%═══════════════════════════════════════════════════════════════════
+\section{The Big Picture in One Paragraph}
+%═══════════════════════════════════════════════════════════════════
+
+Six low-orbit weather satellites regularly fly over your head
+transmitting live pictures of the Earth on frequencies near 137\,MHz.
+With a about \EUR{25} antenna, a filter, and a hobby SDR you can
+receive those pictures directly — no internet, no subscription, no
+ground station.  This plugin schedules the passes, retunes your SDR
+at rise, hands the samples off to \texttt{satdump} (a battle-tested
+external decoder that turns 137\,MHz IQ into PNG images), and stops
+the recording at set.  What follows is how all of that hangs together.
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.4cm,
+  block/.style={draw, rounded corners, minimum width=1.9cm, minimum height=0.9cm,
+                align=center, font=\scriptsize\ttfamily},
+  arrow/.style={-{Latex[length=2mm]}, thick}]
+
+  \node[block] (celes)              {CelesTrak\\TLE download};
+  \node[block, right=of celes] (pred){pyorbital\\pass predict};
+  \node[block, right=of pred] (tune) {SDR retune\\on rise};
+  \node[block, right=of tune] (tcp)  {rtl-tcp\\passive server};
+  \node[block, right=of tcp]  (sd)   {satdump\\decode};
+  \node[block, right=of sd]   (png)  {PNG\\image};
+
+  \draw[arrow] (celes) -- (pred);
+  \draw[arrow] (pred)  -- (tune);
+  \draw[arrow] (tune)  -- (tcp);
+  \draw[arrow] (tcp)   -- (sd);
+  \draw[arrow] (sd)    -- (png);
+\end{tikzpicture}
+\end{center}
+
+The plugin owns the four blocks on the left; \texttt{satdump} owns the
+DSP and image-reassembly work on the right.  Splitting the work this
+way keeps SDRTerm's codebase small (satdump is $\sim$200 k lines of
+C++ implementing every mainstream satellite pipeline) and lets us
+benefit from bug fixes the wider community makes.
+
+%═══════════════════════════════════════════════════════════════════
+\section{The Satellites}
+%═══════════════════════════════════════════════════════════════════
+
+Six spacecraft, two families, all in low-Earth polar orbit.  All
+downlink near 137\,MHz so \emph{one antenna serves all six}.
+
+\begin{center}
+\begin{tabular}{@{}lllll@{}}
+\toprule
+\textbf{Satellite} & \textbf{Frequency} & \textbf{Mode} & \textbf{Bandwidth} & \textbf{Status (2026)} \\
+\midrule
+NOAA 15         & \SI{137.620}{MHz} & APT   & \SI{34}{kHz}  & Intermittent since 2019 \\
+NOAA 18         & \SI{137.9125}{MHz}& APT   & \SI{34}{kHz}  & Active \\
+NOAA 19         & \SI{137.100}{MHz} & APT   & \SI{34}{kHz}  & Active (shares w/ Meteor-M2 3) \\
+METEOR-M2 2     & \SI{137.900}{MHz} & LRPT  & \SI{150}{kHz} & Degraded, sporadic \\
+METEOR-M2 3     & \SI{137.100}{MHz} & LRPT  & \SI{150}{kHz} & Active \\
+METEOR-M2 4     & \SI{137.900}{MHz} & LRPT  & \SI{150}{kHz} & Active \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+The two families broadcast \emph{completely different} kinds of signal:
+
+\begin{itemize}
+  \item \textbf{NOAA POES} → \textbf{APT} (Automatic Picture
+        Transmission) — an \emph{analog} FM signal carrying an AM
+        subcarrier at \SI{2400}{Hz}.  Format hasn't changed since
+        1978.  The received picture is a slow-scan raster, two lines
+        per second, 909 pixels per line, low resolution but robust —
+        even a \SI{10}{dB} SNR link produces a recognisable image.
+  \item \textbf{Meteor-M2} → \textbf{LRPT} (Low-Rate Picture
+        Transmission) — a modern \emph{digital} QPSK link at
+        \SI{72}{ksym/s} with convolutional + Reed-Solomon FEC.
+        Pictures are \SI{1568}{pixels} wide across three channels
+        (visible + two IR), much higher quality than APT — but the
+        signal falls off a cliff when SNR drops below the FEC
+        threshold ($\sim$\SI{6}{dB}).
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[scale=0.85]
+  \begin{axis}[width=13cm, height=4cm,
+    ymin=-90, ymax=5,
+    xlabel={frequency [\si{kHz}]}, ylabel={dBFS},
+    axis y line=left, axis x line=bottom,
+    xmin=-100, xmax=100, xtick={-100,-50,0,50,100}]
+    % APT: narrow FM-shaped hump ~34 kHz wide, centred at 0
+    \addplot[very thick, blue, domain=-25:25, samples=100]
+        {-15 - 20 * abs(x/25)};
+    % LRPT: wider flat-top QPSK spectrum ~150 kHz wide
+    \addplot[very thick, red, domain=-75:75, samples=100]
+        {-25 - 5*(x/75)^4};
+    \node[blue, font=\scriptsize] at (axis cs:-30, -25) {APT (NOAA)};
+    \node[red,  font=\scriptsize] at (axis cs: 65, -35) {LRPT (Meteor)};
+  \end{axis}
+\end{tikzpicture}
+\end{center}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Orbital Mechanics: Why You Only Get 10 Minutes}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{The orbit}
+
+All six satellites fly \emph{sun-synchronous polar} orbits at
+altitudes of \(\sim\)\SI{820}{km}.  Sun-synchronous means the plane
+of the orbit rotates \(\sim\)\SI{1}{deg/day} in the same direction
+the Earth orbits the Sun, so the satellite crosses the equator at
+the same local solar time on every pass.  Polar means the
+inclination is close to 98°, so the satellite covers essentially the
+whole planet in a day.
+
+Orbital period at 820\,km:
+\begin{equation}
+T \;=\; 2\pi \sqrt{\frac{(R_\oplus + h)^3}{G M_\oplus}}
+\;\approx\; \SI{101}{min}.
+\end{equation}
+
+At that altitude the satellite's ground speed is
+\(\sim\)\SI{7.4}{km/s}.  From horizon to horizon at a good pass
+(overhead) takes about \SI{15}{min} of geometry; the \emph{usable}
+window where elevation stays above \(\sim\)10° is closer to
+\SI{8}{min}--\SI{12}{min}.
+
+\begin{center}
+\begin{tikzpicture}[scale=0.85]
+  \begin{axis}[width=13cm, height=5cm,
+    ymin=0, ymax=95,
+    xlabel={time from AOS [minutes]}, ylabel={elevation [degrees]},
+    axis y line=left, axis x line=bottom,
+    xmin=0, xmax=15,
+    xtick={0,3,6,9,12,15}, ytick={0,15,30,60,90}]
+    % Symmetric hump reaching ~80° at ~7.5 min
+    \addplot[thick, blue, domain=0:15, samples=200]
+        {80 * sin(deg(x/15 * pi))};
+    \draw[dashed, red] (axis cs:0,15) -- (axis cs:15,15);
+    \node[red, font=\scriptsize] at (axis cs:1.5,18) {min elevation (default 15°)};
+    \node[font=\scriptsize] at (axis cs:1.5,4) {AOS};
+    \node[font=\scriptsize] at (axis cs:7.5,90) {TCA};
+    \node[font=\scriptsize] at (axis cs:13.5,4) {LOS};
+  \end{axis}
+\end{tikzpicture}
+\end{center}
+
+\textbf{Vocabulary}:
+\begin{itemize}
+  \item \textbf{AOS} (Acquisition of Signal) — satellite rises above
+        the horizon at your site.
+  \item \textbf{TCA} (Time of Closest Approach) — highest elevation
+        of the pass; also the closest range and the strongest signal.
+  \item \textbf{LOS} (Loss of Signal) — satellite sets below the horizon.
+  \item \textbf{Elevation} — angle above the local horizon, 0° at
+        horizon, 90° straight up.
+  \item \textbf{Azimuth} — compass bearing where the satellite is,
+        0° = north, 90° = east, etc.
+\end{itemize}
+
+Only \emph{high-elevation} passes give clean images.  The plugin
+defaults to \texttt{min\_elevation\_deg = 15.0} so you don't waste
+storage on horizon-scraping passes that will decode to noise.
+
+\subsection{Where the plugin gets the numbers}
+
+For each satellite we need to solve: \emph{given today's date and
+your location, when does the satellite rise, when does it set, and
+how high does it get in between?}  Two ingredients:
+
+\begin{enumerate}
+  \item \textbf{TLE (Two-Line Element set)} — a compact ASCII
+        description of the satellite's orbit at a reference epoch.
+        Every satellite of interest is published daily by NORAD via
+        CelesTrak.  We fetch the ``weather'' group bundle (about
+        \SI{14}{kB}, $\sim$200 satellites) and cache it locally for
+        12\,h.
+  \item \textbf{SGP4} — an orbital propagator that turns a TLE at
+        epoch \(t_0\) into position \(\vec r(t)\) and velocity
+        \(\vec v(t)\) at any nearby time \(t\).  We use
+        \texttt{pyorbital.Orbital}, which wraps SGP4 in a friendly
+        Python API.
+\end{enumerate}
+
+An example TLE for NOAA 19:
+\begin{lstlisting}
+NOAA 19
+1 33591U 09005A   26224.53275463  .00000242  00000-0  15012-3 0  9995
+2 33591  99.0193 264.7583 0013821 265.4837  94.4569 14.13141235894382
+\end{lstlisting}
+
+That's the whole orbit: inclination 99.02°, mean motion \SI{14.13}{rev/day},
+eccentricity 0.00138, etc.  From those numbers plus the reference
+time in the first line, SGP4 gives us position and elevation at any
+requested moment.  The plugin evaluates elevation every
+\SI{30}{seconds} for the next 24\,h and picks out contiguous
+above-threshold runs — those are our passes.
+
+\begin{lstlisting}[language=Python]
+# plugins/meteor/passes.py — the entire prediction is a few lines
+o = Orbital(sat_name, tle_file=tle_path)
+lat, lon, alt = self._location_lat, self._location_lon, self._location_alt_km
+elevs = [o.get_observer_look(t, lon, lat, alt)[1] for t in times]
+# Then find contiguous elevs[i] >= min_elevation_deg → passes
+\end{lstlisting}
+
+%═══════════════════════════════════════════════════════════════════
+\section{The Antenna and the RF Front End}
+%═══════════════════════════════════════════════════════════════════
+
+\subsection{Why 137\,MHz needs a special antenna}
+
+A wire whip receives \emph{linearly-polarised} signals.  Both APT
+and LRPT are \emph{right-hand circularly-polarised} (RHCP) — the
+electric field vector rotates as it propagates, tracing out a
+right-handed helix.  A linear antenna captures roughly half the
+energy from a circular wave (a \SI{3}{dB} penalty), and worse, it
+suffers deep nulls when the satellite is at certain azimuths — which
+happens exactly when the sat is passing overhead and \emph{should}
+be strongest.
+
+The standard receive antenna for 137\,MHz is a \textbf{Quadrifilar
+Helix} (QFH): four helical wires wound around a common axis, fed in
+quadrature.  Overall it's a narrow \SI{130}{cm}-tall cage that has:
+
+\begin{itemize}
+  \item Nearly-hemispherical gain pattern (peaks upward, drops
+        gracefully toward the horizon)
+  \item Native RHCP polarisation — matched to the satellites
+  \item No nulls in the upper hemisphere (unlike a Yagi or a
+        turnstile)
+\end{itemize}
+
+You can build a QFH from copper pipe for about about \EUR{25}, or
+buy a pre-cut one for \EUR{60} to \EUR{100}.
+
+\begin{center}
+\begin{tikzpicture}[scale=0.9]
+  % QFH cartoon — two crossed helices
+  \draw[thick, blue] plot [domain=0:6.28, samples=100]
+      ({0.6*cos(deg(\x))}, {0.4*sin(deg(\x))+\x/2});
+  \draw[thick, red, dashed] plot [domain=0:6.28, samples=100]
+      ({0.6*cos(deg(\x)+90)}, {0.4*sin(deg(\x)+90)+\x/2});
+  \draw[very thick] (0,0) circle (0.6);
+  \draw[very thick] (0,3.14) circle (0.6);
+  \node[font=\scriptsize, right] at (0.8,3.5) {top loop};
+  \node[font=\scriptsize, right] at (0.8,-0.1) {feed / coax};
+  \node[font=\scriptsize] at (4,1.5) {\begin{tabular}{l}
+     Two crossed helical loops,\\
+     $90^\circ$ phase difference\\
+     $\Rightarrow$ RHCP, hemispherical\\
+     gain pattern.
+  \end{tabular}};
+\end{tikzpicture}
+\end{center}
+
+\subsection{The filter and preamplifier}
+
+The 137\,MHz band sits between two very strong crowded neighbours:
+
+\begin{itemize}
+  \item \textbf{Below}: broadcast FM (88--108\,MHz) — 100\,kW ERP
+        stations that will drown your SDR's front end in intermod if
+        left unfiltered.
+  \item \textbf{Above}: airband voice (118--137\,MHz) — dozens of
+        AM channels; individually weaker than FM but numerous.
+\end{itemize}
+
+A bandpass filter centred at 137\,MHz with a \SI{4}{MHz} passband
+kills both crowds.  The \textbf{SAWbird+NOAA} is the standard
+combo: SAW filter (\SI{40}{dB} out-of-band rejection) plus a
+low-noise amplifier (\SI{20}{dB} gain, \SI{1.5}{dB} noise figure) on
+the same tiny board, powered by bias-tee over the coax.
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.5cm,
+  block/.style={draw, rounded corners, minimum width=1.8cm, minimum height=0.8cm,
+                align=center, font=\scriptsize\ttfamily},
+  arrow/.style={-{Latex[length=2mm]}, thick}]
+
+  \node[block] (ant)              {QFH\\antenna};
+  \node[block, right=of ant]  (saw){SAW BPF\\135--139\,MHz};
+  \node[block, right=of saw]  (lna){LNA\\+20\,dB};
+  \node[block, right=of lna]  (sdr){HackRF /\\RTL-SDR};
+
+  \draw[arrow] (ant) -- (saw);
+  \draw[arrow] (saw) -- (lna);
+  \draw[arrow] (lna) -- (sdr);
+  \draw[dashed, thick] ($(saw.south west)+(-0.05,-0.05)$) rectangle ($(lna.north east)+(0.05,0.3)$);
+  \node[font=\tiny, gray] at ($(saw.north east)+(-0.5,0.5)$) {SAWbird+NOAA};
+\end{tikzpicture}
+\end{center}
+
+%═══════════════════════════════════════════════════════════════════
+\section{APT: The Analog Picture Format}
+%═══════════════════════════════════════════════════════════════════
+
+APT has been in operation since 1978 and hasn't changed a bit —
+that's why NOAA 15's 1998-vintage transmitter still works.  The
+format is beautifully simple.
+
+\subsection{Wire-level modulation}
+
+\begin{enumerate}
+  \item \textbf{Video baseband}: a \SI{2400}{Hz} carrier is
+        \emph{amplitude-modulated} by the image brightness (dark = low
+        AM level, bright = high).
+  \item \textbf{FM main link}: that AM subcarrier (plus the
+        \SI{2400}{Hz} tone-line telemetry pulses) is
+        \emph{frequency-modulated} onto the RF carrier at
+        \SI{137}{MHz} with a peak deviation of \SI{17}{kHz}.
+        Total occupied bandwidth: about \SI{34}{kHz}.
+\end{enumerate}
+
+The decoder therefore has to un-do modulation twice:
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.35cm,
+  block/.style={draw, rounded corners, minimum width=1.9cm, minimum height=0.7cm,
+                align=center, font=\scriptsize\ttfamily},
+  arrow/.style={-{Latex[length=2mm]}, thick}]
+
+  \node[block] (iq)              {IQ @\\137.100\,MHz};
+  \node[block, right=of iq]  (fm){FM\\demod};
+  \node[block, right=of fm]  (am){AM\\envelope};
+  \node[block, right=of am]  (sy){sync\\word};
+  \node[block, right=of sy]  (ln){line\\assemble};
+  \node[block, right=of ln]  (im){grayscale\\raster};
+
+  \draw[arrow] (iq) -- (fm);
+  \draw[arrow] (fm) -- (am);
+  \draw[arrow] (am) -- (sy);
+  \draw[arrow] (sy) -- (ln);
+  \draw[arrow] (ln) -- (im);
+\end{tikzpicture}
+\end{center}
+
+\subsection{Frame structure}
+
+Each APT line is \emph{two sub-lines} stitched together — one from
+the visible channel, one from an infrared channel.  Two lines
+per second means the receiver produces roughly \SI{60}{lines/minute}.
+A whole 10-minute pass gives you $\sim$600 lines, or a $\sim$909 $\times$
+600-pixel image (before any oversampling to sharpen it).
+
+\begin{center}
+\begin{tikzpicture}[scale=0.75]
+  \draw[thick] (0,0) rectangle (16,1);
+  \draw[fill=blue!20]  (0,0)   rectangle (1.2,1);   \node[font=\scriptsize] at (0.6,0.5) {SyncA};
+  \draw[fill=yellow!30](1.2,0) rectangle (2.6,1);   \node[font=\scriptsize] at (1.9,0.5) {space A};
+  \draw[fill=gray!30]  (2.6,0) rectangle (8,1);     \node[font=\scriptsize] at (5.3,0.5) {Video channel A (909 px)};
+  \draw[fill=orange!30](8,0)   rectangle (8.4,1);   \node[font=\scriptsize] at (8.2,0.5) {t};
+  \draw[fill=blue!20]  (8.4,0) rectangle (9.6,1);   \node[font=\scriptsize] at (9,0.5)   {SyncB};
+  \draw[fill=yellow!30](9.6,0) rectangle (11,1);    \node[font=\scriptsize] at (10.3,0.5){space B};
+  \draw[fill=gray!30]  (11,0)  rectangle (16,1);    \node[font=\scriptsize] at (13.5,0.5){Video channel B (909 px)};
+  \node[font=\scriptsize] at (8,1.4) {one APT line = 0.5\,s = 2080 words @ 4160 words/s};
+\end{tikzpicture}
+\end{center}
+
+\begin{itemize}
+  \item \textbf{Sync words} (7 alternating cycles at \SI{1040}{Hz})
+        mark the start of each sub-line — the decoder locks onto these
+        with a correlator.
+  \item \textbf{Space} pixels are calibration references — cold-target
+        levels the receiver uses to normalise brightness across the pass.
+  \item \textbf{Telemetry} (the tiny middle segment ``t'') encodes
+        which spectral band each channel is using (visible, near-IR,
+        thermal IR, water vapour) — different combinations per season.
+\end{itemize}
+
+satdump's \texttt{noaa\_apt} pipeline does all of this and outputs
+one PNG per channel, plus a false-colour composite.
+
+%═══════════════════════════════════════════════════════════════════
+\section{LRPT: The Digital Picture Format}
+%═══════════════════════════════════════════════════════════════════
+
+Meteor-M2 uses a much more modern transmission — same era as GPS L2C
+or Iridium — but the signal shape and error correction are more
+complex.
+
+\subsection{Wire-level modulation}
+
+\begin{itemize}
+  \item \textbf{Modulation}: QPSK (Quadrature Phase-Shift Keying) at
+        \SI{72}{ksym/s}, so \SI{144}{kbit/s} raw before FEC.
+        Occupied bandwidth (root-raised-cosine, roll-off 0.6):
+        \(\sim\)\SI{150}{kHz}.
+  \item \textbf{Constellation}: 4 points on the unit circle at
+        \(\pm 45^\circ, \pm 135^\circ\).  Each symbol carries 2 bits.
+  \item \textbf{FEC layer 1}: rate-1/2 convolutional code (constraint
+        length 7, generators 171 / 133 octal) → decoded by a Viterbi
+        algorithm.
+  \item \textbf{FEC layer 2}: Reed-Solomon (255, 223) per packet →
+        corrects any remaining byte errors.
+  \item \textbf{Transport}: CCSDS (Consultative Committee for Space
+        Data Systems) packets, \SI{1024}{bytes} each, addressed to
+        virtual channels for different image streams.
+\end{itemize}
+
+\begin{center}
+\begin{tikzpicture}[scale=1.0]
+  \draw[gray!50, ->] (-2,0) -- (2,0) node[right, font=\scriptsize] {I};
+  \draw[gray!50, ->] (0,-2) -- (0,2) node[above, font=\scriptsize] {Q};
+  \foreach \x/\y/\lbl in {1.2/1.2/{00}, 1.2/-1.2/{10}, -1.2/1.2/{01}, -1.2/-1.2/{11}} {
+    \filldraw[fill=blue!30, draw=blue!60!black] (\x,\y) circle (0.2);
+    \node[font=\tiny] at (\x*1.35, \y*1.35) {\lbl};
+  }
+  \draw[dashed] (0,0) circle (1.7);
+  \node[font=\scriptsize] at (3.5,1.5) {\begin{tabular}{l}
+    QPSK: one of 4 phases per\\
+    symbol, each encoding 2 bits.\\
+    Baud 72\,000, so \\
+    144\,000 raw bits/s.
+  \end{tabular}};
+\end{tikzpicture}
+\end{center}
+
+\subsection{The decoding pipeline (satdump owns this)}
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.3cm,
+  block/.style={draw, rounded corners, minimum width=1.9cm, minimum height=0.7cm,
+                align=center, font=\scriptsize\ttfamily},
+  arrow/.style={-{Latex[length=2mm]}, thick}]
+
+  \node[block] (iq)                 {IQ @\\150\,kHz};
+  \node[block, right=of iq]   (rrc) {RRC\\match filter};
+  \node[block, right=of rrc]  (pll) {Costas\\PLL};
+  \node[block, right=of pll]  (sym) {symbol\\timing};
+  \node[block, right=of sym]  (vit) {Viterbi\\decode};
+  \node[block, right=of vit]  (rs)  {Reed-\\Solomon};
+  \node[block, right=of rs]   (ccs) {CCSDS\\depacket};
+  \node[block, right=of ccs]  (msu) {MSU-MR\\reassemble};
+
+  \draw[arrow] (iq)  -- (rrc);
+  \draw[arrow] (rrc) -- (pll);
+  \draw[arrow] (pll) -- (sym);
+  \draw[arrow] (sym) -- (vit);
+  \draw[arrow] (vit) -- (rs);
+  \draw[arrow] (rs)  -- (ccs);
+  \draw[arrow] (ccs) -- (msu);
+\end{tikzpicture}
+\end{center}
+
+\begin{enumerate}
+  \item \textbf{RRC match filter} — the transmitter shapes each
+        symbol with a root-raised-cosine pulse; the receiver applies
+        the matching filter to maximise SNR at the symbol instants.
+  \item \textbf{Costas PLL} — locks a local oscillator to the
+        received carrier phase; without this, the constellation
+        rotates slowly and the decoder decodes garbage.
+  \item \textbf{Symbol timing recovery} — finds the exact instants
+        (relative to sample clock) when to sample I and Q.  Uses a
+        Gardner or M\&M timing-error detector.
+  \item \textbf{Viterbi decoder} — un-does the rate-1/2 convolutional
+        code by finding the most-likely input sequence through a
+        trellis of $2^6 = 64$ states.  Recovers 1 bit for every 2
+        received bits.
+  \item \textbf{Reed-Solomon decoder} — corrects up to 16 byte
+        errors per 255-byte block.  Meteor uses depth-4 interleaving
+        so a single burst error is spread across 4 RS blocks.
+  \item \textbf{CCSDS depacket} — packet framing, sync detection,
+        virtual-channel routing.
+  \item \textbf{MSU-MR reassemble} — the six virtual channels contain
+        the six spectral bands from the MSU-MR camera; the decoder
+        maps packets back into a 2D raster and outputs one PNG per
+        channel plus false-colour composites.
+\end{enumerate}
+
+%═══════════════════════════════════════════════════════════════════
+\section{How the Handoff to satdump Works}
+%═══════════════════════════════════════════════════════════════════
+
+SDRTerm does not itself do any of the QPSK/Viterbi/Reed-Solomon work.
+Instead, on a predicted pass rise it spawns \texttt{satdump} as a
+subprocess and lets it pull the samples over TCP.
+
+\subsection{The rtl-tcp bridge}
+
+SDRTerm ships with an \texttt{rtl-tcp-passive} plugin that mirrors
+its captured IQ over the standard \texttt{rtl\_tcp} protocol on
+localhost:1234.  \texttt{satdump} was written to talk exactly this
+protocol as one of its many source options — so from satdump's point
+of view SDRTerm looks like a headless SDR server.
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.5cm,
+  block/.style={draw, rounded corners, minimum width=2.0cm, minimum height=0.9cm,
+                align=center, font=\scriptsize\ttfamily},
+  arrow/.style={-{Latex[length=2mm]}, thick},
+  proc/.style={fill=gray!5}]
+
+  \node[block, proc] (hw)              {HackRF /\\RTL-SDR};
+  \node[block, proc, right=of hw]  (st){SDRTerm\\core + rtl-tcp\\plugin};
+  \node[block, proc, right=of st]  (sd){satdump\\subprocess};
+
+  \draw[arrow] (hw) -- node[above, font=\tiny] {USB IQ} (st);
+  \draw[arrow] (st) -- node[above, font=\tiny] {TCP :1234} (sd);
+  \draw[arrow, dashed] (sd.north) to[bend right=30] node[above, font=\tiny]
+       {spawn / signal (fork+exec)} (st.north);
+\end{tikzpicture}
+\end{center}
+
+Concretely, this is the command line the meteor plugin invokes when
+a Meteor-M2 pass begins:
+
+\begin{lstlisting}
+satdump live meteor_m2-x_lrpt <output_dir> \
+       --source     rtltcp        \
+       --frequency  137100000     \
+       --samplerate <state.bw_hz> \
+       --tcp_address 127.0.0.1    \
+       --tcp_port    1234         \
+       --timeout    <pass_seconds + 30>
+\end{lstlisting}
+
+The \texttt{--timeout} is set to the pass's remaining seconds plus a
+30-second slack, so if SDRTerm crashes without cleaning up satdump
+gracefully, satdump still exits by itself when the pass would have
+ended.
+
+\subsection{Why not do it all in Python?}
+
+Fair question.  The honest answer:
+
+\begin{itemize}
+  \item \textbf{Correctness.}  satdump has years of tuning on the
+        Meteor-M2 specifics: Doppler compensation, differential QPSK
+        variants, degraded-signal recovery, changing packet formats.
+        Recreating that in Python would take months and would be worse.
+  \item \textbf{Speed.}  Viterbi on 144\,kbit/s at $2^{6}$ trellis
+        states + RS-255 on the output is well within Python's reach
+        but not with the elegant code style we want in the plugin.
+        Delegating keeps SDRTerm's Python footprint focused on
+        orchestration.
+  \item \textbf{Community.}  Fixes upstream (support for METEOR-M2 4's
+        slightly different frame format, for example) reach us for
+        free when the user updates satdump.
+\end{itemize}
+
+%═══════════════════════════════════════════════════════════════════
+\section{The Auto-Tune and Auto-Capture State Machine}
+%═══════════════════════════════════════════════════════════════════
+
+Every call to \texttt{process()} (which fires many times per second
+in the SDRTerm main loop) walks through this decision tree:
+
+\begin{center}
+\begin{tikzpicture}[node distance=0.6cm,
+  block/.style={draw, rounded corners, minimum width=3.2cm, minimum height=0.7cm,
+                align=center, font=\scriptsize\ttfamily},
+  dec/.style={draw, diamond, aspect=2, minimum width=3.2cm, minimum height=0.9cm,
+              align=center, font=\scriptsize\ttfamily},
+  arrow/.style={-{Latex[length=2mm]}, thick}]
+
+  \node[dec] (any)                     {any pass now?};
+  \node[block, right=1cm of any] (kill){if satdump running:\\SIGTERM it, reap};
+  \node[dec, below=of any]  (tuned)    {already tuned to sat?};
+  \node[block, right=1cm of tuned] (rt){retune SDR to sat freq};
+  \node[dec, below=of tuned] (spawned) {satdump already spawned?};
+  \node[block, right=1cm of spawned] (sp){spawn satdump};
+  \node[block, below=of spawned] (poll){poll satdump.poll();\\reap if exited};
+
+  \draw[arrow] (any) -- node[above, font=\tiny] {no} (kill);
+  \draw[arrow] (any) -- node[right, font=\tiny] {yes} (tuned);
+  \draw[arrow] (tuned) -- node[above, font=\tiny] {no} (rt);
+  \draw[arrow] (tuned) -- node[right, font=\tiny] {yes} (spawned);
+  \draw[arrow] (spawned) -- node[above, font=\tiny] {no} (sp);
+  \draw[arrow] (spawned) -- node[right, font=\tiny] {yes} (poll);
+\end{tikzpicture}
+\end{center}
+
+Two invariants keep this from spawning satdump repeatedly or
+retuning on every frame:
+
+\begin{itemize}
+  \item \texttt{self.\_tuned\_sat / \_tuned\_freq\_hz} — set after a
+        successful retune.  Comparing against the current pass's sat
+        name short-circuits the retune on subsequent calls.
+  \item \texttt{self.\_capture\_sat} — set on \emph{first attempt} to
+        spawn satdump, whether or not the spawn succeeded.  Prevents
+        us from re-attempting every call when satdump is missing from
+        \texttt{\$PATH}.
+\end{itemize}
+
+On pass fall, \texttt{find\_current\_pass()} returns \texttt{None}
+and the plugin walks the left branch: \texttt{SIGTERM} satdump, wait
+up to 10\,s for it to flush its file writes, release the handles.
+
+%═══════════════════════════════════════════════════════════════════
+\section{Configuration}
+%═══════════════════════════════════════════════════════════════════
+
+Everything is in the preset under
+\texttt{plugin\_states.meteor}:
+
+\begin{lstlisting}
+"meteor": {
+  "location_lat":      49.740693,
+  "location_lon":      6.660242,
+  "location_alt_km":   0.245,
+  "min_elevation_deg": 15.0,
+  "horizon_hours":     24.0,
+  "auto_tune":         true,
+  "auto_capture":      true,
+  "rtltcp_host":       "127.0.0.1",
+  "rtltcp_port":       1234
+}
+\end{lstlisting}
+
+Location goes in as decimal degrees (positive = N/E), altitude in
+kilometres above mean sea level.  For 137\,MHz reception 100\,m of
+altitude error changes reception by nothing meaningful; you can guess
+if you don't know it exactly.
+
+\subsection{What happens if you're offline}
+
+TLE fetch fails silently (falls back to the cached copy on disk if
+one exists), so an existing installation keeps predicting passes
+even without internet.  Fresh installations without any cache will
+fail to predict — the first thing the plugin does when it can't
+predict passes is tell you why in the web view.
+
+%═══════════════════════════════════════════════════════════════════
+\section{Output: Where the Pictures End Up}
+%═══════════════════════════════════════════════════════════════════
+
+satdump writes into
+\texttt{plugins/meteor/web/captures/<ISO-timestamp>\_<sat>/}
+which is under the webserver plugin's static-file tree.  So a
+completed pass produces this on disk:
+
+\begin{lstlisting}
+plugins/meteor/web/captures/
+  2026-08-15T13-42-00Z_METEOR-M2_4/
+    METEOR-M2 4_MSU-MR_1.png         ← channel 1 (visible)
+    METEOR-M2 4_MSU-MR_2.png         ← channel 2 (visible)
+    METEOR-M2 4_MSU-MR_3.png         ← channel 3 (near-IR)
+    METEOR-M2 4_MSU-MR_composite.png ← false-colour RGB
+    dataset.json                     ← satdump metadata
+    satdump.log                      ← stdout+stderr from the run
+\end{lstlisting}
+
+The webserver plugin serves these directly at
+\texttt{/static/meteor/captures/...} so you can browse them from
+any device on your network without opening a file manager on the
+Pi.
+
+%═══════════════════════════════════════════════════════════════════
+\section{Summary Table}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{center}
+\begin{tabular}{@{}rll@{}}
+\toprule
+\textbf{Stage} & \textbf{Owner}                  & \textbf{Purpose} \\
+\midrule
+1 & CelesTrak                     & TLE feed for weather sats \\
+2 & meteor.py + pyorbital        & Predict passes for next 24\,h \\
+3 & meteor.py                    & Retune SDR to sat freq on pass rise \\
+4 & rtl-tcp-passive plugin       & Serve IQ over TCP :1234 \\
+5 & satdump (subprocess)         & Demod + Viterbi + RS + reassemble \\
+6 & satdump                      & Write PNGs + metadata to disk \\
+7 & webserver plugin             & Serve captures + pass schedule as HTML \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Things We Don't Do (Yet or Ever)}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{itemize}
+  \item \textbf{Doppler-shift correction on the SDRTerm side.}
+        The Doppler shift at 137\,MHz for a satellite in LEO is
+        \(\pm\)\SI{3}{kHz} across a pass — enough to matter for LRPT
+        (whose entire signal is only 150\,kHz wide).  satdump handles
+        it internally using orbital predictions; we don't retune.
+  \item \textbf{Antenna rotator control.}  QFH is a fixed
+        omnidirectional antenna, so there's nothing to rotate.  For
+        higher-gain HRPT reception at L-band you'd need one; that's
+        a different plugin entirely.
+  \item \textbf{Real-time pass table on the tty.}  Only the web view
+        shows the schedule.  Adding a curses tab would be $\sim$50
+        lines but nobody's asked yet.
+  \item \textbf{Metop / FengYun HRPT decoding.}  Those satellites
+        transmit at 1.7\,GHz with much wider bandwidth — completely
+        different antenna (\SI{1.2}{m} dish) and much more expensive
+        hardware.  Not on the roadmap.
+\end{itemize}
+
+%═══════════════════════════════════════════════════════════════════
+\section{Bibliography and Further Reading}
+%═══════════════════════════════════════════════════════════════════
+
+\begin{itemize}
+  \item Vallado, D.\ A., \emph{Fundamentals of Astrodynamics and
+        Applications}, 4th ed.  Chapters 8--9 cover SGP4 in detail.
+  \item CCSDS 131.0-B-3, \emph{TM Synchronization and Channel
+        Coding}.  The convolutional + Reed-Solomon layer used by
+        Meteor-M and half of the space-data-transport world.
+  \item NOAA POES User Guide, sections on APT format
+        (\texttt{https://www.noaasis.noaa.gov/NOAASIS/pubs/}) — the
+        original 1978 specification, still authoritative.
+  \item \texttt{satdump} project — \texttt{https://www.satdump.org} —
+        source of the actual DSP pipelines we invoke.
+  \item CelesTrak — \texttt{https://celestrak.org} — for daily TLEs.
+  \item pyorbital documentation — SGP4 in a friendly Python wrapper.
+\end{itemize}
+
+\end{document}
