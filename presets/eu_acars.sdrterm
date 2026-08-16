@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "_comment": "European ACARS reception — freqhops through the four ICAO-EUR channels: 131.725 MHz (AOA primary + CPDLC), 131.525 / 131.475 / 131.825 MHz (SITA + backups).  Modulation is 2400-baud MSK (mark 2400 Hz / space 1200 Hz) AM-carried on a 25 kHz airband channel.  Bursts are short (100-500 ms) and sporadic, so a busy channel may take a minute of dwell to catch anything; the primary 131.725 gets the longest slot.  Hardware: HackRF at 2 MSPS (its minimum sample rate); RTL-SDR users can drop bw_hz to 250 kSPS.  Antenna must cover ~131 MHz — a broadband donut/loop, a 1/4-wave ground plane cut for ~131 MHz (57 cm radiator + four 63 cm radials at 45° down), or a discone all work.  Do NOT use the SAWbird+NOAA filter here: its passband is 135-139 MHz, which puts 131 MHz 40 dB into the stopband and kills every ACARS transmission before it reaches the SDR.  A wideband LNA (Nooelec LaNA, RTL-SDR Blog LNA, etc.) helps in fringe areas — external gain reduces the load on HackRF's internal amps.  gain_db 20 is a starting point for HackRF with an external LNA in the chain; dial down if the constellation view is a saturated blob (compression), up if bursts barely rise above the waterfall noise floor.",
+  "center_hz": 131725000.0,
+  "bw_hz": 2000000,
+  "gain_db": 20.0,
+  "gain_auto": false,
+  "iq_corr": true,
+  "fm_bw_hz": 100000,
+  "nrsc5_sc_outer": 546,
+  "waterfall_active": true,
+  "active_decoders": [
+    "spectrum",
+    "acars",
+    "freqhop"
+  ],
+  "plugin_order": [
+    "acars",
+    "freqhop",
+    "peak_marker",
+    "constellation",
+    "range-scan",
+    "record",
+    "fm",
+    "rds",
+    "modclass",
+    "nrsc5_text",
+    "pocsag",
+    "vdl2",
+    "adsb",
+    "iridium",
+    "iridium_decode",
+    "meteor",
+    "rtl-tcp-passive",
+    "rtl-tcp-active"
+  ],
+  "plugin_states": {
+    "freqhop": {
+      "slots": [
+        {"freq_hz": 131725000.0, "dwell_s": 60.0},
+        {"freq_hz": 131525000.0, "dwell_s": 45.0},
+        {"freq_hz": 131475000.0, "dwell_s": 30.0},
+        {"freq_hz": 131825000.0, "dwell_s": 30.0}
+      ]
+    }
+  }
+}
