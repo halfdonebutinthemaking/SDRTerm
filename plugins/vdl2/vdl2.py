@@ -15,6 +15,31 @@ _MAX_MESSAGES =   64
 _MAX_BIT_BUF  = 65_536   # ~2 s of bits at 31.5 kbps
 
 
+class _ChannelState:
+    """Everything the D8PSK demod needs to remember between chunks for
+    ONE VDL2 channel.  Instantiated once per configured channel in
+    multi-channel mode; also used as a container for the single-channel
+    fallback so both paths share the same helpers."""
+    __slots__ = ('name', 'freq_hz', 'bit_buf', 'carrier_phase',
+                 'prev_sym', 'sym_offset', 'descramble_ctx')
+
+    def __init__(self, name, freq_hz):
+        self.name            = name
+        self.freq_hz         = float(freq_hz) if freq_hz is not None else None
+        self.bit_buf         = deque(maxlen=_MAX_BIT_BUF)
+        self.carrier_phase   = 0.0
+        self.prev_sym        = None
+        self.sym_offset      = 0
+        self.descramble_ctx  = [0] * 6
+
+    def reset(self):
+        self.bit_buf.clear()
+        self.carrier_phase   = 0.0
+        self.prev_sym        = None
+        self.sym_offset      = 0
+        self.descramble_ctx  = [0] * 6
+
+
 def _rrc(n_taps: int, alpha: float, sps: int) -> np.ndarray:
     t = (np.arange(n_taps) - n_taps // 2) / sps
     h = np.zeros(n_taps)
@@ -44,27 +69,30 @@ class VDL2Decoder(Decoder):
     full_view       = True
 
     def __init__(self):
+        # Shared / global state (applies in both single- and multi-channel modes)
         self._messages        = deque(maxlen=_MAX_MESSAGES)
-        self._bit_buf         = deque(maxlen=_MAX_BIT_BUF)
-        self._seen            = set()          # CRC+len dedup cache
-        self._carrier_phase   = 0.0
-        self._prev_sym        = None           # last symbol from previous chunk
-        self._sym_offset      = 0             # sample offset within symbol period
-        self._descramble_ctx  = [0] * 6       # last 6 received bits for cross-chunk descrambling
-        self._rrc_cache       = {}             # bw_hz → (up, down, taps)
+        self._seen            = set()          # CRC+len dedup cache (across channels)
+        self._rrc_cache       = {}             # bw_hz → (up, down, taps) — shared
         self._n_frames        = 0
         self._n_errors        = 0
+        # Single-channel mode: one implicit channel that follows the tuned centre
+        # (using peak_marker offset when present).  Keeps existing behaviour when
+        # no channels are configured — same defaults, same tuning strategy.
+        self._default_ch      = _ChannelState(name=None, freq_hz=None)
+        # Multi-channel mode: populated by load_state() from preset.  When
+        # non-empty, process() dispatches to the multi-channel path and
+        # ignores peak_marker / state.center_hz shifts — each configured
+        # freq_hz is fixed and downconverted independently.
+        self._channels: list  = []
 
     def start(self, state: AppState) -> None:
         self._messages.clear()
-        self._bit_buf.clear()
         self._seen.clear()
-        self._carrier_phase   = 0.0
-        self._prev_sym        = None
-        self._sym_offset      = 0
-        self._descramble_ctx  = [0] * 6
-        self._n_frames        = 0
-        self._n_errors        = 0
+        self._n_frames = 0
+        self._n_errors = 0
+        self._default_ch.reset()
+        for ch in self._channels:
+            ch.reset()
 
     def stop(self) -> None:
         self.start(None)
@@ -73,30 +101,74 @@ class VDL2Decoder(Decoder):
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
+        # Multi-channel mode wins when the preset configured a channel
+        # list.  Each freq gets its own downconvert + demod + bit buffer,
+        # all fed from the same one-chunk IQ.  Channels must lie inside
+        # state.bw_hz around state.center_hz (10% guardband).
+        if self._channels:
+            return self._process_multi(samples, state)
+        return self._process_single(samples, state, results)
+
+    # ── single-channel path (original behaviour, unchanged semantics) ────
+
+    def _process_single(self, samples, state, results):
         # Use peak_marker hint if available; otherwise decode at centre frequency.
         # D8PSK is differential so small offsets cancel in the phase differences,
         # but the RRC matched filter still needs the signal near DC (< ~1 kHz off).
-        peak    = (results or {}).get('peak_marker', {})
-        peak_hz = peak.get('peak_hz', state.center_hz)
+        peak      = (results or {}).get('peak_marker', {})
+        peak_hz   = peak.get('peak_hz', state.center_hz)
+        offset_hz = peak_hz - state.center_hz
+        self._downconvert_and_decode(
+            samples, offset_hz, int(state.bw_hz),
+            ch=self._default_ch, channel_name=None,
+        )
+        return self._result()
 
-        # Mix to baseband with accumulated phase for cross-chunk continuity
-        offset_hz           = peak_hz - state.center_hz
-        n                   = len(samples)
-        t_local             = np.arange(n) / state.bw_hz
-        baseband            = (samples * np.exp(
-            -1j * (self._carrier_phase + 2 * np.pi * offset_hz * t_local)
+    # ── multi-channel path (preset configured a channel list) ────────────
+
+    def _process_multi(self, samples, state):
+        sr = int(state.bw_hz)
+        for ch in self._channels:
+            offset_hz = ch.freq_hz - state.center_hz
+            if abs(offset_hz) > sr / 2 * 0.9:      # 10 % guardband
+                continue
+            self._downconvert_and_decode(
+                samples, offset_hz, sr,
+                ch=ch, channel_name=ch.name,
+            )
+        r = self._result()
+        r['channels'] = [ch.name for ch in self._channels]
+        return r
+
+    # ── shared per-channel DSP ───────────────────────────────────────────
+
+    def _downconvert_and_decode(self, samples, offset_hz, sr,
+                                 ch: '_ChannelState', channel_name):
+        """Mix `samples` down by `offset_hz`, resample + RRC-match, slice
+        at symbol centres, differential D8PSK decode, descramble, HDLC
+        frame parse, dedup by CRC, append new messages tagged with
+        `channel_name` (None in single mode).
+
+        All per-channel state (`carrier_phase`, `prev_sym`, `sym_offset`,
+        `descramble_ctx`, `bit_buf`) lives on the passed-in `ch`, so
+        each channel maintains cross-chunk continuity independently."""
+
+        # NCO downconvert with accumulated phase (no per-chunk boundary steps).
+        n           = len(samples)
+        t_local     = np.arange(n) / sr
+        baseband    = (samples * np.exp(
+            -1j * (ch.carrier_phase + 2 * np.pi * offset_hz * t_local)
         )).astype(np.complex128)
-        self._carrier_phase = (
-            self._carrier_phase + 2 * np.pi * offset_hz * n / state.bw_hz
+        ch.carrier_phase = (
+            ch.carrier_phase + 2 * np.pi * offset_hz * n / sr
         ) % (2 * np.pi)
 
-        # Resample to TARGET_SPS × symbol_rate
-        cache_key = int(state.bw_hz)
+        # Resample to TARGET_SPS × symbol_rate; cache by source rate.
+        cache_key = sr
         if cache_key not in self._rrc_cache:
             target_sr = _SYMBOL_RATE * _TARGET_SPS
-            src_sr    = cache_key
-            g         = gcd(target_sr, src_sr)
-            up, down  = target_sr // g, src_sr // g
+            g         = gcd(target_sr, cache_key)
+            up, down  = target_sr // g, cache_key // g
             while up > 500 or down > 500:
                 up   = max(1, up   // 2)
                 down = max(1, down // 2)
@@ -109,54 +181,49 @@ class VDL2Decoder(Decoder):
         try:
             resampled = resample_poly(baseband, up, down)
         except Exception:
-            return self._result()
+            return
 
         matched = np.convolve(resampled, taps, mode='same').astype(np.complex64)
 
-        # Sample at symbol centres.
-        # _sym_offset tracks where in the symbol period we should start so that
-        # each chunk's first sample is exactly 1 period after the previous chunk's
-        # last sample — avoiding the 1-tribit slip that occurs when resample_poly
-        # output length is not a multiple of TARGET_SPS.
-        syms   = matched[self._sym_offset::_TARGET_SPS]
-        n_out  = len(matched)
-        self._sym_offset = (_TARGET_SPS - (n_out - self._sym_offset) % _TARGET_SPS) % _TARGET_SPS
+        # Sample at symbol centres — sym_offset preserves alignment across
+        # chunks (resample_poly output length isn't always a multiple of
+        # TARGET_SPS, which would otherwise cause a one-tribit slip per chunk).
+        syms  = matched[ch.sym_offset::_TARGET_SPS]
+        n_out = len(matched)
+        ch.sym_offset = (_TARGET_SPS - (n_out - ch.sym_offset) % _TARGET_SPS) % _TARGET_SPS
 
         if len(syms) < 2:
-            return self._result()
+            return
 
-        # Prepend previous chunk's last symbol for cross-chunk differential decode
-        if self._prev_sym is not None:
-            syms = np.concatenate([[self._prev_sym], syms])
-        self._prev_sym = syms[-1]
+        if ch.prev_sym is not None:
+            syms = np.concatenate([[ch.prev_sym], syms])
+        ch.prev_sym = syms[-1]
 
-        # D8PSK differential decode → scrambled bits → descramble
+        # D8PSK differential demod → scrambled bits → descramble
         raw_bits = d8psk_demod(syms)
-        new_bits, self._descramble_ctx = descramble(raw_bits, self._descramble_ctx)
-        self._bit_buf.extend(new_bits)
+        new_bits, ch.descramble_ctx = descramble(raw_bits, ch.descramble_ctx)
+        ch.bit_buf.extend(new_bits)
 
-        # HDLC frame detection on accumulated bit buffer
-        buf = list(self._bit_buf)
+        # HDLC frame detection on the per-channel bit buffer
+        buf = list(ch.bit_buf)
         for payload, crc_ok in hdlc_frames(buf):
             self._n_frames += 1
             if not crc_ok:
                 self._n_errors += 1
-                continue                    # count errors but don't display them
+                continue                # count CRC errors but don't display
             key = (len(payload), _crc_key(payload))
             if key in self._seen:
-                continue
+                continue                # dedup across channels — same message
             self._seen.add(key)
             if len(self._seen) > 512:
                 self._seen.clear()
             parsed = parse_avlc(payload)
-            ts     = time.strftime('%H:%M:%S')
             self._messages.append({
-                'ts':     ts,
-                'parsed': parsed,
-                'raw':    payload,
+                'ts':      time.strftime('%H:%M:%S'),
+                'parsed':  parsed,
+                'raw':     payload,
+                'channel': channel_name,
             })
-
-        return self._result()
 
     def _result(self) -> dict:
         return {
@@ -180,18 +247,31 @@ class VDL2Decoder(Decoder):
             return ''
         n  = result.get('n_frames', 0)
         er = result.get('n_errors', 0)
+        chans = result.get('channels')
+        ch_suffix = ' · {} ch'.format(len(chans)) if chans else ''
         if n == 0:
-            return '[VDL2 —] '
-        return '[VDL2 {} frm{} {}err] '.format(
-            n, '' if n == 1 else 's', er)
+            return '[VDL2 —{}] '.format(ch_suffix)
+        return '[VDL2 {} frm{} {}err{}] '.format(
+            n, '' if n == 1 else 's', er, ch_suffix)
 
     # ── Persistence ───────────────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {}
+        if not self._channels:
+            return {}
+        return {
+            'channels': [{'freq': ch.freq_hz, 'name': ch.name}
+                         for ch in self._channels],
+        }
 
     def load_state(self, d: dict) -> None:
-        pass
+        chans = d.get('channels') or []
+        self._channels = [
+            _ChannelState(spec.get('name') or f'{spec["freq"] / 1e6:.3f}',
+                          float(spec['freq']))
+            for spec in chans
+            if isinstance(spec, dict) and 'freq' in spec
+        ]
 
     # ── Full-screen display ───────────────────────────────────────────────
 
@@ -240,14 +320,16 @@ class VDL2Decoder(Decoder):
                 ts     = msg['ts']
                 parsed = msg['parsed']
 
+                channel = msg.get('channel')
+                ch_tag  = '{:<10s} '.format(channel[:10]) if channel else ''
                 if parsed:
                     src  = parsed.get('src', '??:??')
                     text = parsed.get('text', '')
-                    line = '[{}] {} > {}'.format(ts, src, text)
+                    line = '[{}] {}{} > {}'.format(ts, ch_tag, src, text)
                     attr = curses.color_pair(3) | curses.A_BOLD
                 else:
-                    line = '[{}] {} bytes (no AVLC parse)  {}'.format(
-                        ts, len(msg['raw']), msg['raw'][:8].hex(' '))
+                    line = '[{}] {}{} bytes (no AVLC parse)  {}'.format(
+                        ts, ch_tag, len(msg['raw']), msg['raw'][:8].hex(' '))
                     attr = curses.color_pair(3)
 
                 try:
