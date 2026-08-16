@@ -1,9 +1,9 @@
 {
   "version": 1,
-  "_comment": "European ACARS reception — freqhops through the four ICAO-EUR channels: 131.725 MHz (AOA primary + CPDLC), 131.525 / 131.475 / 131.825 MHz (SITA + backups).  Modulation is 2400-baud MSK (mark 2400 Hz / space 1200 Hz) AM-carried on a 25 kHz airband channel.  Bursts are short (100-500 ms) and sporadic, so a busy channel may take a minute of dwell to catch anything; the primary 131.725 gets the longest slot.  Hardware: HackRF at 2 MSPS (its minimum sample rate); RTL-SDR users can drop bw_hz to 250 kSPS.  Antenna must cover ~131 MHz — a broadband donut/loop, a 1/4-wave ground plane cut for ~131 MHz (57 cm radiator + four 63 cm radials at 45° down), or a discone all work.  Do NOT use the SAWbird+NOAA filter here: its passband is 135-139 MHz, which puts 131 MHz 40 dB into the stopband and kills every ACARS transmission before it reaches the SDR.  A wideband LNA (Nooelec LaNA, RTL-SDR Blog LNA, etc.) helps in fringe areas — external gain reduces the load on HackRF's internal amps.  gain_db 20 is a starting point for HackRF with an external LNA in the chain; dial down if the constellation view is a saturated blob (compression), up if bursts barely rise above the waterfall noise floor.",
-  "center_hz": 131725000.0,
+  "_comment": "European ACARS reception — monitors all four ICAO-EUR channels SIMULTANEOUSLY (131.725 primary + 131.525 / 131.475 / 131.825 secondaries) via the ACARS plugin's multi-channel mode.  All four channels sit within 350 kHz, well inside the 2 MHz capture bandwidth, so a single tuning at 131.650 catches every burst with no freqhop dwell delay.  Modulation is 2400-baud MSK (mark 2400 Hz / space 1200 Hz) AM-carried on a 25 kHz airband channel.  Hardware: HackRF at 2 MSPS (its minimum).  Antenna must cover ~131 MHz — 1/4-wave ground plane, discone, or a purpose-built airband antenna.  Do NOT use the SAWbird+NOAA filter (its 135-139 MHz passband kills 131 MHz signals).  A wideband LNA (Nooelec LaNA etc.) helps in fringe areas.  gain_db 25 is a starting point with external LNA; dial down if bursts saturate the constellation view, up if they barely rise above the waterfall noise floor.",
+  "center_hz": 131650000.0,
   "bw_hz": 2000000,
-  "gain_db": 20.0,
+  "gain_db": 25.0,
   "gain_auto": false,
   "iq_corr": true,
   "fm_bw_hz": 100000,
@@ -11,12 +11,11 @@
   "waterfall_active": true,
   "active_decoders": [
     "spectrum",
-    "acars",
-    "freqhop"
+    "constellation",
+    "acars"
   ],
   "plugin_order": [
     "acars",
-    "freqhop",
     "peak_marker",
     "constellation",
     "range-scan",
@@ -31,17 +30,62 @@
     "iridium",
     "iridium_decode",
     "meteor",
+    "freqhop",
     "rtl-tcp-passive",
-    "rtl-tcp-active"
+    "rtl-tcp-active",
+    "airband_recorder",
+    "webserver"
   ],
   "plugin_states": {
-    "freqhop": {
-      "slots": [
-        {"freq_hz": 131725000.0, "dwell_s": 60.0},
-        {"freq_hz": 131525000.0, "dwell_s": 45.0},
-        {"freq_hz": 131475000.0, "dwell_s": 30.0},
-        {"freq_hz": 131825000.0, "dwell_s": 30.0}
+    "acars": {
+      "channels": [
+        {"freq": 131725000, "name": "AOA/CPDLC"},
+        {"freq": 131525000, "name": "SITA"},
+        {"freq": 131475000, "name": "SITA"},
+        {"freq": 131825000, "name": "SITA/AAC"}
       ]
+    },
+    "constellation": {
+      "symrate": 10500,
+      "m": 4,
+      "ref_angle": 0.0,
+      "differential": false,
+      "gating": false,
+      "carrier_lock_on": true
+    },
+    "range-scan": {
+      "scan_freq_min": 0.0,
+      "scan_freq_max": 0.0,
+      "dwell_s": 0.5,
+      "min_snr": 10.0,
+      "sort_snr": false
+    },
+    "modclass": {
+      "threshold": 0.55
+    },
+    "adsb": {
+      "logging_enabled": true
+    },
+    "iridium": {
+      "threshold_db": 12.0,
+      "capture_on": false
+    },
+    "iridium_decode": {
+      "threshold_db": 14.0,
+      "try_both": false
+    },
+    "airband_recorder": {
+      "enabled": false,
+      "output_dir": "airband_recordings",
+      "squelch_dbfs": -55.0,
+      "silence_hangover_s": 2.0,
+      "audio_rate_hz": 8000,
+      "channels": []
+    },
+    "webserver": {
+      "enabled": true,
+      "host": "127.0.0.1",
+      "port": 8080
     }
   }
 }
