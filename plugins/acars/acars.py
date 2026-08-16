@@ -69,6 +69,15 @@ def _resample_ratio(source_sr: int, target_sr: int = _AUDIO_SR):
     return int(target_sr) // g, int(source_sr) // g
 
 
+def _grow_ring(buf: np.ndarray, incoming: np.ndarray, cap: int) -> np.ndarray:
+    """Append `incoming` to `buf` and trim to at most `cap` samples from
+    the tail.  Returns the new buffer (never mutates input)."""
+    out = np.concatenate([buf, incoming])
+    if len(out) > cap:
+        out = out[-cap:]
+    return out
+
+
 def _add_parity(byte: int) -> int:
     b = byte & 0x7F
     return b | (0x80 if bin(b).count('1') % 2 == 0 else 0x00)
@@ -265,6 +274,21 @@ def _decode_frames(bits: list) -> list:
     return frames
 
 
+# ── per-channel runtime state (multi-channel mode) ──────────────────────────
+
+class _ChannelState:
+    """Everything the demod needs to remember between chunks for one
+    tuned ACARS channel.  Instantiated once per configured channel when
+    the plugin runs in multi-channel mode."""
+    __slots__ = ('name', 'freq_hz', 'audio_buf', 'nco_phase')
+
+    def __init__(self, name: str, freq_hz: float):
+        self.name      = name
+        self.freq_hz   = float(freq_hz)
+        self.audio_buf = np.empty(0, dtype=np.float32)   # rolling 12 kHz
+        self.nco_phase = 0.0                              # continuous across chunks
+
+
 # ── Plugin ───────────────────────────────────────────────────────────────────
 
 class AcarsDecoder(Decoder):
@@ -279,23 +303,45 @@ class AcarsDecoder(Decoder):
     def __init__(self):
         self._messages  = deque(maxlen=_MAX_FRAMES)
         self._seen      = set()                          # dedup: (reg, flight, text_prefix)
-        self._audio_buf = np.empty(0, dtype=np.float32) # rolling 12 kHz audio ring buffer
+        # Single-channel mode uses this buffer (backward compat: decode at
+        # whatever state.center_hz is tuned to, same as before multi-channel).
+        self._audio_buf = np.empty(0, dtype=np.float32)  # rolling 12 kHz
+        # Multi-channel mode: non-empty list of _ChannelState.  Configured
+        # via preset plugin_states.acars.channels — see load_state().  When
+        # empty, plugin behaves exactly as before this refactor.
+        self._channels: list = []
 
     def start(self, state: AppState) -> None:
         self._messages.clear()
         self._seen.clear()
         self._audio_buf = np.empty(0, dtype=np.float32)
+        for ch in self._channels:
+            ch.audio_buf = np.empty(0, dtype=np.float32)
+            ch.nco_phase = 0.0
 
     def stop(self) -> None:
         self._messages.clear()
         self._seen.clear()
         self._audio_buf = np.empty(0, dtype=np.float32)
+        for ch in self._channels:
+            ch.audio_buf = np.empty(0, dtype=np.float32)
 
     # ── process ───────────────────────────────────────────────────────────────
 
     def process(self, samples: np.ndarray, state: AppState,
                 results: dict = None, sdr=None) -> dict:
+        # Multi-channel mode wins when the preset configured a channel list —
+        # each configured freq gets its own downconvert + audio buffer + FSK
+        # + parser, all fed from the same one-chunk IQ.  Freqhop is no
+        # longer needed: as long as every channel falls inside the capture
+        # bandwidth (state.bw_hz), all channels are monitored simultaneously.
+        if self._channels:
+            return self._process_multi(samples, state, sdr)
+        return self._process_single(samples, state, sdr)
 
+    # ── single-channel path (original behaviour, unchanged semantics) ────────
+
+    def _process_single(self, samples, state, sdr):
         # ── Stage 0: shift to tuned frequency ────────────────────────────────
         # For live SDR the hardware is already tuned so the ACARS carrier is
         # at DC and offset == 0.  For a file-replay device the IQ is fixed at
@@ -308,46 +354,101 @@ class AcarsDecoder(Decoder):
                 t = np.arange(len(samples), dtype=np.float32) / state.bw_hz
                 samples = (samples * np.exp(-2j * np.pi * offset_hz * t)).astype(np.complex64)
 
-        # ── Stage 1: bandwidth-limit IQ to ~50 kHz around tuning centre ──────
-        # Wide enough to keep the ACARS carrier even with a few kHz of
-        # tuning offset, narrow enough to reject adjacent airband channels
-        # and stronger signals elsewhere in a wide-band source recording.
-        up1, down1 = _resample_ratio(state.bw_hz, _IQ_STAGE_SR)
-        iq_narrow  = resample_poly(samples, up1, down1).astype(np.complex64)
+        audio_12k = self._iq_to_env_12k(samples, state.bw_hz)
+        self._audio_buf = _grow_ring(self._audio_buf, audio_12k, _AUDIO_BUF_MAX)
 
-        # ── Stage 2: AM envelope on the narrow-band IQ ───────────────────────
-        audio = np.abs(iq_narrow).astype(np.float32)
-        audio -= float(np.mean(audio))    # remove DC (carrier)
-
-        # ── Stage 3: resample envelope to AUDIO_SR for the FSK correlators ───
-        up2, down2 = _resample_ratio(_IQ_STAGE_SR, _AUDIO_SR)
-        audio_12k  = resample_poly(audio, up2, down2).astype(np.float32)
-        self._audio_buf = np.concatenate([self._audio_buf, audio_12k])
-        if len(self._audio_buf) > _AUDIO_BUF_MAX:
-            self._audio_buf = self._audio_buf[-_AUDIO_BUF_MAX:]
-
-        # Need at least 0.5 s of audio before trying to decode (~6000 samples).
         if len(self._audio_buf) < _AUDIO_SR // 2:
             return {'messages': list(self._messages), 'n_frames': len(self._messages)}
 
-        # ── HPF + AGC on the ring buffer before FSK demod ────────────────────
-        # HPF removes DC + slow burst-envelope shape that otherwise biases the
-        # FSK correlator's decision.  AGC normalises by short-term RMS with a
-        # floor so quiet stretches (pure noise) don't get amplified into
-        # spurious symbols; the FSK correlator's balance is what carries the
-        # bit information, not absolute audio level.
-        audio_bp   = sosfilt(_HPF_SOS, self._audio_buf).astype(np.float32)
-        win_agc    = _AUDIO_SR // 50    # 20 ms
-        kern_agc   = np.ones(win_agc, dtype=np.float32) / win_agc
-        rms_local  = np.sqrt(np.convolve(audio_bp * audio_bp, kern_agc, mode='same') + 1e-20)
-        # Gate: gain = 1/rms when rms is comfortably above noise floor, else 1.
-        rms_floor  = max(float(np.median(rms_local)) * 1.5, 1e-6)
-        gain       = np.where(rms_local > rms_floor, 1.0 / rms_local, 1.0).astype(np.float32)
-        audio_agc  = (audio_bp * gain).astype(np.float32)
+        new_count = self._decode_and_absorb(self._audio_buf, channel_name=None)
+        return {
+            'messages':  list(self._messages),
+            'n_frames':  len(self._messages),
+            'new':       new_count,
+        }
+
+    # ── multi-channel path (preset configured a channel list) ────────────────
+
+    def _process_multi(self, samples, state, sdr):
+        sr = int(state.bw_hz)
+        file_center  = getattr(sdr, '_file_center_hz', None)
+        rf_center_hz = file_center if file_center is not None else state.center_hz
+
+        new_count       = 0
+        active_channels = []
+        n = len(samples)
+        for ch in self._channels:
+            offset = ch.freq_hz - rf_center_hz
+            if abs(offset) > sr / 2 * 0.9:      # 10 % guardband
+                continue
+
+            # Continuous-phase NCO downconvert — same trick as the FM DC
+            # blocker and the airband_recorder, keeps phase alignment
+            # across chunk boundaries so we don't insert per-chunk clicks.
+            t = np.arange(n, dtype=np.float64) / sr
+            phase = ch.nco_phase + 2.0 * np.pi * offset * t
+            ch.nco_phase = (ch.nco_phase + 2.0 * np.pi * offset * n / sr) \
+                           % (2.0 * np.pi)
+            mixed = (samples * np.exp(-1j * phase)).astype(np.complex64)
+
+            audio_12k = self._iq_to_env_12k(mixed, sr)
+            ch.audio_buf = _grow_ring(ch.audio_buf, audio_12k, _AUDIO_BUF_MAX)
+            if len(ch.audio_buf) < _AUDIO_SR // 2:
+                continue
+
+            new_count += self._decode_and_absorb(ch.audio_buf, channel_name=ch.name)
+            active_channels.append(ch.name)
+
+        return {
+            'messages':      list(self._messages),
+            'n_frames':      len(self._messages),
+            'new':           new_count,
+            'channels':      [ch.name for ch in self._channels],
+            'active':        active_channels,
+        }
+
+    # ── shared DSP stages ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _iq_to_env_12k(samples: np.ndarray, source_sr: int) -> np.ndarray:
+        """IQ (at source_sr, centred on the desired channel) → 12 kHz AM
+        envelope samples, DC-detrended.  Two resampling passes with a
+        narrowband IF stage in between; same as before, factored out."""
+        # Stage 1: narrow to ~50 kHz around DC.  Wide enough for a few kHz
+        # of tuning offset, narrow enough to reject the adjacent 25 kHz
+        # airband channel.
+        up1, down1 = _resample_ratio(source_sr, _IQ_STAGE_SR)
+        iq_narrow  = resample_poly(samples, up1, down1).astype(np.complex64)
+        # Stage 2: AM envelope, remove the DC carrier.
+        audio = np.abs(iq_narrow).astype(np.float32)
+        audio -= float(np.mean(audio))
+        # Stage 3: resample envelope to the FSK correlator's rate.
+        up2, down2 = _resample_ratio(_IQ_STAGE_SR, _AUDIO_SR)
+        return resample_poly(audio, up2, down2).astype(np.float32)
+
+    def _decode_and_absorb(self, audio_buf: np.ndarray,
+                           channel_name) -> int:
+        """HPF → AGC → FSK demod → try 5 clock phases → parse frames →
+        dedup against self._seen → prepend new frames to self._messages
+        (tagged with `channel_name` if given).  Returns count of *new*
+        frames added this call."""
+        # HPF removes DC + slow burst-envelope shape that otherwise biases
+        # the FSK correlator's decision.  AGC normalises by short-term
+        # RMS with a floor so quiet stretches (pure noise) don't get
+        # amplified into spurious symbols; the FSK correlator's balance
+        # is what carries the bit information, not absolute audio level.
+        audio_bp  = sosfilt(_HPF_SOS, audio_buf).astype(np.float32)
+        win_agc   = _AUDIO_SR // 50    # 20 ms
+        kern_agc  = np.ones(win_agc, dtype=np.float32) / win_agc
+        rms_local = np.sqrt(
+            np.convolve(audio_bp * audio_bp, kern_agc, mode='same') + 1e-20)
+        rms_floor = max(float(np.median(rms_local)) * 1.5, 1e-6)
+        gain      = np.where(rms_local > rms_floor,
+                             1.0 / rms_local, 1.0).astype(np.float32)
+        audio_agc = (audio_bp * gain).astype(np.float32)
 
         decision = _fsk_demod(audio_agc)
 
-        # ── Try all 5 clock phases, collect unique frames ─────────────────────
         new_count = 0
         for phase in range(_SPB):
             bits   = _sample_bits(decision, phase)
@@ -356,21 +457,17 @@ class AcarsDecoder(Decoder):
                 key = (f['reg'], f['flight'], f['text'][:20])
                 if key in self._seen:
                     continue
-                # Only mark confirmed frames as seen; BCS-error frames are shown
-                # but don't block a later clean decode of the same message.
+                # Only lock in confirmed (BCS OK) frames — BCS-error frames
+                # are shown but don't block a later clean decode.
                 if f['bcs_ok']:
                     self._seen.add(key)
                     if len(self._seen) > 512:
                         self._seen.pop()
-                f['ts'] = time.strftime('%H:%M:%S')
+                f['ts']      = time.strftime('%H:%M:%S')
+                f['channel'] = channel_name   # None in single-channel mode
                 self._messages.appendleft(f)
                 new_count += 1
-
-        return {
-            'messages':  list(self._messages),
-            'n_frames':  len(self._messages),
-            'new':       new_count,
-        }
+        return new_count
 
     # ── key handling ──────────────────────────────────────────────────────────
 
@@ -387,6 +484,9 @@ class AcarsDecoder(Decoder):
         if not result:
             return ''
         n = result.get('n_frames', 0)
+        chans = result.get('channels')
+        if chans:
+            return '[ACARS {} msg · {} ch] '.format(n, len(chans))
         return '[ACARS {} msg] '.format(n)
 
     # ── full-view tab ─────────────────────────────────────────────────────────
@@ -423,7 +523,12 @@ class AcarsDecoder(Decoder):
             text   = msg.get('text', '')
             bcs_ok = msg.get('bcs_ok', False)
 
-            prefix   = '[{}] {:7s} {:6s}  '.format(ts, reg, flight)
+            channel  = msg.get('channel')      # None in single-channel mode
+            if channel:
+                prefix = '[{}] {:9s} {:7s} {:6s}  '.format(
+                    ts, channel[:9], reg, flight)
+            else:
+                prefix = '[{}] {:7s} {:6s}  '.format(ts, reg, flight)
             line     = prefix + text
             if len(line) > cols - 4:
                 line = line[:cols - 7] + '…'
@@ -441,7 +546,21 @@ class AcarsDecoder(Decoder):
     # ── state persistence ─────────────────────────────────────────────────────
 
     def save_state(self) -> dict:
-        return {}
+        if not self._channels:
+            return {}
+        return {
+            'channels': [{'freq': ch.freq_hz, 'name': ch.name}
+                         for ch in self._channels],
+        }
 
     def load_state(self, d: dict) -> None:
-        pass
+        chans = d.get('channels') or []
+        # Rebuild the channel list from the preset.  Any prior per-channel
+        # audio buffers are discarded; frames already decoded stay in
+        # _messages (we never blow those away except on 'r' / stop()).
+        self._channels = [
+            _ChannelState(spec.get('name') or f'{spec["freq"]/1e6:.3f}',
+                          float(spec['freq']))
+            for spec in chans
+            if isinstance(spec, dict) and 'freq' in spec
+        ]
