@@ -1,7 +1,7 @@
 {
   "version": 1,
-  "_comment": "VDL Mode 2 reception on 136.900 MHz — one of the common European VDL2 channels (also used: 136.775, 136.825, 136.875, 136.925, 136.975).  D8PSK at 10.5 kSym/s ≈ 31.5 kbit/s, ~24 kHz wide bursts, HDLC/AVLC framing.  Same hardware as the meteor preset works well here: any 137 MHz antenna + SAWbird+NOAA (its passband easily covers 136.9).  bw_hz 2 MHz is the HackRF minimum; the plugin decimates to 8 samples/symbol internally.  Gain 32 is a starting point — dial up if the constellation-view donut is faint, dial down if it looks like a chunky blob (compression).",
-  "center_hz": 136900000.0,
+  "_comment": "VDL Mode 2 reception — monitors ALL SEVEN European VDL2 channels SIMULTANEOUSLY (136.700, 136.725, 136.775, 136.800, 136.900, 136.925, 136.975 MHz) via the vdl2 plugin's multi-channel mode.  All seven channels sit within 275 kHz, well inside the 2 MHz capture bandwidth, so a single tuning at 136.837 catches every burst on every channel — no missed messages.  D8PSK at 10.5 kSym/s ≈ 31.5 kbit/s, ~24 kHz wide bursts, HDLC/AVLC framing.  Antenna: any 137 MHz antenna + SAWbird+NOAA passes this range cleanly.  bw_hz 2 MHz is the HackRF minimum.  Gain 32 is a starting point — dial up if the constellation-view donut is faint, dial down if it looks like a chunky blob (compression).",
+  "center_hz": 136837500.0,
   "bw_hz": 2000000,
   "gain_db": 32.0,
   "gain_auto": false,
@@ -45,6 +45,17 @@
       "ref_angle": 0.0,
       "differential": true,
       "gating": true
+    },
+    "vdl2": {
+      "channels": [
+        {"freq": 136700000, "name": "CPDLC-1"},
+        {"freq": 136725000, "name": "AOC-A"},
+        {"freq": 136775000, "name": "AOC-B"},
+        {"freq": 136800000, "name": "AOC-C"},
+        {"freq": 136900000, "name": "AOC-D"},
+        {"freq": 136925000, "name": "AOC-E"},
+        {"freq": 136975000, "name": "AOC-F"}
+      ]
     }
   }
 }
