@@ -377,6 +377,24 @@ _TILE_PROVIDERS = {
         'credit':     '© OpenStreetMap',
         'max_zoom':   19,
     },
+    'osm-de': {
+        'url':        'https://{s}.tile.openstreetmap.de/{z}/{x}/{y}.png',
+        'subdomains': 'abc',
+        'credit':     '© OpenStreetMap Deutschland',
+        'max_zoom':   18,
+    },
+    'opentopomap': {
+        'url':        'https://{s}.tile.opentopomap.org/{z}/{x}/{y}.png',
+        'subdomains': 'abc',
+        'credit':     '© OpenStreetMap · SRTM | © OpenTopoMap (CC-BY-SA)',
+        'max_zoom':   17,
+    },
+    'wikimedia': {
+        'url':        'https://maps.wikimedia.org/osm-intl/{z}/{x}/{y}.png',
+        'subdomains': '',
+        'credit':     'Wikimedia maps · © OpenStreetMap',
+        'max_zoom':   19,
+    },
     # NOTE: 'versatiles' entry deliberately omitted.  VersaTiles' public
     # server at tiles.versatiles.org serves *vector* MVT / pbf tiles,
     # which Cesium's UrlTemplateImageryProvider cannot render — it only
@@ -396,7 +414,10 @@ _TILE_PROVIDERS = {
         'max_zoom':   19,
     },
 }
-_DEFAULT_TILES = 'cartodb'
+# Default to Esri satellite — the only no-key, no-ToS-friction raster
+# provider in this list that doesn't send the user's IP to a project
+# whose terms discourage app embedding (OSM) or is region-locked.
+_DEFAULT_TILES = 'esri-satellite'
 
 # Fields whose change triggers a new CSV row.  Speed is split into three
 # columns (gs / ias / tas) so a speed-type switch alone does NOT invalidate
@@ -861,6 +882,13 @@ class AdsbDecoder(Decoder):
         q         = (query.get('q') or '').strip().upper()
         is_global = str(query.get('global') or '').lower() in ('1', 'true', 'yes', 'on')
 
+        # Tile-provider switch from the web UI's layer dropdown.  Silently
+        # ignore unknown names so a stale browser can't put the plugin
+        # into a broken state.
+        tiles_pick = (query.get('tiles') or '').strip()
+        if tiles_pick and tiles_pick in _TILE_PROVIDERS:
+            self._web_tiles = tiles_pick
+
         if is_global:
             from_ts = None
             to_ts   = None
@@ -955,6 +983,8 @@ class AdsbDecoder(Decoder):
             'max_range_km':   round(max_range_km, 1) if has_loc else None,
             'farthest':       farthest,
             'web_tiles':      self._resolve_web_tiles(),
+            'tile_providers': [{'name': n, 'credit': spec.get('credit', '')}
+                               for n, spec in _TILE_PROVIDERS.items()],
         }
 
     def _read_log_window(self, from_iso: str = None, to_iso: str = None) -> dict:

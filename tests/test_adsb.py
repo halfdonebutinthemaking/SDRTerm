@@ -434,8 +434,8 @@ class TestWebJsonSearch:
 
 class TestTileProviderConfig:
     """The globe's basemap tile URL is configurable via the preset —
-    either by name (cartodb / osm / versatiles / cartodb-dark) or as a
-    full custom dict."""
+    either by name (cartodb / osm / wikimedia / …) or as a full custom
+    dict — and switchable at runtime from the web UI via ?tiles=<name>."""
 
     class _S:
         bw_hz = 2_000_000
@@ -446,10 +446,10 @@ class TestTileProviderConfig:
         d.start(self._S())
         return d
 
-    def test_default_provider_is_cartodb(self, tmp_path):
+    def test_default_provider_is_esri_satellite(self, tmp_path):
         payload = self._mk(tmp_path).web_json()
-        assert payload['web_tiles']['name'] == 'cartodb'
-        assert 'cartocdn' in payload['web_tiles']['url']
+        assert payload['web_tiles']['name'] == 'esri-satellite'
+        assert 'arcgisonline' in payload['web_tiles']['url']
 
     def test_named_preset_osm(self, tmp_path):
         d = self._mk(tmp_path)
@@ -458,29 +458,28 @@ class TestTileProviderConfig:
         assert payload['web_tiles']['name'] == 'osm'
         assert 'openstreetmap' in payload['web_tiles']['url']
 
-    def test_named_preset_esri_satellite(self, tmp_path):
+    def test_named_preset_cartodb(self, tmp_path):
         d = self._mk(tmp_path)
-        d.load_state({'web_tiles': 'esri-satellite'})
+        d.load_state({'web_tiles': 'cartodb'})
         payload = d.web_json()
-        assert payload['web_tiles']['name'] == 'esri-satellite'
-        assert 'arcgisonline' in payload['web_tiles']['url']
+        assert payload['web_tiles']['name'] == 'cartodb'
+        assert 'cartocdn' in payload['web_tiles']['url']
 
-    def test_versatiles_name_falls_back(self, tmp_path):
+    def test_versatiles_name_falls_back_to_default(self, tmp_path):
         # VersaTiles' public endpoint is vector-only and cannot be rendered
-        # by Cesium's UrlTemplateImageryProvider — the 'versatiles' shortcut
-        # was removed to avoid a blank map.  Requesting it should silently
-        # fall back to the default (cartodb) instead of returning a URL
+        # by Cesium's UrlTemplateImageryProvider.  Requesting it must fall
+        # back to the default (esri-satellite) instead of returning a URL
         # that would produce no imagery.
         d = self._mk(tmp_path)
         d.load_state({'web_tiles': 'versatiles'})
         payload = d.web_json()
-        assert payload['web_tiles']['name'] == 'cartodb'
+        assert payload['web_tiles']['name'] == 'esri-satellite'
 
     def test_unknown_name_falls_back_to_default(self, tmp_path):
         d = self._mk(tmp_path)
         d.load_state({'web_tiles': 'not-a-provider'})
         payload = d.web_json()
-        assert payload['web_tiles']['name'] == 'cartodb'
+        assert payload['web_tiles']['name'] == 'esri-satellite'
 
     def test_custom_dict_wins(self, tmp_path):
         d = self._mk(tmp_path)
@@ -495,13 +494,52 @@ class TestTileProviderConfig:
         assert payload['web_tiles']['max_zoom'] == 12
 
     def test_save_state_omits_default(self, tmp_path):
-        d = self._mk(tmp_path)     # default cartodb
+        d = self._mk(tmp_path)     # default esri-satellite
         assert 'web_tiles' not in d.save_state()
 
     def test_save_state_includes_non_default(self, tmp_path):
         d = self._mk(tmp_path)
-        d.load_state({'web_tiles': 'versatiles'})
-        assert d.save_state()['web_tiles'] == 'versatiles'
+        d.load_state({'web_tiles': 'osm'})
+        assert d.save_state()['web_tiles'] == 'osm'
+
+    # ── layer-switcher widget ────────────────────────────────────────────
+
+    def test_tile_providers_list_in_payload(self, tmp_path):
+        """Web UI's dropdown needs the full provider list from the server
+        on every poll so it can stay authoritative."""
+        payload = self._mk(tmp_path).web_json()
+        assert 'tile_providers' in payload
+        names = {p['name'] for p in payload['tile_providers']}
+        for expected in ('cartodb', 'osm', 'osm-de', 'opentopomap',
+                         'wikimedia', 'esri-satellite'):
+            assert expected in names, f'missing provider: {expected}'
+        for p in payload['tile_providers']:
+            assert 'credit' in p   # tooltip text in the <option>
+
+    def test_tiles_query_param_switches_provider(self, tmp_path):
+        d = self._mk(tmp_path)
+        payload = d.web_json(query={'tiles': 'osm'})
+        assert d._web_tiles == 'osm'
+        assert payload['web_tiles']['name'] == 'osm'
+
+    def test_tiles_query_param_persists_across_calls(self, tmp_path):
+        """One ?tiles=X call sets the server-side pick; subsequent plain
+        polls keep returning that provider until another switch arrives."""
+        d = self._mk(tmp_path)
+        d.web_json(query={'tiles': 'wikimedia'})
+        payload = d.web_json()
+        assert payload['web_tiles']['name'] == 'wikimedia'
+
+    def test_tiles_query_param_unknown_ignored(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.web_json(query={'tiles': 'bogus'})
+        assert d._web_tiles == 'esri-satellite'   # default, untouched
+
+    def test_tiles_query_param_empty_ignored(self, tmp_path):
+        d = self._mk(tmp_path)
+        d.load_state({'web_tiles': 'osm'})
+        d.web_json(query={'tiles': ''})
+        assert d._web_tiles == 'osm'   # not clobbered
 
 
 class TestLogWindowRead:

@@ -93,6 +93,13 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         _load_preset(_deferred, state, list(registry.values()))
     # Discard any preset-loaded decoder names that don't exist in this registry
     state.active_decoders = (state.active_decoders & set(registry.keys())) | {'spectrum'}
+    # Offline mode: auto-enable the web server so the user has something to
+    # work with, and discard any other preset-loaded decoders (they can't
+    # usefully run without live samples).
+    if sdr.is_offline:
+        state.active_decoders = {'spectrum'}
+        if 'webserver' in registry:
+            state.active_decoders.add('webserver')
     registry['spectrum'].start(state)
     # Start any additional decoders loaded from a preset
     for _name in list(state.active_decoders):
@@ -220,7 +227,11 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
         t.start()
         reader[0] = t
 
-    _start_reader()
+    # No live IQ source in offline mode — don't spin up the reader at all;
+    # cancel_read_async() during shutdown would try to close a transfer that
+    # was never opened.
+    if not sdr.is_offline:
+        _start_reader()
 
     spec_chunks: list = []
     spec_count  = 0
@@ -304,6 +315,12 @@ def _curses_main(stdscr: curses.window, sdr: Device, state: AppState) -> None:
                 spec_chunks.clear()
                 spec_count = 0
                 wf_rows.append(results['spectrum']['mags_db'].copy())
+                draw(stdscr, state, results, registry, tab_plugins, all_plugins, sdr, wf_rows)
+                last_draw = now
+            elif sdr.is_offline and now - last_draw >= REFRESH_S:
+                # Offline mode: no samples ever arrive, but the UI still
+                # needs periodic refreshes (status bar, flash messages,
+                # web-plugin status snapshots) so draw unconditionally.
                 draw(stdscr, state, results, registry, tab_plugins, all_plugins, sdr, wf_rows)
                 last_draw = now
             elif key == -1:
@@ -422,7 +439,12 @@ def main() -> None:
         else:
             sdr = open_first_device()
             if sdr is None:
-                error_msg = 'no device found'
+                # No hardware detected and nothing to replay — fall back to
+                # offline mode so the user can still open the web server and
+                # inspect data captured in previous sessions.
+                from devices._null import NullDevice
+                sdr = NullDevice()
+                sdr.open()
         if error_msg is None:
             curses.wrapper(lambda stdscr: _curses_main(stdscr, sdr, state))
     finally:

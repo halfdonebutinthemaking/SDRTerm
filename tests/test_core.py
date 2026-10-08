@@ -227,3 +227,17 @@ class TestToggleDecoder:
         state.bw_hz = 2_400_000
         toggle_decoder('light', {'light': p}, state, fake_sdr)
         assert state.bw_hz == 2_400_000
+
+    def test_offline_refuses_non_webserver(self, state, fake_sdr):
+        fake_sdr.is_offline = True
+        p = self._make_plugin('acars')
+        ok = toggle_decoder('acars', {'acars': p}, state, fake_sdr)
+        assert ok is False
+        assert 'acars' not in state.active_decoders
+
+    def test_offline_allows_webserver(self, state, fake_sdr):
+        fake_sdr.is_offline = True
+        p = self._make_plugin('webserver')
+        ok = toggle_decoder('webserver', {'webserver': p}, state, fake_sdr)
+        assert ok is True
+        assert 'webserver' in state.active_decoders

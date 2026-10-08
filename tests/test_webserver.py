@@ -148,7 +148,7 @@ class TestAdsbIntegration:
         assert set(payload.keys()) == {'aircraft', 'n_bursts', 'n_crc_ok',
                                        'logging', 'window', 'matched_window',
                                        'receiver', 'max_range_km', 'farthest',
-                                       'web_tiles'}
+                                       'web_tiles', 'tile_providers'}
         assert isinstance(payload['aircraft'], list)
         assert payload['n_bursts'] == 0
         assert payload['logging'] in (True, False)
@@ -194,9 +194,10 @@ class TestAdsbIntegration:
         # Plane silhouette as tangent-to-sphere polygon (rotates with the globe)
         assert 'PLANE_SVG' in html
         assert 'billboard' in html
-        # Swappable tile provider
+        # Swappable tile provider + runtime layer-switcher widget
         assert 'ensureTilesMatch' in html
-        assert 'tiles-label'      in html
+        assert 'tiles-select'     in html
+        assert 'syncTilesSelect'  in html
 
     def test_adsb_static_dir_resolves(self, server, tmp_path):
         from plugins.adsb.adsb import AdsbDecoder

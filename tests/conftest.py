@@ -23,6 +23,7 @@ def fake_sdr():
     sdr.freq_max = 1_766_000_000.0
     sdr.status_text.return_value = ''
     sdr.handle_key.return_value = False
+    sdr.is_offline = False
     return sdr
 
 

@@ -224,3 +224,82 @@ class TestHackRFDriver:
     def test_open_returns_false_without_hardware(self):
         from devices.hackrf import HackRFDevice
         assert HackRFDevice().open() is False
+
+
+# ── NullDevice (offline fallback) ─────────────────────────────────────────────
+
+class TestNullDevice:
+    def test_is_offline_true(self):
+        from devices._null import NullDevice
+        assert NullDevice().is_offline is True
+
+    def test_open_returns_true(self):
+        from devices._null import NullDevice
+        assert NullDevice().open() is True
+
+    def test_properties_roundtrip(self):
+        from devices._null import NullDevice
+        d = NullDevice()
+        d.open()
+        d.sample_rate = 1_024_000
+        d.center_freq = 100e6
+        d.gain = 20.0
+        assert d.sample_rate == 1_024_000
+        assert d.center_freq == pytest.approx(100e6)
+        assert d.gain == 20.0
+
+    def test_read_async_unblocks_on_cancel(self):
+        """read_samples_async blocks until cancel_read_async fires — mirrors
+        the real-device shutdown contract main.py relies on."""
+        import threading
+        from devices._null import NullDevice
+        d = NullDevice()
+        d.open()
+        done = threading.Event()
+
+        def _reader():
+            d.read_samples_async(lambda s, c: None, num_samples=1024)
+            done.set()
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        assert not done.wait(0.05)   # should still be blocked
+        d.cancel_read_async()
+        assert done.wait(1.0)        # unblocks promptly
+
+    def test_not_discovered_by_load_devices(self):
+        """Underscore-prefixed modules must be skipped by the discovery scan,
+        otherwise open_first_device() would always pick NullDevice first."""
+        from devices import load_devices
+        names = {d.name for d in load_devices()}
+        assert 'offline' not in names
+
+    def test_main_falls_back_to_null_device(self, monkeypatch):
+        """When no --file / --d is given and auto-detect fails, main() must
+        pick NullDevice instead of printing 'no device found'."""
+        import curses
+        import sys
+
+        import main as main_mod
+
+        monkeypatch.setattr(main_mod, 'open_first_device', lambda: None)
+
+        captured = {}
+
+        def fake_wrapper(fn):
+            for cell in (fn.__closure__ or ()):
+                try:
+                    v = cell.cell_contents
+                except ValueError:
+                    continue
+                if hasattr(v, 'is_offline') and getattr(v, 'is_offline', False):
+                    captured['sdr'] = v
+                    return
+
+        monkeypatch.setattr(curses, 'wrapper', fake_wrapper)
+        monkeypatch.setattr(sys, 'argv', ['sdrterm'])
+
+        main_mod.main()
+        assert 'sdr' in captured, 'main() did not reach curses.wrapper with a device'
+        assert captured['sdr'].is_offline is True
+        assert captured['sdr'].name == 'offline'

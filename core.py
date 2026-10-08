@@ -166,6 +166,9 @@ class Device:
     supported_bandwidths: list  = BW_STEPS
     freq_min:            float = 0.0
     freq_max:            float = 0.0
+    # True → no live IQ source; UI opens for inspection-only tasks
+    # (e.g. querying captured ADS-B / meteor logs via the web server).
+    is_offline:          bool  = False
 
     def open(self) -> bool:             return False
     def close(self) -> None:            pass
@@ -191,7 +194,11 @@ def _nearest_bw(rate: int, supported: list) -> int:
     return max(supported)
 
 
-def toggle_decoder(name: str, registry: dict, state: AppState, sdr) -> None:
+def toggle_decoder(name: str, registry: dict, state: AppState, sdr) -> bool:
+    """Enable/disable a decoder. Returns False if the toggle was refused
+    (currently: offline mode only allows the web server to be toggled)."""
+    if getattr(sdr, 'is_offline', False) and name not in ('webserver', 'spectrum'):
+        return False
     if name in state.active_decoders:
         registry[name].stop()
         state.active_decoders.discard(name)
@@ -203,3 +210,4 @@ def toggle_decoder(name: str, registry: dict, state: AppState, sdr) -> None:
             sdr.sample_rate = new_bw
         registry[name].start(state)
         state.active_decoders.add(name)
+    return True

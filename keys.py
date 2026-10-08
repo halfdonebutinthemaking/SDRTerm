@@ -35,7 +35,13 @@ def handle_keys(key: int, stdscr, state: AppState, registry: dict,
         elif key == ord(' '):
             if 0 <= state.menu_cursor < len(all_plugins):
                 name = all_plugins[state.menu_cursor].name
-                state.menu_active ^= {name}       # toggle membership
+                # Offline mode: web server is the only toggleable plugin;
+                # everything else needs live samples to be meaningful.
+                if getattr(sdr, 'is_offline', False) and name != 'webserver':
+                    state.flash_msg   = 'offline mode: only webserver can be toggled'
+                    state.flash_until = time.monotonic() + 2.0
+                else:
+                    state.menu_active ^= {name}       # toggle membership
         elif key == curses.KEY_UP:
             state.menu_cursor = max(0, state.menu_cursor - 1)
         elif key == curses.KEY_DOWN:
