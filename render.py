@@ -13,12 +13,81 @@ _WF_CHARS = ' ░▒▓█'
 _WF_N     = len(_WF_CHARS)
 
 
+def _draw_offline(screen_obj: curses.window, state: AppState,
+                  results: dict, registry: dict,
+                  all_plugins: list, sdr: Device) -> None:
+    """Body for offline mode: no live IQ, just a banner pointing at the
+    web server plus the standard menu / preset modals and footer so the
+    user can enable it, change its port via save-state, and quit."""
+    ROWS, COLS = screen_obj.getmaxyx()
+    screen_obj.erase()
+
+    # process() never runs offline (no sample callback), so pull the
+    # live URL from the plugin instance rather than its result dict.
+    web_url = None
+    web = registry.get('webserver')
+    if web is not None and getattr(web, '_server', None) is not None:
+        web_url = 'http://{}:{}/'.format(getattr(web, '_host', '127.0.0.1'),
+                                         getattr(web, '_port', 8080))
+
+    lines = ['SDRTerm — OFFLINE']
+    if web_url:
+        lines.append('web server: ' + web_url)
+        lines.append('')
+        lines.append('Open the URL above to inspect data captured')
+        lines.append('in previous sessions (ADS-B log, Meteor pass cache, …).')
+    else:
+        lines.append('web server: not running (port in use?)')
+    lines.append('')
+    lines.append('No SDR hardware detected and no --file given.')
+    lines.append('Restart with  --d NAME  or  --file PATH  for live/replay mode.')
+
+    y0 = max(1, (ROWS - len(lines)) // 2)
+    for i, text in enumerate(lines):
+        try:
+            x = max(0, (COLS - len(text)) // 2)
+            attr = curses.A_BOLD if i == 0 else curses.A_DIM
+            screen_obj.addstr(y0 + i, x, text[:COLS - 1], attr)
+        except curses.error:
+            pass
+
+    # Footer: keep p=plugins / q=quit discoverable.
+    try:
+        if state.freq_input is not None:
+            prompt = 'Freq: {}_'.format(state.freq_input)
+            screen_obj.addstr(ROWS - 1, 0, prompt, curses.A_BOLD)
+            screen_obj.addstr(ROWS - 1, len(prompt), '  ret=ok  esc=cancel')
+        else:
+            lhs = '[offline]'
+            screen_obj.addstr(ROWS - 1, 0, lhs, curses.A_BOLD)
+            rhs = '  '.join(['tab=webserver', 'p=plugins', 'q=quit'])
+            screen_obj.addstr(ROWS - 1, COLS - len(rhs) - 1, rhs)
+    except curses.error:
+        pass
+
+    if state.menu_active is not None:
+        _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS, sdr)
+    if state.preset_menu is not None:
+        _draw_preset_menu(screen_obj, state, ROWS, COLS)
+    if time.monotonic() < state.flash_until and state.flash_msg:
+        msg = '  {}  '.format(state.flash_msg)
+        x   = max(0, (COLS - len(msg)) // 2)
+        try:
+            screen_obj.addstr(ROWS - 1, x, msg[:COLS - x],
+                              curses.A_REVERSE | curses.A_BOLD)
+        except curses.error:
+            pass
+    screen_obj.refresh()
+
+
 def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
-                      all_plugins: list, ROWS: int, COLS: int) -> None:
+                      all_plugins: list, ROWS: int, COLS: int,
+                      sdr: 'Device' = None) -> None:
     if not all_plugins:
         return
     hint1 = ' spc=toggle  ret=apply  esc=cancel '
     hint2 = ' </>=reorder pipeline   letter=direct toggle '
+    offline = sdr is not None and getattr(sdr, 'is_offline', False)
     # Extra 4 chars per row for the key column: "[x] j  #1  ..."
     min_w = max(len(hint1) + 4, len(hint2) + 4,
                 max(len(p.name) for p in all_plugins) + 16, 40)
@@ -29,12 +98,20 @@ def _draw_plugin_menu(screen_obj: curses.window, state: AppState,
     try:
         for r in range(h):
             screen_obj.addstr(y0 + r, x0, ' ' * w)
-        screen_obj.addstr(y0,     x0 + 2, ' Plugins ', curses.A_BOLD)
+        title = ' Plugins — OFFLINE ' if offline else ' Plugins '
+        screen_obj.addstr(y0,     x0 + 2, title, curses.A_BOLD)
         screen_obj.addstr(y0 + 1, x0 + 2, '─' * (w - 4))
         for i, plugin in enumerate(all_plugins):
-            enabled = plugin.name in state.menu_active
-            tick    = 'x' if enabled else ' '
-            attr    = curses.A_REVERSE if i == state.menu_cursor else curses.A_NORMAL
+            enabled   = plugin.name in state.menu_active
+            tick      = 'x' if enabled else ' '
+            selected  = i == state.menu_cursor
+            # Offline: grey out everything except the web server so the user
+            # can see at a glance what's actually usable.
+            unusable  = offline and plugin.name != 'webserver'
+            if selected:
+                attr = curses.A_REVERSE | (curses.A_DIM if unusable else 0)
+            else:
+                attr = curses.A_DIM if unusable else curses.A_NORMAL
             key_lbl = plugin.key if plugin.key else ' '
             label   = '[{}] {}  #{:d}  {}'.format(
                 tick, key_lbl, i + 1, plugin.name)
@@ -156,7 +233,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
             except curses.error:
                 pass
             if state.menu_active is not None:
-                _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS)
+                _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS, sdr)
             if state.preset_menu is not None:
                 _draw_preset_menu(screen_obj, state, ROWS, COLS)
             if time.monotonic() < state.flash_until and state.flash_msg:
@@ -172,6 +249,10 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
 
     sp = results.get('spectrum')
     if sp is None:
+        if sdr.is_offline:
+            _draw_offline(screen_obj, state, results, registry,
+                          all_plugins, sdr)
+            return
         return
 
     freqs, mags_db = sp['freqs'], sp['mags_db']
@@ -358,7 +439,7 @@ def draw(screen_obj: curses.window, state: AppState, results: dict,
 
     # plugin menu drawn last so it overlays everything
     if state.menu_active is not None:
-        _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS)
+        _draw_plugin_menu(screen_obj, state, all_plugins, ROWS, COLS, sdr)
 
     if state.preset_menu is not None:
         _draw_preset_menu(screen_obj, state, ROWS, COLS)

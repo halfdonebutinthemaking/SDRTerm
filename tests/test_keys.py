@@ -36,6 +36,7 @@ def sdr():
     s.key_help = ''
     s.status_text.return_value = ''
     s.handle_key.return_value = False
+    s.is_offline = False
     return s
 
 
