@@ -143,7 +143,11 @@
   </div>
   <div><b>Farthest:</b> <span id="farthest">—</span></div>
   <div><b>Window:</b> <span id="window-label">—</span></div>
-  <div><b>Tiles:</b> <span id="tiles-label">—</span></div>
+  <div><b>Tiles:</b>
+    <select id="tiles-select" title="Switch base map provider">
+      <!-- populated at runtime from /api/adsb's tile_providers list -->
+    </select>
+  </div>
   <div id="filter-row"><b>Filter:</b>
     <span class="pill active" data-filter="all">all <span class="pill-count" id="cnt-all">0</span></span>
     <span class="pill"        data-filter="civ">civ <span class="pill-count" id="cnt-civ">0</span></span>
@@ -928,6 +932,39 @@
     }
   }
 
+  // Tile-provider dropdown: populated on each /api/adsb response so the
+  // list stays authoritative on the server.  Changing it stages the pick
+  // in pendingTilesPick; the next refresh() sends ?tiles=<name>, the
+  // server updates its state, and ensureTilesMatch() swaps the Cesium
+  // imagery layer from the response's web_tiles field.
+  let pendingTilesPick = null;
+
+  function syncTilesSelect(providers, current) {
+    const sel = document.getElementById('tiles-select');
+    if (!sel) return;
+    const names = (providers || []).map(p => p.name);
+    const currentName = (current && current.name) || '';
+    // Rebuild only when the set of names changes — avoids clobbering
+    // focus/scroll on every poll.
+    const existing = Array.from(sel.options).map(o => o.value).join(',');
+    if (existing !== names.join(',')) {
+      sel.innerHTML = '';
+      for (const p of (providers || [])) {
+        const opt = document.createElement('option');
+        opt.value = p.name;
+        opt.textContent = p.name;
+        if (p.credit) opt.title = p.credit;
+        sel.appendChild(opt);
+      }
+    }
+    if (currentName && sel.value !== currentName) sel.value = currentName;
+  }
+
+  document.getElementById('tiles-select').addEventListener('change', (e) => {
+    pendingTilesPick = e.target.value;
+    refresh();
+  });
+
   async function refresh() {
     const btn = document.getElementById('refresh-btn');
     btn.disabled = true;
@@ -945,6 +982,12 @@
       }
       if (qStr)     p.set('q', qStr);
       if (isGlobal) p.set('global', '1');
+      // One-shot tile switch: applied by the server on this request only;
+      // consumed here so a plain refresh() doesn't keep re-sending it.
+      if (pendingTilesPick) {
+        p.set('tiles', pendingTilesPick);
+        pendingTilesPick = null;
+      }
       const r = await fetch('/api/adsb?' + p.toString(), { cache: 'no-store' });
       if (!r.ok) throw new Error(r.statusText);
       const d = await r.json();
@@ -971,8 +1014,7 @@
       // shows the true span of results, not the full unbounded query.
       document.getElementById('window-label').textContent =
         humanWindow(d.matched_window || d.window || w);
-      document.getElementById('tiles-label').textContent =
-        (d.web_tiles && d.web_tiles.name) || '—';
+      syncTilesSelect(d.tile_providers, d.web_tiles);
       // (ac-count already set above based on current filter, not d.aircraft.length)
       // Farthest signal (only when receiver location is configured).
       // Clickable: selects the aircraft on the globe + zooms to it.
