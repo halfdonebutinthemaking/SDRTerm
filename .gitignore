@@ -57,3 +57,17 @@ plugins/adsb/docs/*.log
 plugins/adsb/docs/*.out
 plugins/adsb/docs/*.toc
 plugins/adsb/docs/*.pdf
+
+# LaTeX build artefacts under plugins/fm/docs/
+plugins/fm/docs/*.aux
+plugins/fm/docs/*.log
+plugins/fm/docs/*.out
+plugins/fm/docs/*.toc
+plugins/fm/docs/*.pdf
+
+# LaTeX build artefacts under plugins/meteor/docs/
+plugins/meteor/docs/*.aux
+plugins/meteor/docs/*.log
+plugins/meteor/docs/*.out
+plugins/meteor/docs/*.toc
+plugins/meteor/docs/*.pdf

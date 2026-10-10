@@ -115,17 +115,16 @@ Navigate to a plugin tab with `tab`. Two keys are available on every plugin tab:
 
 ## Plugins
 
-| Plugin | Description | Docs |
-|--------|-------------|------|
-| `spectrum` | Always-on FFT display and waterfall | [spectrum.md](plugins/spectrum.md) |
-| `fm` | FM broadcast audio decoder with channel-bandwidth highlight | [fm.md](plugins/fm.md) |
-| `rds` | RDS decoder — PS name, RadioText, PTY, PI code, TP/TA | [rds.md](plugins/rds.md) |
-| `nrsc5_text` | NRSC-5 HD Radio decoder (pure Python, CFO correction, Viterbi) | [nrsc5_text.md](plugins/nrsc5_text.md) |
-| `peak_marker` | Peak-frequency marker with hold-off and alpha-beta Doppler tracking | [peak_marker.md](plugins/peak_marker.md) |
-| `record` | Write signal to file (WAV audio or raw IQ/SigMF) | [record.md](plugins/record.md) |
-| `rtl-tcp-passive` | RTL-TCP server — stream IQ to clients, ignore commands | [rtltcp_passive.md](plugins/rtltcp_passive.md) |
-| `rtl-tcp-active` | RTL-TCP server — stream IQ and apply client commands to hardware | [rtltcp_active.md](plugins/rtltcp_active.md) |
-| `range-scan` | Stepped frequency scan with signal detection list | [range_scan.md](plugins/range_scan.md) |
+Plugins fall into four categories:
+
+- **Spectrum / display** — `spectrum`, `peak_marker`, `constellation`
+- **Audio decoders** — `fm`, `rds`, `nrsc5_text`, `acars`, `pocsag`
+- **Data decoders** — `adsb`, `vdl2`, `iridium`, `iridium_decode`, `modclass`
+- **Utilities / infrastructure** — `record`, `range_scan`, `freqhop`, `rtltcp_active`, `rtltcp_passive`, `airband_recorder`, `meteor`, `webserver`
+
+The full catalogue — one row per plugin, with description, preview GIF where
+available, and links to both the English and ASD-STE100 docs — lives in
+[plugins/README.md](plugins/README.md).
 
 ---
 
@@ -145,21 +144,27 @@ Plugins declare `min_sample_rate`; enabling a plugin raises the bandwidth if nec
 
 ## Plugin architecture
 
-Plugins live in `plugins/`. Each file that contains a `Decoder` subclass with a non-empty `name` is discovered and loaded automatically at startup — no registration required.
+Plugins live in `plugins/`, one subdirectory per plugin. Any `Decoder`
+subclass with a non-empty `name` under `plugins/<name>/<name>.py` is
+auto-discovered and loaded at startup — no registration required.
 
 ```
 plugins/
-  spectrum.py        — always-on FFT display (built-in, key-less)
-  fm.py              — FM broadcast audio decoder
-  rds.py             — RDS (Radio Data System) decoder
-  nrsc5_text.py      — NRSC-5 HD Radio decoder (digital sideband, pure Python)
-  peak_marker.py     — peak-frequency marker with hold-off and Doppler tracking
-  record.py          — write signal to file (WAV or raw IQ)
-  rtltcp_passive.py  — RTL-TCP server, streams IQ to clients (read-only)
-  rtltcp_active.py   — RTL-TCP server, applies client frequency/gain/rate commands
-  range_scan.py      — stepped frequency scan with signal detection list
   __init__.py        — auto-discovery loader
+  README.md          — full plugin catalogue (one row per plugin)
+  <name>/
+    __init__.py        — required (usually empty)
+    <name>.py          — Decoder subclass
+    README.md          — plain-English docs
+    <name>_ASD-STE100.md — Simplified Technical English sibling
+    images/            — screenshots and GIFs (optional)
+    docs/              — LaTeX pipeline walkthroughs (optional)
+    web/               — static assets served by the webserver plugin (optional)
 ```
+
+The flat `plugins/<name>.py` layout is still accepted for backwards
+compatibility but no new plugin may use it — see
+[documentation_alignment.md](documentation_alignment.md) for the full rules.
 
 ### Plugin pipeline
 
@@ -186,7 +191,7 @@ A practical example: to record FM audio, open the menu, enable FM and record, an
 
 ### Writing a plugin
 
-Subclass `Decoder` from `core.py` and place the file in `plugins/`:
+Subclass `Decoder` from `core.py` and place the file at `plugins/<name>/<name>.py`:
 
 ```python
 from core import Decoder, AppState
@@ -549,32 +554,15 @@ scripts/
 
 plugins/
   __init__.py          — auto-discovery loader
-  spectrum.py          — always-on FFT spectrum decoder
-  spectrum.md          — spectrum plugin documentation
-  fm.py                — FM broadcast audio decoder (with WAV recording hooks)
-  fm.md                — FM plugin documentation
-  rds.py               — RDS decoder: PS name, RadioText, PTY, PI code, TP/TA flags
-  rds.md               — RDS plugin documentation
-  nrsc5_text.py        — NRSC-5 HD Radio decoder (pure Python, CFO correction, Viterbi)
-  nrsc5_text.md        — NRSC-5 plugin documentation
-  peak_marker.py       — peak-frequency marker with hold-off and Doppler tracking
-  peak_marker.md       — peak marker plugin documentation
-  record.py            — write signal to file via predecessor plugin's recording hooks
-  record.md            — record plugin documentation
-  rtltcp_passive.py    — RTL-TCP server: stream IQ to clients, ignore commands
-  rtltcp_passive.md    — RTL-TCP passive server documentation
-  rtltcp_active.py     — RTL-TCP server: stream IQ and apply client commands to hardware
-  rtltcp_active.md     — RTL-TCP active server documentation
-  range_scan.py        — stepped frequency scan with signal detection list
-  range_scan.md        — range-scan plugin documentation
-  images/
-    02_plugin_fm.png   — FM plugin tab screenshot
-    05_range-scan.png  — range-scan plugin view
-    06_rds.png         — RDS plugin tab screenshot
-    07_peak-marker.png — peak marker plugin tab screenshot
-    08_nrsc.png        — NRSC-5 plugin tab screenshot
-    range.gif          — range-scan in action
-    peak.gif           — peak marker in action
+  README.md            — plugin catalogue (one row per plugin, with Docs + STE100 links)
+  README_ASD-STE100.md — same catalogue in Simplified Technical English
+  <name>/              — one subdirectory per plugin; see plugins/README.md for the full list
+    <name>.py              — Decoder subclass
+    README.md              — plain-English docs
+    <name>_ASD-STE100.md   — STE100 sibling
+    images/                — screenshots and GIFs (optional)
+    docs/                  — LaTeX pipeline walkthroughs (optional)
+    web/                   — static assets for the webserver plugin (optional)
 
 devices/
   __init__.py          — auto-discovery loader
@@ -584,10 +572,14 @@ devices/
   hackrf.md            — HackRF One device documentation
   localfile.py         — IQ file replay device (raw complex64, memory-mapped)
   localfile.md         — localfile device documentation
+  _null.py             — internal NullDevice (offline-mode fallback; underscore
+                         prefix excludes it from load_devices())
 
 images/
   running.gif          — live spectrum animation
   waterfall.gif        — waterfall view animation
   01_main.png          — core tab screenshot (static)
   03_waterfall.png     — waterfall view screenshot (static)
+
+documentation_alignment.md — rules that keep docs in sync with code
 ```
