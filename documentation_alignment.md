@@ -61,13 +61,9 @@ scripts/                 — one-shot CLI utilities; document in README.md inlin
 
 - Images referenced from the **top-level** README → `images/`.
 - Images referenced from a **plugin** README → `plugins/<name>/images/`.
-- Images referenced from the **plugins/README.md** index → prefer linking
-  to each plugin's own `images/` directory via relative paths
-  (`plugins/<name>/images/foo.gif`), not a shared pool.
-
-The legacy `plugins/images/` folder (five PNGs leftover from the flat
-layout) is deprecated — do not add new files to it; migrate when the
-owning plugin's README is next edited.
+- Images referenced from the **plugins/README.md** index → link to each
+  plugin's own `images/` directory via relative paths
+  (`plugins/<name>/images/foo.gif`). No shared pool.
 
 ---
 
@@ -192,71 +188,7 @@ leave dangling links.
 
 ---
 
-## 7. Known drift (snapshot: 2026-10-10)
-
-Each item is a backlog entry, not a blocker for this doc landing.
-Close them in a dedicated `docs:` PR, not alongside feature work.
-
-### 7.1 `README.md` describes the old flat plugin layout
-
-- Lines 118–128: `## Plugins` table lists only 9 of 22 plugins and
-  links to `plugins/<name>.md` paths that no longer exist.
-- Lines 150–162: `## Plugin architecture` shows a flat
-  `plugins/<name>.py` listing. The actual layout is subdirectory-per-plugin
-  (see §1.1).
-- Lines 550–577: repo-layout block repeats the flat listing with
-  outdated plugin names.
-
-**Fix:** per §2, replace the detailed table in `README.md` with a
-link to `plugins/README.md` and keep only the category paragraph.
-Update the architecture section to describe the subdirectory layout
-(`plugins/__init__.py` already supports both; the subdir layout is
-canonical).
-
-### 7.2 `plugins/README.md` is missing plugins
-
-Not listed in the table (same gap in `plugins/README_ASD-STE100.md`):
-
-- `adsb` — ADS-B 1090 MHz Mode-S decoder with web map
-- `airband_recorder` — airband voice capture
-- `meteor` — weather-satellite pass schedule + capture
-- `webserver` — HTTP server that publishes plugin web tabs
-
-### 7.3 Missing per-plugin docs
-
-No `README.md` and no `_ASD-STE100.md`:
-
-- `plugins/adsb/` (plus the LaTeX pipeline doc under `plugins/adsb/docs/pipeline.tex` — already gitignored for build artefacts)
-- `plugins/airband_recorder/`
-- `plugins/meteor/` (LaTeX walkthrough exists; a README still needed per §4)
-- `plugins/webserver/`
-
-### 7.4 Missing device docs
-
-- `devices/_null.py` is intentionally underscore-prefixed and skipped
-  by discovery (see §1.2). Per §3, underscore-prefixed internals are
-  **exempt** from the STE-100 pairing — document inline. No action.
-
-### 7.5 `.gitignore` gaps
-
-LaTeX build artefacts are gitignored for `plugins/iridium_decoder/docs/`
-and `plugins/adsb/docs/` but **not** for:
-
-- `plugins/fm/docs/` (`pipeline.aux` et al. currently untracked)
-- `plugins/meteor/docs/` (same)
-
-Add the two blocks per the template in §5.
-
-### 7.6 Legacy image pool
-
-`plugins/images/` holds five PNGs from the pre-subdir layout. Not
-breaking anything, but move each to its owning plugin's `images/`
-directory next time that plugin's README is touched. Do not add new
-images here.
-
----
-
-## 8. Review heuristic
+## 7. Review heuristic
 
 Before merging any PR that changes `plugins/` or `devices/`, run this
 in a terminal and compare the two counts:
