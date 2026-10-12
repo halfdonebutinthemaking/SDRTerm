@@ -58,23 +58,31 @@ _TRACKED_LOG_FIELDS = ('lat', 'lon', 'sog', 'cog', 'heading', 'nav_status')
 
 class _ChannelState:
     """Per-channel GMSK demod + HDLC buffer state.  One instance per
-    configured AIS channel; cross-chunk continuity lives here."""
+    configured AIS channel; cross-chunk continuity lives here.
+
+    AIS slots are 26.67 ms but the main-loop IQ chunks are ~16 ms at
+    1.024 MHz, so every real burst spans at least one chunk boundary.
+    Both the frequency discriminator (needs the previous sample) and
+    the bit-centre slicer (resample output isn't a multiple of SPS)
+    will corrupt the frame unless state is carried over."""
     __slots__ = ('name', 'freq_hz', 'bit_buf',
-                 'carrier_phase', 'nrzi_last', 'sym_offset')
+                 'carrier_phase', 'prev_iq', 'sym_offset', 'nrzi_last')
 
     def __init__(self, name, freq_hz):
         self.name          = name
         self.freq_hz       = float(freq_hz)
         self.bit_buf       = deque(maxlen=_MAX_BIT_BUF)
         self.carrier_phase = 0.0
+        self.prev_iq       = None                     # last baseband sample
+        self.sym_offset    = _TARGET_SPS // 2         # centre of the first bit
         self.nrzi_last     = None                     # last wire bit for NRZI continuity
-        self.sym_offset    = 0
 
     def reset(self):
         self.bit_buf.clear()
         self.carrier_phase = 0.0
+        self.prev_iq       = None
+        self.sym_offset    = _TARGET_SPS // 2
         self.nrzi_last     = None
-        self.sym_offset    = 0
 
 
 class AisDecoder(Decoder):
@@ -167,8 +175,12 @@ class AisDecoder(Decoder):
         except Exception:
             return
 
-        # GMSK demod → wire-level NRZI bits.
-        raw = gmsk_demod(resampled, _TARGET_SPS)
+        # GMSK demod → wire-level NRZI bits, with cross-chunk continuity
+        # for the discriminator history and the bit-centre slice offset.
+        raw, ch.prev_iq, ch.sym_offset = gmsk_demod(
+            resampled, _TARGET_SPS,
+            prev_iq=ch.prev_iq, sym_offset=ch.sym_offset,
+        )
         if not raw:
             return
 

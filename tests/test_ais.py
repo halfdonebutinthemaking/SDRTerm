@@ -344,24 +344,89 @@ def _modulate_gmsk(bits: list[int], sps: int, bt: float = 0.4) -> np.ndarray:
 class TestGmskRoundTrip:
     """Modulator → demod → NRZI → HDLC should return the original payload."""
 
-    def test_short_payload_recovery(self):
-        payload = b'AISTEST'
-        stream  = _build_hdlc_frame(payload)
-        # NRZI-encode the HDLC stream (that's what goes on the AIS wire)
-        wire    = nrzi_encode(stream, initial=0)
-        # Prepend ramp-up + training + an extra zero for sampling margin
+    def _build_burst(self, payload: bytes, sps: int = 8) -> np.ndarray:
+        stream   = _build_hdlc_frame(payload)
+        wire     = nrzi_encode(stream, initial=0)
         preamble = ([0, 1] * 12) + [0] * 4
-        wire     = preamble + wire + ([0] * 24)       # buffer at the end
+        wire     = preamble + wire + ([0] * 24)
+        return _modulate_gmsk(wire, sps)
 
+    def test_short_payload_recovery(self):
+        payload  = b'AISTEST'
         sps      = 8
-        baseband = _modulate_gmsk(wire, sps)
+        baseband = self._build_burst(payload, sps)
 
-        raw     = gmsk_demod(baseband, sps)
-        decoded = nrzi_decode(raw)
-        frames  = list(hdlc_frames(decoded))
+        bits, _, _ = gmsk_demod(baseband, sps, prev_iq=None, sym_offset=sps // 2)
+        decoded    = nrzi_decode(bits)
+        frames     = list(hdlc_frames(decoded))
 
         assert any(f == (payload, True) for f in frames), \
             f'synthetic burst did not round-trip; got: {frames}'
+
+    def test_frame_recovery_across_chunk_boundaries(self):
+        """A real AIS slot is 26.67 ms; one main-loop chunk at 1.024 MHz
+        is 16 ms.  Every burst spans ≥ 1 boundary.  Feeding the synthetic
+        baseband in 500-sample slices (deliberately not a multiple of
+        sps) must still recover the payload, confirming that prev_iq +
+        sym_offset keep the discriminator and bit-centre slicer aligned."""
+        payload  = b'ACROSSCHUNKS'
+        sps      = 8
+        baseband = self._build_burst(payload, sps)
+
+        chunk_size = 500         # 62.5 bits per chunk — intentionally fractional
+        prev_iq    = None
+        sym_offset = sps // 2
+        wire_bits  = []
+
+        for start in range(0, len(baseband), chunk_size):
+            chunk = baseband[start:start + chunk_size]
+            if len(chunk) < 2:
+                continue
+            bits, prev_iq, sym_offset = gmsk_demod(
+                chunk, sps, prev_iq=prev_iq, sym_offset=sym_offset,
+            )
+            wire_bits.extend(bits)
+
+        decoded = nrzi_decode(wire_bits)
+        frames  = list(hdlc_frames(decoded))
+
+        assert any(f == (payload, True) for f in frames), \
+            f'split-chunk burst did not round-trip; got: {frames}'
+
+    def test_single_chunk_matches_split_chunk(self):
+        """Chunked and un-chunked demod must produce the same bits
+        (modulo the 1-sample startup difference at chunk 0 when
+        prev_iq is None).  This is a direct regression lock against
+        timing drift at chunk boundaries."""
+        payload  = b'IDEM'
+        sps      = 8
+        baseband = self._build_burst(payload, sps)
+
+        full_bits, _, _ = gmsk_demod(
+            baseband, sps, prev_iq=None, sym_offset=sps // 2,
+        )
+
+        chunk_size = 123         # tiny, nothing-special size
+        prev_iq    = None
+        sym_offset = sps // 2
+        split_bits = []
+        for start in range(0, len(baseband), chunk_size):
+            chunk = baseband[start:start + chunk_size]
+            if len(chunk) < 2:
+                continue
+            bits, prev_iq, sym_offset = gmsk_demod(
+                chunk, sps, prev_iq=prev_iq, sym_offset=sym_offset,
+            )
+            split_bits.extend(bits)
+
+        # Allow ± 1 bit difference at the very start (prev_iq=None path
+        # drops one sample on chunk 0 — expected) and ± 1 at the end
+        # (boxcar edge effect on the final chunk).
+        min_len = min(len(full_bits), len(split_bits))
+        diffs   = sum(1 for i in range(1, min_len - 1)
+                      if full_bits[i] != split_bits[i])
+        assert diffs <= 2, \
+            f'chunked demod drifted vs un-chunked: {diffs} bit mismatches'
 
 
 # ── Plugin housekeeping ──────────────────────────────────────────────────────

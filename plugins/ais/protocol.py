@@ -44,31 +44,59 @@ import numpy as np
 # one bit period with a boxcar, then slice at bit centres.  Good enough
 # at ≥ 10 dB SNR which is typical for coastal reception.
 
-def gmsk_demod(baseband: np.ndarray, sps: int) -> list[int]:
+def gmsk_demod(baseband: np.ndarray, sps: int,
+               prev_iq: complex | None = None,
+               sym_offset: int = 0,
+               ) -> tuple[list[int], complex, int]:
     """
     Demodulate GMSK baseband to raw NRZI bits.
 
     `baseband` must already be centred near DC and resampled so that
-    `sps` samples span exactly one bit.  Returns an integer bit list
-    where positive instantaneous frequency maps to 1 and negative to 0.
+    `sps` samples span exactly one bit.  Returns a tuple
+    `(bits, new_prev_iq, new_sym_offset)` where
 
-    The output is still NRZI-encoded; feed it through `nrzi_decode`
-    before HDLC flag detection.
+      * `bits` is the per-bit hard decisions, positive instantaneous
+        frequency → 1.  Still NRZI-encoded; feed through `nrzi_decode`.
+      * `new_prev_iq` is the last complex sample of this chunk's
+        baseband — pass it back as `prev_iq` on the next call so the
+        frequency discriminator stays continuous across chunk
+        boundaries (AIS slots are 26.67 ms but the main-loop IQ
+        chunks are ~16 ms, so every real burst spans at least one
+        boundary).
+      * `new_sym_offset` is the starting sample for the bit-centre
+        slice on the next chunk — carries fractional-sample timing
+        across chunks since `resample_poly` output length isn't
+        always a multiple of `sps`.
+
+    First-call usage: pass `prev_iq=None`, `sym_offset=sps // 2`
+    (centres the slice on the first bit).
     """
     if len(baseband) < 2:
-        return []
-    # Frequency discriminator: angle of x[n] * conj(x[n-1]) is proportional
-    # to the instantaneous frequency.
+        return [], prev_iq, sym_offset
+
+    # Prepend the previous chunk's last sample so the discriminator
+    # has a continuous history — otherwise the first bit of every new
+    # chunk is derived from a discontinuity and ~0.5 bit per chunk is
+    # mis-sliced right where real AIS bursts straddle the boundary.
+    if prev_iq is not None:
+        baseband = np.concatenate([[prev_iq], baseband])
+
     phi = np.angle(baseband[1:] * np.conj(baseband[:-1]))
-    # One-bit boxcar lowpass — crude but adequate at 5-8 SPS.
     kernel   = np.ones(sps, dtype=np.float32) / sps
     smoothed = np.convolve(phi, kernel, mode='same')
-    # Sample at bit centres.  Starting at sps//2 keeps the slice on the
-    # middle sample of each bit assuming aligned timing — fine for AIS
-    # bursts since the preamble gives the HDLC flag detector plenty of
-    # slack to lock on even with ± a few samples of offset.
-    sliced = smoothed[sps // 2::sps]
-    return [1 if v > 0 else 0 for v in sliced]
+
+    sliced = smoothed[sym_offset::sps]
+
+    # Preserve sub-sps timing to the next chunk.  After consuming
+    # `sym_offset + len(sliced) * sps` samples from `smoothed`, the
+    # unused tail is `len(smoothed) - that`.  The next chunk's slice
+    # must start at `sps - tail` to land on the next bit centre.
+    n_out = len(smoothed)
+    new_sym_offset = (sps - (n_out - sym_offset) % sps) % sps
+
+    new_prev_iq = complex(baseband[-1])
+    bits = [1 if v > 0 else 0 for v in sliced]
+    return bits, new_prev_iq, new_sym_offset
 
 
 # ── NRZI ──────────────────────────────────────────────────────────────────────
