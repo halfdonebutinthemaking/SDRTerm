@@ -66,7 +66,8 @@ class _ChannelState:
     the bit-centre slicer (resample output isn't a multiple of SPS)
     will corrupt the frame unless state is carried over."""
     __slots__ = ('name', 'freq_hz', 'bit_buf',
-                 'carrier_phase', 'prev_iq', 'sym_offset', 'nrzi_last')
+                 'carrier_phase', 'prev_iq', 'sym_offset',
+                 'filter_state', 'nrzi_last')
 
     def __init__(self, name, freq_hz):
         self.name          = name
@@ -75,6 +76,7 @@ class _ChannelState:
         self.carrier_phase = 0.0
         self.prev_iq       = None                     # last baseband sample
         self.sym_offset    = _TARGET_SPS // 2         # centre of the first bit
+        self.filter_state  = None                     # Gaussian MF edge history
         self.nrzi_last     = None                     # last wire bit for NRZI continuity
 
     def reset(self):
@@ -82,6 +84,7 @@ class _ChannelState:
         self.carrier_phase = 0.0
         self.prev_iq       = None
         self.sym_offset    = _TARGET_SPS // 2
+        self.filter_state  = None
         self.nrzi_last     = None
 
 
@@ -186,10 +189,12 @@ class AisDecoder(Decoder):
             return
 
         # GMSK demod → wire-level NRZI bits, with cross-chunk continuity
-        # for the discriminator history and the bit-centre slice offset.
-        raw, ch.prev_iq, ch.sym_offset = gmsk_demod(
+        # for the discriminator history (prev_iq), bit-centre slice offset
+        # (sym_offset), and Gaussian matched-filter history (filter_state).
+        raw, ch.prev_iq, ch.sym_offset, ch.filter_state = gmsk_demod(
             resampled, _TARGET_SPS,
             prev_iq=ch.prev_iq, sym_offset=ch.sym_offset,
+            filter_state=ch.filter_state,
         )
         if not raw:
             return

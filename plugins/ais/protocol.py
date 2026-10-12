@@ -44,16 +44,41 @@ import numpy as np
 # one bit period with a boxcar, then slice at bit centres.  Good enough
 # at ≥ 10 dB SNR which is typical for coastal reception.
 
+def gaussian_pulse_response(bt: float, sps: int, span_bits: int = 4) -> np.ndarray:
+    """Discrete Gaussian pulse response for a GMSK receiver's matched
+    filter.  Length = `span_bits * sps + 1` taps.  Normalised to unit
+    sum so DC gain is 1.
+
+    This is the Gaussian low-pass that follows the frequency
+    discriminator in a discriminator-based GMSK receiver.  It
+    integrates the instantaneous frequency over roughly one bit
+    period, weighted by the matched pulse shape; using a Gaussian
+    tuned to the transmitter's BT product improves bit-error rate
+    over a 1-bit boxcar by several dB at the AIS SNR range
+    (~10-16 dB) that coastal reception actually produces.
+    """
+    # σ in sample units such that σ_t = sqrt(ln 2) / (2 π BT) in bit
+    # periods — the standard GMSK pulse-width definition where BT is
+    # the 3 dB bandwidth × bit duration product.
+    sigma = np.sqrt(np.log(2)) / (2 * np.pi * bt) * sps
+    n     = span_bits * sps + 1
+    t     = np.arange(n) - n // 2
+    h     = np.exp(-(t ** 2) / (2 * sigma ** 2))
+    return (h / h.sum()).astype(np.float32)
+
+
 def gmsk_demod(baseband: np.ndarray, sps: int,
                prev_iq: complex | None = None,
                sym_offset: int = 0,
-               ) -> tuple[list[int], complex, int]:
+               filter_state: np.ndarray | None = None,
+               bt: float = 0.4,
+               ) -> tuple[list[int], complex, int, np.ndarray]:
     """
     Demodulate GMSK baseband to raw NRZI bits.
 
     `baseband` must already be centred near DC and resampled so that
     `sps` samples span exactly one bit.  Returns a tuple
-    `(bits, new_prev_iq, new_sym_offset)` where
+    `(bits, new_prev_iq, new_sym_offset, new_filter_state)` where
 
       * `bits` is the per-bit hard decisions, positive instantaneous
         frequency → 1.  Still NRZI-encoded; feed through `nrzi_decode`.
@@ -67,36 +92,53 @@ def gmsk_demod(baseband: np.ndarray, sps: int,
         slice on the next chunk — carries fractional-sample timing
         across chunks since `resample_poly` output length isn't
         always a multiple of `sps`.
+      * `new_filter_state` is the last `len(kernel) - 1` samples of
+        the discriminator output; the next call prepends it before
+        convolution so the Gaussian lowpass has proper history
+        across chunk edges (without this, the first few bits of every
+        chunk convolve against zero-padding and bias toward 0).
 
-    First-call usage: pass `prev_iq=None`, `sym_offset=sps // 2`
-    (centres the slice on the first bit).
+    First-call usage: pass `prev_iq=None`, `sym_offset=sps // 2`,
+    `filter_state=None`.  `bt` is the transmitter's BT product;
+    AIS and most GMSK systems use 0.4.
     """
     if len(baseband) < 2:
-        return [], prev_iq, sym_offset
+        empty = np.zeros(0, dtype=np.float32)
+        return [], prev_iq, sym_offset, filter_state if filter_state is not None else empty
 
-    # Prepend the previous chunk's last sample so the discriminator
-    # has a continuous history — otherwise the first bit of every new
-    # chunk is derived from a discontinuity and ~0.5 bit per chunk is
-    # mis-sliced right where real AIS bursts straddle the boundary.
+    # Carry the previous chunk's last complex sample into the
+    # discriminator so the per-sample phase diff is continuous.
     if prev_iq is not None:
         baseband = np.concatenate([[prev_iq], baseband])
+    new_prev_iq = complex(baseband[-1])
 
-    phi = np.angle(baseband[1:] * np.conj(baseband[:-1]))
-    kernel   = np.ones(sps, dtype=np.float32) / sps
-    smoothed = np.convolve(phi, kernel, mode='same')
+    phi = np.angle(baseband[1:] * np.conj(baseband[:-1])).astype(np.float32)
+
+    kernel  = gaussian_pulse_response(bt, sps)
+    kernel_tail = len(kernel) - 1
+
+    # Prepend the previous chunk's filter history (last kernel_tail
+    # unfiltered samples) so the convolution's 'valid' output starts
+    # exactly where this chunk's first new discriminator sample lives.
+    if filter_state is None:
+        filter_state = np.zeros(kernel_tail, dtype=np.float32)
+    history = filter_state
+    stream  = np.concatenate([history, phi]).astype(np.float32)
+
+    # 'valid' convolution: output length = len(stream) - len(kernel) + 1
+    # which equals len(phi) — one filtered sample per input phi sample.
+    smoothed = np.convolve(stream, kernel, mode='valid')
 
     sliced = smoothed[sym_offset::sps]
 
-    # Preserve sub-sps timing to the next chunk.  After consuming
-    # `sym_offset + len(sliced) * sps` samples from `smoothed`, the
-    # unused tail is `len(smoothed) - that`.  The next chunk's slice
-    # must start at `sps - tail` to land on the next bit centre.
     n_out = len(smoothed)
     new_sym_offset = (sps - (n_out - sym_offset) % sps) % sps
 
-    new_prev_iq = complex(baseband[-1])
+    new_filter_state = phi[-kernel_tail:].copy() if len(phi) >= kernel_tail \
+                       else np.concatenate([history[-(kernel_tail - len(phi)):], phi])
+
     bits = [1 if v > 0 else 0 for v in sliced]
-    return bits, new_prev_iq, new_sym_offset
+    return bits, new_prev_iq, new_sym_offset, new_filter_state
 
 
 # ── NRZI ──────────────────────────────────────────────────────────────────────

@@ -97,8 +97,9 @@ def _analyse_channel(samples: np.ndarray, offset_hz: int,
     print(f'  resample up/down    : {up}/{down}')
     print(f'  resampled samples   : {len(resampled):,}')
 
-    bits, _, _ = gmsk_demod(resampled, TARGET_SPS,
-                            prev_iq=None, sym_offset=TARGET_SPS // 2)
+    bits, _, _, _ = gmsk_demod(resampled, TARGET_SPS,
+                               prev_iq=None, sym_offset=TARGET_SPS // 2,
+                               filter_state=None)
     decoded = nrzi_decode(bits)
     print(f'  raw NRZI bits       : {len(bits):,}')
     print(f'  NRZI-decoded bits   : {len(decoded):,}')

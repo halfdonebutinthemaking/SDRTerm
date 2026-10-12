@@ -356,9 +356,11 @@ class TestGmskRoundTrip:
         sps      = 8
         baseband = self._build_burst(payload, sps)
 
-        bits, _, _ = gmsk_demod(baseband, sps, prev_iq=None, sym_offset=sps // 2)
-        decoded    = nrzi_decode(bits)
-        frames     = list(hdlc_frames(decoded))
+        bits, _, _, _ = gmsk_demod(
+            baseband, sps, prev_iq=None, sym_offset=sps // 2, filter_state=None,
+        )
+        decoded = nrzi_decode(bits)
+        frames  = list(hdlc_frames(decoded))
 
         assert any(f == (payload, True) for f in frames), \
             f'synthetic burst did not round-trip; got: {frames}'
@@ -373,17 +375,19 @@ class TestGmskRoundTrip:
         sps      = 8
         baseband = self._build_burst(payload, sps)
 
-        chunk_size = 500         # 62.5 bits per chunk — intentionally fractional
-        prev_iq    = None
-        sym_offset = sps // 2
-        wire_bits  = []
+        chunk_size   = 500         # 62.5 bits per chunk — intentionally fractional
+        prev_iq      = None
+        sym_offset   = sps // 2
+        filter_state = None
+        wire_bits    = []
 
         for start in range(0, len(baseband), chunk_size):
             chunk = baseband[start:start + chunk_size]
             if len(chunk) < 2:
                 continue
-            bits, prev_iq, sym_offset = gmsk_demod(
+            bits, prev_iq, sym_offset, filter_state = gmsk_demod(
                 chunk, sps, prev_iq=prev_iq, sym_offset=sym_offset,
+                filter_state=filter_state,
             )
             wire_bits.extend(bits)
 
@@ -402,20 +406,22 @@ class TestGmskRoundTrip:
         sps      = 8
         baseband = self._build_burst(payload, sps)
 
-        full_bits, _, _ = gmsk_demod(
-            baseband, sps, prev_iq=None, sym_offset=sps // 2,
+        full_bits, _, _, _ = gmsk_demod(
+            baseband, sps, prev_iq=None, sym_offset=sps // 2, filter_state=None,
         )
 
-        chunk_size = 123         # tiny, nothing-special size
-        prev_iq    = None
-        sym_offset = sps // 2
-        split_bits = []
+        chunk_size   = 123         # tiny, nothing-special size
+        prev_iq      = None
+        sym_offset   = sps // 2
+        filter_state = None
+        split_bits   = []
         for start in range(0, len(baseband), chunk_size):
             chunk = baseband[start:start + chunk_size]
             if len(chunk) < 2:
                 continue
-            bits, prev_iq, sym_offset = gmsk_demod(
+            bits, prev_iq, sym_offset, filter_state = gmsk_demod(
                 chunk, sps, prev_iq=prev_iq, sym_offset=sym_offset,
+                filter_state=filter_state,
             )
             split_bits.extend(bits)
 
