@@ -121,7 +121,7 @@ The plugins are in four categories:
 
 - **Spectrum and display** — `spectrum`, `peak_marker`, `constellation`
 - **Audio decoders** — `fm`, `rds`, `nrsc5_text`, `acars`, `pocsag`
-- **Data decoders** — `adsb`, `vdl2`, `iridium`, `iridium_decode`, `modclass`
+- **Data decoders** — `adsb`, `ais`, `vdl2`, `iridium`, `iridium_decode`, `modclass`
 - **Utilities and infrastructure** — `record`, `range_scan`, `freqhop`, `rtltcp_active`, `rtltcp_passive`, `airband_recorder`, `meteor`, `webserver`
 
 The full catalogue has one row for each plugin. It gives a description, a preview GIF (when available), and links to the English and the ASD-STE100 documents. It is in
