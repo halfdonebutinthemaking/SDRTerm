@@ -1,0 +1,29 @@
+{
+    "version": 1,
+    "_comment": "AIS reception — monitors both AIS channels SIMULTANEOUSLY (161.975 MHz AIS 1 + 162.025 MHz AIS 2) via the ais plugin's multi-channel mode.  Modulation is GMSK 9600 bps with BT=0.4.  Channel spacing is 50 kHz; a single 1.024 MHz capture at 162.000 MHz covers both with headroom.  Hardware: RTL-SDR V3 at 1.024 MSPS works; HackRF at 2 MSPS also fine (will drop to 1.024 at this plugin's min_sample_rate).  Antenna must cover 162 MHz — a VHF marine-band whip or a 1/4-wave at ~45 cm.  Reception requires line-of-sight to vessels, which means coastal / riverside / port location.  Inland reception is practically nil.  gain_db 30 is a reasonable starting point; dial down if the waterfall is saturating during ship bursts.",
+    "center_hz": 162000000.0,
+    "bw_hz": 1024000,
+    "gain_db": 30.0,
+    "gain_auto": false,
+    "iq_corr": true,
+    "waterfall_active": true,
+    "active_decoders": [
+        "spectrum",
+        "ais"
+    ],
+    "plugin_order": [
+        "ais",
+        "peak_marker",
+        "record"
+    ],
+    "plugin_states": {
+        "ais": {
+            "logging_enabled": true
+        },
+        "webserver": {
+            "enabled": true,
+            "host": "127.0.0.1",
+            "port": 8080
+        }
+    }
+}

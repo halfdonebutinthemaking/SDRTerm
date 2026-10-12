@@ -119,7 +119,7 @@ Plugins fall into four categories:
 
 - **Spectrum / display** — `spectrum`, `peak_marker`, `constellation`
 - **Audio decoders** — `fm`, `rds`, `nrsc5_text`, `acars`, `pocsag`
-- **Data decoders** — `adsb`, `vdl2`, `iridium`, `iridium_decode`, `modclass`
+- **Data decoders** — `adsb`, `ais`, `vdl2`, `iridium`, `iridium_decode`, `modclass`
 - **Utilities / infrastructure** — `record`, `range_scan`, `freqhop`, `rtltcp_active`, `rtltcp_passive`, `airband_recorder`, `meteor`, `webserver`
 
 The full catalogue — one row per plugin, with description, preview GIF where

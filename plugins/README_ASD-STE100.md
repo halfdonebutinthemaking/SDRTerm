@@ -25,6 +25,7 @@
 | **airband_recorder** | Fixed-channel VHF airband voice recorder. Runs one downconvert/decimate/squelch pipeline for each entry in `channels`. Writes each transmission to a timestamped WAV file. Keeps an index.csv roll-up. | | [Docs](airband_recorder/) | [STE100](airband_recorder/airband_recorder_ASD-STE100.md) |
 | **meteor** | Weather-satellite pass planner and LRPT/APT capture. Predicts passes for NOAA 15/18/19 and METEOR-M2 2/3/4. Tunes the SDR on pass rise. Starts `satdump` for the pass. Serves a live pass-schedule and capture gallery through the webserver plugin. | | [Docs](meteor/) | [STE100](meteor/meteor_ASD-STE100.md) |
 | **webserver** | HTTP server for plugin web tabs. Finds each sibling plugin that provides `web_json`. Routes `/tab/<slug>`, `/api/<slug>`, and `/static/<slug>/…` on a daemon thread. The main loop DSP is never blocked. | | [Docs](webserver/) | [STE100](webserver/webserver_ASD-STE100.md) |
+| **ais** | AIS maritime vessel tracker. GMSK 9600 bps on both 162 MHz channels at the same time, from one 1.024 MHz capture. HDLC frames with CRC-16-CCITT. Decodes Class A and Class B position reports. Keeps an MMSI-indexed vessel table and a CSV log. The ADS-B pattern applied to ships. | | [Docs](ais/) | [STE100](ais/ais_ASD-STE100.md) |
 
 Each plugin folder has a `README.md`. GitHub renders it by itself when
 you go into the folder. A simplified-English version rewritten in
