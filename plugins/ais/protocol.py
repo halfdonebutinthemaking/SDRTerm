@@ -160,7 +160,15 @@ def _bits_to_bytes_lsb(bits: list[int]) -> bytes:
 
 def _destuff(raw: list[int]) -> list[int] | None:
     """Remove bit-stuffed zeros.  Returns None if a stuffing violation is
-    found (six consecutive 1s without an intervening 0)."""
+    found (six consecutive 1s without an intervening 0).
+
+    The subtle bit: at count == 5, HDLC guarantees the NEXT wire bit is
+    the stuffed 0.  Verify that before skipping — if it's actually a 1,
+    we're looking at 6 consecutive 1s (frame abort / unexpected flag)
+    and must bail.  Previously this function skipped unconditionally
+    and silently swallowed the 6th 1, producing frames that were one
+    bit short and would never pass CRC.
+    """
     out, count = [], 0
     i = 0
     while i < len(raw):
@@ -171,7 +179,12 @@ def _destuff(raw: list[int]) -> list[int] | None:
                 return None
             out.append(b)
             if count == 5:
-                i += 1          # skip the stuffed 0
+                # Peek at the stuffed slot.  Must be 0, else six-in-row.
+                if i + 1 >= len(raw):
+                    return None
+                if raw[i + 1] == 1:
+                    return None
+                i += 1          # skip the verified stuffed 0
                 count = 0
         else:
             count = 0
@@ -187,6 +200,56 @@ def _find_flag(bits: list[int], start: int) -> int:
         if bits[i:i + 8] == _FLAG_BITS:
             return i
     return -1
+
+
+def hdlc_frames_diag(bits: list[int]):
+    """Diagnostic variant of `hdlc_frames` that yields a status for EVERY
+    candidate inter-flag region, not just the ones that destuff cleanly.
+
+    Yields `(payload | None, crc_ok: bool, status: str, raw_len: int)`
+    for every pair of flags found, where `status` is one of:
+
+      * `'crc_ok'`      — destuff OK, CRC matched; `payload` is set.
+      * `'crc_fail'`    — destuff OK, CRC wrong;   `payload` is set.
+      * `'destuff_fail'`— bit-stuffing violation;  `payload` is None.
+      * `'too_short'`   — < 40 bits or not byte-aligned.
+      * `'short_frame'` — bytes OK but < 3 (no room for FCS).
+
+    `raw_len` is the number of inter-flag bits before destuffing.
+    Used by the plugin's diagnostic console (press 'd' on the AIS tab).
+    """
+    i = 0
+    while True:
+        start = _find_flag(bits, i)
+        if start < 0:
+            break
+        end_of_open = start
+        while _find_flag(bits, end_of_open) == end_of_open:
+            end_of_open += 8
+        close = _find_flag(bits, end_of_open)
+        if close < 0:
+            break
+
+        raw     = bits[end_of_open:close]
+        raw_len = len(raw)
+        cooked  = _destuff(raw)
+
+        if cooked is None:
+            yield None, False, 'destuff_fail', raw_len
+        elif len(cooked) < 40 or len(cooked) % 8 != 0:
+            yield None, False, 'too_short', raw_len
+        else:
+            frame = _bits_to_bytes_lsb(cooked)
+            if len(frame) < 3:
+                yield None, False, 'short_frame', raw_len
+            else:
+                payload = frame[:-2]
+                fcs_rx  = frame[-2] | (frame[-1] << 8)
+                crc_ok  = (crc16_ccitt(payload) == fcs_rx)
+                status  = 'crc_ok' if crc_ok else 'crc_fail'
+                yield payload, crc_ok, status, raw_len
+
+        i = close
 
 
 def hdlc_frames(bits: list[int]):

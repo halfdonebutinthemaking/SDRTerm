@@ -28,7 +28,7 @@ from scipy.signal import resample_poly
 
 from core import Decoder, AppState
 from .protocol import (
-    gmsk_demod, nrzi_decode, hdlc_frames,
+    gmsk_demod, nrzi_decode, hdlc_frames_diag,
     ais_payload_from_hdlc, parse_ais, crc16_ccitt,
 )
 
@@ -116,6 +116,12 @@ class AisDecoder(Decoder):
         self._log_file       = None
         self._log_writer     = None
         self._log_last       = {}        # mmsi → last-written field dict (dedup CSV writes)
+        # ── diagnostic counters (shown in the plugin tab's debug console, press 'd') ──
+        self._n_destuff_fail = 0         # HDLC frames found but bit-stuffing invalid
+        self._n_crc_fail     = 0         # destuff OK but CRC wrong
+        self._len_hist       = {}        # byte-length → count of destuff-OK candidates
+        self._crc_fail_dump  = deque(maxlen=20)   # recent crc-fail payload hex dumps
+        self._dbg_last_t     = 0.0                # monotonic — rate-limit the debug console
 
     def start(self, state: AppState) -> None:
         for ch in self._channels:
@@ -123,8 +129,12 @@ class AisDecoder(Decoder):
         self._vessels.clear()
         self._messages.clear()
         self._seen.clear()
-        self._n_bursts = 0
-        self._n_crc_ok = 0
+        self._n_bursts       = 0
+        self._n_crc_ok       = 0
+        self._n_destuff_fail = 0
+        self._n_crc_fail     = 0
+        self._len_hist.clear()
+        self._crc_fail_dump.clear()
         if self._logging_enabled:
             self._open_log()
 
@@ -193,11 +203,29 @@ class AisDecoder(Decoder):
         decoded      = nrzi_decode(raw)
         ch.bit_buf.extend(decoded)
 
-        # HDLC frame scan on the per-channel bit buffer.
+        # HDLC frame scan on the per-channel bit buffer (diagnostic
+        # variant: surfaces destuff-fails too so the plugin's debug
+        # console can report WHY candidates are being dropped).
         buf = list(ch.bit_buf)
-        for payload, crc_ok in hdlc_frames(buf):
+        for payload, crc_ok, status, raw_len in hdlc_frames_diag(buf):
             self._n_bursts += 1
+            if status == 'destuff_fail':
+                self._n_destuff_fail += 1
+                continue
+            if status in ('too_short', 'short_frame'):
+                continue
+            # Both crc_ok and crc_fail cases have a payload — track
+            # the length distribution so a debug-console reader can
+            # tell "noise with random lengths" from "clustered near
+            # 23 bytes = real AIS frames with a CRC convention bug".
+            byte_len = len(payload)
+            self._len_hist[byte_len] = self._len_hist.get(byte_len, 0) + 1
             if not crc_ok:
+                self._n_crc_fail += 1
+                if len(self._crc_fail_dump) < self._crc_fail_dump.maxlen:
+                    self._crc_fail_dump.append(
+                        '[{}] {:>3}B {}'.format(
+                            ch.name, byte_len, payload[:16].hex(' ')))
                 continue
             self._n_crc_ok += 1
 
@@ -250,13 +278,58 @@ class AisDecoder(Decoder):
             self._log_vessel(mmsi, vessel, msg['ts_iso'])
 
     def _result(self) -> dict:
+        self._refresh_diag_console()
         return {
-            'n_bursts': self._n_bursts,
-            'n_crc_ok': self._n_crc_ok,
-            'n_vessels': len(self._vessels),
-            'channels':  [ch.name for ch in self._channels],
-            'logging':   self._logging_enabled,
+            'n_bursts':         self._n_bursts,
+            'n_crc_ok':         self._n_crc_ok,
+            'n_vessels':        len(self._vessels),
+            'n_destuff_fail':   self._n_destuff_fail,
+            'n_crc_fail':       self._n_crc_fail,
+            'channels':         [ch.name for ch in self._channels],
+            'logging':          self._logging_enabled,
         }
+
+    # ── debug console snapshot ─────────────────────────────────────────────
+
+    def _refresh_diag_console(self) -> None:
+        """Rewrite the plugin's debug ring buffer with a current snapshot
+        of counters + length histogram + recent CRC-fail hex dumps.
+        Throttled to once per second so a `d`-key viewer sees a stable
+        screen and the deque isn't thrashed every 16 ms."""
+        now = time.monotonic()
+        if now - self._dbg_last_t < 1.0:
+            return
+        self._dbg_last_t = now
+        # Treat the ring buffer as a snapshot panel: clear → write.
+        if self._debug_lines is None:
+            self._dbg('')          # lazy-init
+        self._debug_lines.clear()
+
+        total  = max(1, self._n_bursts)
+        hist   = sorted(self._len_hist.items())
+        hist_s = ' '.join(f'{L}:{c}' for L, c in hist[:12])
+        self._dbg('── AIS decoder diagnostics ──')
+        self._dbg('bursts        : {}'.format(self._n_bursts))
+        self._dbg('  destuff fail: {}  ({:.0%})'.format(
+            self._n_destuff_fail, self._n_destuff_fail / total))
+        self._dbg('  crc fail    : {}  ({:.0%})'.format(
+            self._n_crc_fail, self._n_crc_fail / total))
+        self._dbg('  crc OK      : {}  ({:.0%})'.format(
+            self._n_crc_ok, self._n_crc_ok / total))
+        self._dbg('vessels       : {}'.format(len(self._vessels)))
+        self._dbg('')
+        self._dbg('candidate length histogram (bytes:count, top 12):')
+        self._dbg('  ' + hist_s if hist_s else '  (none yet)')
+        self._dbg('')
+        self._dbg('recent CRC-fail hex (first 16 B of payload):')
+        if not self._crc_fail_dump:
+            self._dbg('  (none)')
+        else:
+            for line in self._crc_fail_dump:
+                self._dbg('  ' + line)
+        self._dbg('')
+        self._dbg('reading: cluster near 21-23 B → real frames (CRC bug);')
+        self._dbg('         random spread      → noise finding flags.')
 
     # ── CSV log (mirrors the ADS-B pattern) ────────────────────────────────
 
