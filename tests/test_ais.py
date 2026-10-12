@@ -575,6 +575,90 @@ class TestMmsiClass:
         assert _mmsi_class(mmsi) == expected
 
 
+class TestPyaisCrossCheck:
+    """Independent correctness lock: for any synthetic Type 1/2/3 payload
+    we construct, pyais must decode the equivalent !AIVDM sentence to the
+    same field values parse_ais produces.
+
+    pyais is a well-known third-party AIS decoder; agreement with it is
+    much stronger evidence of spec compliance than our round-trip tests
+    (which only prove _pack_bits and _bits are self-consistent).  When
+    we hit a non-standard transmitter in the live Ibiza capture, this
+    cross-check was the thing that proved parse_ais was reading the
+    bits correctly and the weirdness was in the signal, not the code.
+    """
+
+    pyais = pytest.importorskip('pyais')
+
+    @staticmethod
+    def _payload_to_aivdm(data: bytes, n_bits: int) -> str:
+        """Convert an MSB-first payload byte sequence to a one-fragment
+        !AIVDM sentence with correct 6-bit ASCII armor and NMEA checksum.
+        Mirrors the AIS NMEA-0183 encoding used by every AIS feeder."""
+        bits = []
+        for i in range(n_bits):
+            bits.append((data[i >> 3] >> (7 - (i & 7))) & 1)
+        pad = (6 - len(bits) % 6) % 6
+        if pad:
+            bits += [0] * pad
+        s = ''
+        for i in range(0, len(bits), 6):
+            v = 0
+            for j in range(6):
+                v = (v << 1) | bits[i + j]
+            s += chr(v + 48 if v < 40 else v + 56)
+        body = f'!AIVDM,1,1,,A,{s},{pad}'
+        cs   = 0
+        for c in body[1:]:
+            cs ^= ord(c)
+        return f'{body}*{cs:02X}'
+
+    def _build_type1(self, mmsi, lat_deg, lon_deg, sog, cog, heading):
+        lat_i = int(round(lat_deg * 600_000)) & ((1 << 27) - 1)
+        lon_i = int(round(lon_deg * 600_000)) & ((1 << 28) - 1)
+        fields = [
+            (1, 6), (0, 2), (mmsi, 30), (0, 4), (0, 8),
+            (int(sog * 10), 10), (0, 1),
+            (lon_i, 28), (lat_i, 27),
+            (int(cog * 10), 12), (heading, 9),
+            (0, 6), (0, 2), (0, 3), (0, 1), (0, 19),
+        ]
+        return _pack_bits(fields)
+
+    def test_type1_fields_agree_with_pyais(self):
+        from pyais import decode as pyais_decode
+        payload  = self._build_type1(
+            mmsi=227_006_760, lat_deg=48.580217, lon_deg=-3.980950,
+            sog=11.1, cog=125.0, heading=125,
+        )
+        mine     = parse_ais(payload)
+        aivdm    = self._payload_to_aivdm(payload, 168)
+        theirs   = pyais_decode(aivdm)
+        assert mine['mmsi']    == theirs.mmsi
+        assert mine['type']    == theirs.msg_type
+        assert mine['sog']     == pytest.approx(theirs.speed, abs=0.1)
+        assert mine['cog']     == pytest.approx(theirs.course, abs=0.1)
+        assert mine['lat']     == pytest.approx(theirs.lat, abs=1 / 600_000)
+        assert mine['lon']     == pytest.approx(theirs.lon, abs=1 / 600_000)
+        assert mine['heading'] == theirs.heading
+
+    def test_heading_not_available_bits_agree(self):
+        """Heading 511 is the spec's 'not available' sentinel.  pyais
+        surfaces the raw integer (511); we normalise to None.  Both
+        read the same raw bits — only the semantic layer differs."""
+        from pyais import decode as pyais_decode
+        payload  = self._build_type1(
+            mmsi=265_000_001, lat_deg=59.3, lon_deg=18.0,
+            sog=0.0, cog=0.0, heading=511,
+        )
+        mine     = parse_ais(payload)
+        aivdm    = self._payload_to_aivdm(payload, 168)
+        theirs   = pyais_decode(aivdm)
+        # Design choice disagreement — not a correctness issue:
+        assert mine['heading'] is None
+        assert theirs.heading == 511
+
+
 class TestCrcKey:
     def test_short_input_returns_zero(self):
         assert _crc_key(b'') == 0
