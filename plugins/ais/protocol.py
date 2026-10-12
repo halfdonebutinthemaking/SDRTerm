@@ -71,74 +71,103 @@ def gmsk_demod(baseband: np.ndarray, sps: int,
                prev_iq: complex | None = None,
                sym_offset: int = 0,
                filter_state: np.ndarray | None = None,
+               mu: float = 0.0,
+               prev_soft: float = 0.0,
                bt: float = 0.4,
-               ) -> tuple[list[int], complex, int, np.ndarray]:
+               mm_gain: float = 0.01,
+               ) -> tuple[list[int], complex, int, np.ndarray, float, float]:
     """
-    Demodulate GMSK baseband to raw NRZI bits.
+    Demodulate GMSK baseband to raw NRZI bits with Mueller-Müller
+    symbol-timing recovery.
 
     `baseband` must already be centred near DC and resampled so that
     `sps` samples span exactly one bit.  Returns a tuple
-    `(bits, new_prev_iq, new_sym_offset, new_filter_state)` where
+    `(bits, new_prev_iq, new_sym_offset, new_filter_state, new_mu,
+    new_prev_soft)` where the first four are the same cross-chunk
+    continuity state as before, plus:
 
-      * `bits` is the per-bit hard decisions, positive instantaneous
-        frequency → 1.  Still NRZI-encoded; feed through `nrzi_decode`.
-      * `new_prev_iq` is the last complex sample of this chunk's
-        baseband — pass it back as `prev_iq` on the next call so the
-        frequency discriminator stays continuous across chunk
-        boundaries (AIS slots are 26.67 ms but the main-loop IQ
-        chunks are ~16 ms, so every real burst spans at least one
-        boundary).
-      * `new_sym_offset` is the starting sample for the bit-centre
-        slice on the next chunk — carries fractional-sample timing
-        across chunks since `resample_poly` output length isn't
-        always a multiple of `sps`.
-      * `new_filter_state` is the last `len(kernel) - 1` samples of
-        the discriminator output; the next call prepends it before
-        convolution so the Gaussian lowpass has proper history
-        across chunk edges (without this, the first few bits of every
-        chunk convolve against zero-padding and bias toward 0).
+      * `new_mu` is the floating-point sub-sample timing offset
+        tracked by the Mueller-Müller TED — the error-driven correction
+        on top of the integer `sym_offset`.  Carried forward so the
+        timing loop stays locked across chunks instead of resetting
+        every ~16 ms.
+      * `new_prev_soft` is the last matched-filter sample used as the
+        "previous symbol" seed for the next chunk's first M&M update.
+
+    How the TED works:
+
+        error = (y[n-1] - y[n+1]) * sign(y[n])
+
+    with y[n] the matched-filter output at bit centre.  Positive error
+    means the current sample is TOO LATE and timing should retard;
+    negative means too early.  We integrate the error at gain `mm_gain`
+    (0.01 is a conservative start — fast enough to lock on AIS's 24-bit
+    preamble, slow enough not to be rattled by noise mid-frame) and
+    quantise to integer sample steps.
 
     First-call usage: pass `prev_iq=None`, `sym_offset=sps // 2`,
-    `filter_state=None`.  `bt` is the transmitter's BT product;
-    AIS and most GMSK systems use 0.4.
+    `filter_state=None`, `mu=0.0`, `prev_soft=0.0`.
     """
     if len(baseband) < 2:
         empty = np.zeros(0, dtype=np.float32)
-        return [], prev_iq, sym_offset, filter_state if filter_state is not None else empty
+        return ([], prev_iq, sym_offset,
+                filter_state if filter_state is not None else empty,
+                mu, prev_soft)
 
-    # Carry the previous chunk's last complex sample into the
-    # discriminator so the per-sample phase diff is continuous.
+    # ── frequency discriminator with cross-chunk continuity ─────────
     if prev_iq is not None:
         baseband = np.concatenate([[prev_iq], baseband])
     new_prev_iq = complex(baseband[-1])
 
     phi = np.angle(baseband[1:] * np.conj(baseband[:-1])).astype(np.float32)
 
-    kernel  = gaussian_pulse_response(bt, sps)
+    # ── Gaussian matched filter with cross-chunk history ────────────
+    kernel      = gaussian_pulse_response(bt, sps)
     kernel_tail = len(kernel) - 1
-
-    # Prepend the previous chunk's filter history (last kernel_tail
-    # unfiltered samples) so the convolution's 'valid' output starts
-    # exactly where this chunk's first new discriminator sample lives.
     if filter_state is None:
         filter_state = np.zeros(kernel_tail, dtype=np.float32)
     history = filter_state
     stream  = np.concatenate([history, phi]).astype(np.float32)
-
-    # 'valid' convolution: output length = len(stream) - len(kernel) + 1
-    # which equals len(phi) — one filtered sample per input phi sample.
     smoothed = np.convolve(stream, kernel, mode='valid')
+    new_filter_state = (phi[-kernel_tail:].copy() if len(phi) >= kernel_tail
+                       else np.concatenate([history[-(kernel_tail - len(phi)):], phi]))
 
-    sliced = smoothed[sym_offset::sps]
-
+    # ── Mueller-Müller timing recovery + bit slicing ────────────────
+    # The sampling pointer is `sym_offset + mu`, incremented by `sps`
+    # each symbol.  M&M nudges `mu` by `-mm_gain * error`, which is
+    # quantised when it rolls past ±0.5 of a sample.
+    bits = []
     n_out = len(smoothed)
-    new_sym_offset = (sps - (n_out - sym_offset) % sps) % sps
+    pos   = float(sym_offset) + mu
+    y_prev = prev_soft
+    while True:
+        idx = int(round(pos))
+        if idx >= n_out:
+            break
+        y = float(smoothed[idx])
+        # Decide early so we can use sign(y) for the TED.
+        bits.append(1 if y > 0 else 0)
+        # Need the NEXT symbol sample to compute the M&M error for THIS
+        # one.  Peek ahead; if we can't, don't update timing this chunk.
+        idx_next = int(round(pos + sps))
+        if idx_next < n_out:
+            y_next = float(smoothed[idx_next])
+            err    = (y_prev - y_next) * (1.0 if y > 0 else -1.0)
+            mu    -= mm_gain * err
+        y_prev = y
+        pos   += sps
 
-    new_filter_state = phi[-kernel_tail:].copy() if len(phi) >= kernel_tail \
-                       else np.concatenate([history[-(kernel_tail - len(phi)):], phi])
+    # Convert the resulting float pos back to (sym_offset, mu) for the
+    # next chunk.  Keep sym_offset in [0, sps) and mu in (-0.5, 0.5].
+    pos_mod = pos - n_out
+    new_sym_offset = int(round(pos_mod)) % sps
+    new_mu         = pos_mod - int(round(pos_mod))
+    # Clamp mu to a sane range in case the loop ran away on noise.
+    if abs(new_mu) > 0.5:
+        new_mu = max(-0.5, min(0.5, new_mu))
 
-    bits = [1 if v > 0 else 0 for v in sliced]
-    return bits, new_prev_iq, new_sym_offset, new_filter_state
+    return (bits, new_prev_iq, new_sym_offset, new_filter_state,
+            new_mu, float(y_prev))
 
 
 # ── NRZI ──────────────────────────────────────────────────────────────────────
@@ -363,24 +392,96 @@ def _signed(value: int, width: int) -> int:
     return value
 
 
+# ── Validity-normalising decoders for individual fields ─────────────────────
+#
+# Spec-defined "not available" sentinels per ITU-R M.1371 — surface them as
+# None so a browser/UI reader can distinguish "unknown" from an actual value.
+
+def _mmsi_class(mmsi: int) -> str:
+    """Classify an MMSI per ITU-R M.1371 § 3.1.1 / Annex 1.  Returns a
+    short tag the UI can show next to the number — useful for spotting
+    SARTs, AtoNs, and other non-ship transmissions, and for flagging
+    values that don't match any standard range (which happens with
+    test devices, the occasional defective transponder, and whatever
+    the Ibiza coast was broadcasting in the live diagnostic).
+
+    Standard MIDs (country prefixes) run 201-775; anything with a MID
+    outside that range in a position-sensitive slot is non-standard
+    even when the overall format is otherwise plausible.
+    """
+    if not 0 <= mmsi <= 999_999_999:
+        return 'non-standard'
+    s = str(mmsi).zfill(9)
+
+    def _valid_mid(three_digits: str) -> bool:
+        try:
+            return 201 <= int(three_digits) <= 775
+        except ValueError:
+            return False
+
+    if s.startswith('00'):
+        # Coast station: 00 + MID (3) + station (4).  Flag bad MIDs.
+        return 'coast-station' if _valid_mid(s[2:5]) else 'non-standard'
+    if s.startswith('0'):
+        # Group of ships: 0 + MID (3) + group (5).  Flag bad MIDs.
+        return 'group-of-ships' if _valid_mid(s[1:4]) else 'non-standard'
+    if s[:3] == '111':          return 'sar-aircraft'
+    if s[:3] == '970':          return 'sart'
+    if s[:3] == '972':          return 'mob'
+    if s[:3] == '974':          return 'epirb'
+    if s[:3] == '982':          return 'craft-identifier'
+    if s[:2] == '99':           return 'aton'
+    if s[0] in '2345678' and _valid_mid(s[:3]):
+        return 'ship'
+    return 'non-standard'
+
+
+def _heading_or_none(raw: int) -> int | None:
+    """9-bit True Heading field: valid 0-359 or 511 = N/A.  Return the
+    raw value when valid, None for the N/A sentinel OR anything in the
+    reserved 360-510 range (shouldn't be transmitted per spec; often
+    comes from a defective transmitter or a decode error)."""
+    if 0 <= raw <= 359:
+        return raw
+    return None
+
+
+def _cog_or_none(raw: int) -> float | None:
+    """12-bit COG: valid 0..3599 (0.0°..359.9°), 3600 = N/A."""
+    if raw == 3600:
+        return None
+    if 0 <= raw <= 3599:
+        return raw / 10.0
+    return None
+
+
+def _sog_or_none(raw: int) -> float | None:
+    """10-bit SOG: 0..1022 valid (0.0..102.2 kt), 1023 = N/A."""
+    if raw == 1023:
+        return None
+    return raw / 10.0
+
+
 # ── Position-report parser (Type 1 / 2 / 3) ─────────────────────────────────
 #
 # ITU-R M.1371-5 Table 44.  168-bit payload.
 
 def _parse_position_report(data: bytes) -> dict:
     """Decode a Class A position report (message types 1, 2, 3)."""
+    mmsi = _bits(data, 8, 30)
     return {
         'type':      _bits(data,   0,  6),
         'repeat':    _bits(data,   6,  2),
-        'mmsi':      _bits(data,   8, 30),
+        'mmsi':      mmsi,
+        'mmsi_class': _mmsi_class(mmsi),
         'nav_status': _bits(data,  38,  4),
         'rot_raw':   _signed(_bits(data, 42, 8), 8),
-        'sog':       _bits(data,  50, 10) / 10.0,     # knots
+        'sog':       _sog_or_none(_bits(data, 50, 10)),
         'pos_acc':   _bits(data,  60,  1),
         'lon':       _signed(_bits(data, 61, 28), 28) / 600_000.0,  # degrees
         'lat':       _signed(_bits(data, 89, 27), 27) / 600_000.0,
-        'cog':       _bits(data, 116, 12) / 10.0,     # degrees
-        'heading':   _bits(data, 128,  9),            # 511 = not available
+        'cog':       _cog_or_none(_bits(data, 116, 12)),
+        'heading':   _heading_or_none(_bits(data, 128, 9)),
         'timestamp': _bits(data, 137,  6),            # UTC second
     }
 
@@ -390,17 +491,19 @@ def _parse_position_report(data: bytes) -> dict:
 # ITU-R M.1371-5 Table 51.  168-bit payload.
 
 def _parse_class_b(data: bytes) -> dict:
+    mmsi = _bits(data, 8, 30)
     return {
         'type':      _bits(data,   0,  6),
         'repeat':    _bits(data,   6,  2),
-        'mmsi':      _bits(data,   8, 30),
-        'sog':       _bits(data,  46, 10) / 10.0,
+        'mmsi':      mmsi,
+        'mmsi_class': _mmsi_class(mmsi),
+        'sog':       _sog_or_none(_bits(data, 46, 10)),
         'pos_acc':   _bits(data,  56,  1),
         'lon':       _signed(_bits(data, 57, 28), 28) / 600_000.0,
         'lat':       _signed(_bits(data, 85, 27), 27) / 600_000.0,
-        'cog':       _bits(data, 112, 12) / 10.0,
-        'heading':   _bits(data, 124,  9),
-        'timestamp': _bits(data, 133,  6),
+        'cog':       _cog_or_none(_bits(data, 112, 12)),
+        'heading':   _heading_or_none(_bits(data, 124, 9)),
+        'timestamp': _bits(data, 133, 6),
     }
 
 

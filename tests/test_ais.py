@@ -23,6 +23,7 @@ from plugins.ais.protocol import (
     crc16_ccitt, hdlc_frames,
     ais_payload_from_hdlc, parse_ais,
     _bits, _signed,                      # internal — ok to test here
+    _mmsi_class, _heading_or_none, _cog_or_none, _sog_or_none,
 )
 from plugins.ais.ais import AisDecoder, _crc_key
 
@@ -356,7 +357,7 @@ class TestGmskRoundTrip:
         sps      = 8
         baseband = self._build_burst(payload, sps)
 
-        bits, _, _, _ = gmsk_demod(
+        bits, *_ = gmsk_demod(
             baseband, sps, prev_iq=None, sym_offset=sps // 2, filter_state=None,
         )
         decoded = nrzi_decode(bits)
@@ -379,15 +380,17 @@ class TestGmskRoundTrip:
         prev_iq      = None
         sym_offset   = sps // 2
         filter_state = None
+        mu           = 0.0
+        prev_soft    = 0.0
         wire_bits    = []
 
         for start in range(0, len(baseband), chunk_size):
             chunk = baseband[start:start + chunk_size]
             if len(chunk) < 2:
                 continue
-            bits, prev_iq, sym_offset, filter_state = gmsk_demod(
+            bits, prev_iq, sym_offset, filter_state, mu, prev_soft = gmsk_demod(
                 chunk, sps, prev_iq=prev_iq, sym_offset=sym_offset,
-                filter_state=filter_state,
+                filter_state=filter_state, mu=mu, prev_soft=prev_soft,
             )
             wire_bits.extend(bits)
 
@@ -406,22 +409,25 @@ class TestGmskRoundTrip:
         sps      = 8
         baseband = self._build_burst(payload, sps)
 
-        full_bits, _, _, _ = gmsk_demod(
+        full_bits, *_ = gmsk_demod(
             baseband, sps, prev_iq=None, sym_offset=sps // 2, filter_state=None,
+            mu=0.0, prev_soft=0.0,
         )
 
         chunk_size   = 123         # tiny, nothing-special size
         prev_iq      = None
         sym_offset   = sps // 2
         filter_state = None
+        mu           = 0.0
+        prev_soft    = 0.0
         split_bits   = []
         for start in range(0, len(baseband), chunk_size):
             chunk = baseband[start:start + chunk_size]
             if len(chunk) < 2:
                 continue
-            bits, prev_iq, sym_offset, filter_state = gmsk_demod(
+            bits, prev_iq, sym_offset, filter_state, mu, prev_soft = gmsk_demod(
                 chunk, sps, prev_iq=prev_iq, sym_offset=sym_offset,
-                filter_state=filter_state,
+                filter_state=filter_state, mu=mu, prev_soft=prev_soft,
             )
             split_bits.extend(bits)
 
@@ -505,6 +511,68 @@ class TestAisDecoderPersistence:
             'not-a-dict',
         ]})
         assert len(d._channels) == 1
+
+
+class TestFieldValidity:
+    """Spec-defined 'not available' sentinels get surfaced as None so a UI
+    can distinguish 'unknown' from a numeric value, and the specifically-
+    out-of-range values in reserved windows are flagged too."""
+
+    @pytest.mark.parametrize('raw,expected', [
+        (0,   0),
+        (359, 359),
+        (360, None),       # reserved
+        (454, None),       # reserved (seen in a live Ibiza capture)
+        (510, None),       # reserved
+        (511, None),       # spec sentinel: "not available"
+    ])
+    def test_heading(self, raw, expected):
+        assert _heading_or_none(raw) == expected
+
+    @pytest.mark.parametrize('raw,expected', [
+        (0,    0.0),
+        (1799, 179.9),
+        (3599, 359.9),
+        (3600, None),      # spec sentinel
+    ])
+    def test_cog(self, raw, expected):
+        assert _cog_or_none(raw) == expected
+
+    @pytest.mark.parametrize('raw,expected', [
+        (0,    0.0),
+        (344,  34.4),
+        (1022, 102.2),
+        (1023, None),      # spec sentinel
+    ])
+    def test_sog(self, raw, expected):
+        assert _sog_or_none(raw) == expected
+
+
+class TestMmsiClass:
+    """Thin-but-useful tagging per ITU-R M.1371 § 3.1.1 / Annex 1 so the
+    UI can tell a cargo ship apart from a SART at a glance, and short /
+    out-of-standard values are explicitly flagged."""
+
+    @pytest.mark.parametrize('mmsi,expected', [
+        (227_006_760, 'ship'),            # France MID 227
+        (265_619_000, 'ship'),            # Sweden MID 265
+        (111_227_001, 'sar-aircraft'),    # 111 = SAR
+        (970_123_456, 'sart'),            # 970 = SART
+        (972_123_456, 'mob'),
+        (974_123_456, 'epirb'),
+        (982_123_456, 'craft-identifier'),
+        (993_123_456, 'aton'),            # 99 = AtoN
+        # 006597386 → MID 659.  The 201-775 range covers all assigned MIDs
+        # per ITU-R but has unassigned gaps; a formally-valid "coast-station"
+        # tag doesn't guarantee the station is in marinetraffic's DB.  (Seen
+        # in the user's live Ibiza decode.)
+        (6_597_386, 'coast-station'),
+        (3_669_705, 'coast-station'),     # 003669705 → MID 366 = USA
+        (287_951,   'non-standard'),      # 000287951 → MID 028, out of range
+        (0, 'non-standard'),
+    ])
+    def test_classification(self, mmsi, expected):
+        assert _mmsi_class(mmsi) == expected
 
 
 class TestCrcKey:
