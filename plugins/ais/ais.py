@@ -67,7 +67,7 @@ class _ChannelState:
     will corrupt the frame unless state is carried over."""
     __slots__ = ('name', 'freq_hz', 'bit_buf',
                  'carrier_phase', 'prev_iq', 'sym_offset',
-                 'filter_state', 'nrzi_last')
+                 'filter_state', 'mu', 'prev_soft', 'nrzi_last')
 
     def __init__(self, name, freq_hz):
         self.name          = name
@@ -77,6 +77,8 @@ class _ChannelState:
         self.prev_iq       = None                     # last baseband sample
         self.sym_offset    = _TARGET_SPS // 2         # centre of the first bit
         self.filter_state  = None                     # Gaussian MF edge history
+        self.mu            = 0.0                      # M&M sub-sample timing offset
+        self.prev_soft     = 0.0                      # last matched-filter sample
         self.nrzi_last     = None                     # last wire bit for NRZI continuity
 
     def reset(self):
@@ -85,6 +87,8 @@ class _ChannelState:
         self.prev_iq       = None
         self.sym_offset    = _TARGET_SPS // 2
         self.filter_state  = None
+        self.mu            = 0.0
+        self.prev_soft     = 0.0
         self.nrzi_last     = None
 
 
@@ -188,13 +192,18 @@ class AisDecoder(Decoder):
         except Exception:
             return
 
-        # GMSK demod → wire-level NRZI bits, with cross-chunk continuity
-        # for the discriminator history (prev_iq), bit-centre slice offset
-        # (sym_offset), and Gaussian matched-filter history (filter_state).
-        raw, ch.prev_iq, ch.sym_offset, ch.filter_state = gmsk_demod(
+        # GMSK demod → wire-level NRZI bits.  Six items of cross-chunk
+        # state: discriminator history (prev_iq), integer symbol offset
+        # (sym_offset), Gaussian MF history (filter_state), M&M timing
+        # loop sub-sample offset (mu), M&M "previous symbol" seed
+        # (prev_soft).  All kept on _ChannelState so each channel's
+        # timing loop stays locked independently.
+        (raw, ch.prev_iq, ch.sym_offset, ch.filter_state,
+         ch.mu, ch.prev_soft) = gmsk_demod(
             resampled, _TARGET_SPS,
             prev_iq=ch.prev_iq, sym_offset=ch.sym_offset,
             filter_state=ch.filter_state,
+            mu=ch.mu, prev_soft=ch.prev_soft,
         )
         if not raw:
             return
